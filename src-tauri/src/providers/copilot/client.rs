@@ -33,7 +33,7 @@ impl CopilotClient {
         api_base_url: &str,
         timeout: Duration,
     ) -> Result<Self, CopilotError> {
-        let client = Client::builder()
+        let client = crate::http_client::blocking_client_builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(timeout)
             .build()

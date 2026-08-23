@@ -78,12 +78,12 @@ impl AntigravityClient {
         remote_timeout: std::time::Duration,
     ) -> Result<Self, AntigravityError> {
         Ok(Self {
-            local: Client::builder()
+            local: crate::http_client::blocking_client_builder()
                 .danger_accept_invalid_certs(true)
                 .timeout(std::time::Duration::from_secs(5))
                 .build()
                 .map_err(|_| AntigravityError::Unavailable)?,
-            remote: Client::builder()
+            remote: crate::http_client::blocking_client_builder()
                 .timeout(remote_timeout)
                 .build()
                 .map_err(|_| AntigravityError::Unavailable)?,

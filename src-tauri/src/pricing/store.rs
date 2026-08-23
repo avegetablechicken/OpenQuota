@@ -107,7 +107,7 @@ struct ReqwestPricingHttpClient {
 impl ReqwestPricingHttpClient {
     fn new() -> Result<Self, PricingStoreError> {
         Ok(Self {
-            client: Client::builder()
+            client: crate::http_client::blocking_client_builder()
                 .timeout(Duration::from_secs(30))
                 .user_agent("OpenQuota pricing refresh")
                 .build()?,

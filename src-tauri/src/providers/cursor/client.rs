@@ -71,7 +71,7 @@ impl CursorClient {
     }
 
     pub(super) fn with_endpoints(endpoints: Endpoints) -> Result<Self, CursorError> {
-        let client = Client::builder()
+        let client = crate::http_client::blocking_client_builder()
             .connect_timeout(Duration::from_secs(8))
             .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
             .build()
