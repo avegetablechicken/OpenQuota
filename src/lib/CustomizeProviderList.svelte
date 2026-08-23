@@ -1,11 +1,20 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { flip } from 'svelte/animate';
+  import { getSub2ApiConfigState } from './backend';
   import type { AppSettings, ProviderLayout } from './types';
   import type { ProviderCatalogIndex } from './metrics';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
+  import { providerFamily } from './providerIconPaths';
+  import {
+    rememberSub2ApiUpstream,
+    sub2ApiDisplayName,
+    sub2ApiEndpoints,
+    sub2ApiUpstreams,
+  } from './sub2ApiUpstreams';
 
   interface Props {
     settings: AppSettings;
@@ -28,6 +37,9 @@
     reducedMotion,
   }: Props = $props();
   const providerDisplayName = (id: string) => catalog.displayName(id, settings.providerNames);
+  function providerListName(id: string) {
+    return sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ?? providerDisplayName(id);
+  }
   const visibleProviders = $derived(
     settings.providers.filter(
       (provider) =>
@@ -37,6 +49,21 @@
           provider.detected),
     ),
   );
+  const repeatedSub2ApiUpstreams = $derived.by(() => {
+    const upstreams = visibleProviders.flatMap((provider) => {
+      if (providerFamily(provider.id) !== 'sub2api' || !$sub2ApiEndpoints[provider.id]) return [];
+      const upstream = $sub2ApiUpstreams[provider.id];
+      return upstream ? [upstream] : [];
+    });
+    return upstreams.filter((upstream, index) => upstreams.indexOf(upstream) !== index);
+  });
+  function providerListSubtitle(provider: ProviderLayout) {
+    const upstream = $sub2ApiUpstreams[provider.id];
+    if (upstream && repeatedSub2ApiUpstreams.includes(upstream)) {
+      return $sub2ApiEndpoints[provider.id] ?? `${provider.metrics.length} metrics`;
+    }
+    return `${provider.metrics.length} metrics`;
+  }
   const addableProvider = $derived(
     settings.providers.find(
       (provider) =>
@@ -72,6 +99,18 @@
       providers: [...enabled, ...settings.providers.filter((provider) => !provider.enabled)],
     });
   }
+  onMount(() => {
+    for (const provider of visibleProviders) {
+      if (providerFamily(provider.id) !== 'sub2api' || $sub2ApiEndpoints[provider.id]) continue;
+      void getSub2ApiConfigState(provider.id)
+        .then((state) => {
+          if (state.configured) {
+            rememberSub2ApiUpstream(provider.id, state.upstream, state.baseUrl);
+          }
+        })
+        .catch(() => undefined);
+    }
+  });
 </script>
 
 <section class="screen customize-screen" aria-label="Customize">
@@ -86,7 +125,7 @@
         use:pointerReorder={{
           id: provider.id,
           group: 'customize-providers',
-          label: providerDisplayName(provider.id),
+          label: providerListName(provider.id),
           disabled: !provider.enabled,
           gripOnly: true,
           touchGripOnly: true,
@@ -102,15 +141,14 @@
           data-reorder-touch-handle
           role="button"
           tabindex={provider.enabled ? 0 : undefined}
-          aria-label={`Move ${providerDisplayName(provider.id)}`}
+          aria-label={`Move ${providerListName(provider.id)}`}
           aria-describedby="reorder-instructions"
           aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
           ><Icon name="grip-lines" size={16} strokeWidth={2} /></span
         >
         <button class="provider-list-main" type="button" onclick={() => onOpen(provider.id)}
           ><ProviderIcon providerId={provider.id} /><span
-            ><b>{providerDisplayName(provider.id)}</b><small
-              >{provider.metrics.length} metrics</small
+            ><b>{providerListName(provider.id)}</b><small>{providerListSubtitle(provider)}</small
             ></span
           ></button
         >
@@ -236,7 +274,15 @@
     .provider-list-main > span {
       display: flex;
       min-width: 0;
+      flex: 1;
       flex-direction: column;
+    }
+
+    .provider-list-main b,
+    .provider-list-main small {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .provider-list-main b {

@@ -13,6 +13,7 @@
   import type { SpendProjection } from './totalSpend';
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
+  import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
   import type {
     AppSettings,
     MetricLayout,
@@ -78,7 +79,9 @@
     onOpenUpdatePage,
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
-  const providerDisplayName = (id: string) => catalog.displayName(id, settings.providerNames);
+  const providerDisplayName = (id: string) =>
+    sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
+    catalog.displayName(id, settings.providerNames);
   const providerSupportsSpend = (id: string) => catalog.supportsSpend(id);
   const emptyUsage: UsageHistory = {
     today: null,
