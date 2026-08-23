@@ -128,14 +128,41 @@ pub(crate) fn map_sub2api_usage(body: &Value) -> Result<ClaudeMappedUsage, Claud
         .get("subscription_tier")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let mut normalized = body.clone();
+    if sub2api_five_hour_is_empty(body) {
+        if let Some(object) = normalized.as_object_mut() {
+            object.remove("five_hour");
+        }
+    }
     map_usage(
         StatusCode::OK,
-        body,
+        &normalized,
         &ClaudeOAuth {
             subscription_type,
             ..ClaudeOAuth::default()
         },
     )
+}
+
+fn sub2api_five_hour_is_empty(body: &Value) -> bool {
+    let Some(window) = body.get("five_hour").and_then(Value::as_object) else {
+        return false;
+    };
+    let utilization = window.get("utilization").and_then(number).unwrap_or(0.0);
+    let remaining = window
+        .get("remaining_seconds")
+        .and_then(number)
+        .unwrap_or(0.0);
+    let has_reset = window.get("resets_at").and_then(reset_date).is_some();
+    let has_activity = window
+        .get("window_stats")
+        .and_then(Value::as_object)
+        .is_some_and(|stats| stats.values().filter_map(number).any(|value| value > 0.0))
+        || window
+            .get("used_requests")
+            .and_then(number)
+            .is_some_and(|value| value > 0.0);
+    utilization <= 0.0 && remaining <= 0.0 && !has_reset && !has_activity
 }
 
 fn append_window(
@@ -242,7 +269,7 @@ mod tests {
     use reqwest::StatusCode;
     use serde_json::Value;
 
-    use super::map_usage;
+    use super::{map_sub2api_usage, map_usage};
     use crate::providers::claude::auth::ClaudeOAuth;
 
     #[test]
@@ -298,5 +325,51 @@ mod tests {
             mapped.quotas[0].resets_at.unwrap().to_rfc3339(),
             "2099-06-01T12:00:00.123456+00:00"
         );
+    }
+
+    #[test]
+    fn sub2api_omits_a_synthetic_empty_session_window() {
+        let body = serde_json::json!({
+            "five_hour": {
+                "utilization": 0,
+                "resets_at": null,
+                "remaining_seconds": 0,
+                "window_stats": {
+                    "requests": 0,
+                    "tokens": 0,
+                    "cost": 0
+                }
+            },
+            "seven_day": {
+                "utilization": 8,
+                "resets_at": "2099-06-08T12:00:00Z"
+            }
+        });
+
+        let mapped = map_sub2api_usage(&body).unwrap();
+        assert_eq!(
+            mapped
+                .quotas
+                .iter()
+                .map(|quota| quota.id.as_str())
+                .collect::<Vec<_>>(),
+            ["weekly"]
+        );
+    }
+
+    #[test]
+    fn sub2api_keeps_a_zero_session_with_a_real_reset() {
+        let body = serde_json::json!({
+            "five_hour": {
+                "utilization": 0,
+                "resets_at": "2099-06-01T12:00:00Z",
+                "remaining_seconds": 18000
+            }
+        });
+
+        let mapped = map_sub2api_usage(&body).unwrap();
+        assert_eq!(mapped.quotas[0].id, "session");
+        assert_eq!(mapped.quotas[0].used_percent, 0.0);
+        assert!(mapped.quotas[0].resets_at.is_some());
     }
 }
