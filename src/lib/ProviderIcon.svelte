@@ -26,7 +26,7 @@
 
 <svg class="provider-icon" width={size} height={size} {viewBox} fill="none" aria-hidden="true">
   {#if composite}
-    <g transform="translate(4 4) scale(3.55)">
+    <g data-icon-layer="sub2api" transform="scale(2.85)">
       <path
         d={path}
         fill="none"
@@ -36,8 +36,15 @@
         stroke-linejoin="round"
       />
     </g>
-    <circle cx="76" cy="76" r="21" fill="var(--card)" stroke="var(--separator)" stroke-width="4" />
-    <g transform="translate(60 60) scale(.32)">
+    <circle
+      cx="72"
+      cy="72"
+      r="28"
+      fill="var(--card)"
+      stroke="var(--separator)"
+      stroke-width="3.5"
+    />
+    <g data-icon-layer="upstream" transform="translate(44 44) scale(.56)">
       <path d={upstreamPath} fill={upstreamColor ?? 'currentColor'} />
     </g>
   {:else}
