@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Utc;
+use chrono::{Days, Local, NaiveDate, Utc};
 use reqwest::{blocking::Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,7 +17,8 @@ use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::models::{
-    MetricDefinition, MetricSection, ProviderDefinition, ProviderSnapshot, UsageHistory,
+    DailyUsage, MetricDefinition, MetricSection, ModelUsageBreakdown, ModelUsageEntry,
+    ProviderDefinition, ProviderSnapshot, UsageHistory, UsagePeriod, UsagePeriodSelection,
 };
 use crate::storage::Storage;
 
@@ -82,6 +83,7 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
                 false,
                 "F",
             ),
+            MetricDefinition::trend(&metric_id("trend")),
             MetricDefinition::quota(
                 &metric_id("spark"),
                 "Spark",
@@ -111,6 +113,27 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
                 false,
                 "R",
                 Some("resets"),
+            ),
+            MetricDefinition::usage(
+                &metric_id("today"),
+                "Today",
+                UsagePeriodSelection::Today,
+                MetricSection::OnDemand,
+                "T",
+            ),
+            MetricDefinition::usage(
+                &metric_id("yesterday"),
+                "Yesterday",
+                UsagePeriodSelection::Yesterday,
+                MetricSection::OnDemand,
+                "Y",
+            ),
+            MetricDefinition::usage(
+                &metric_id("last30"),
+                "Last 30 Days",
+                UsagePeriodSelection::Last30Days,
+                MetricSection::OnDemand,
+                "M",
             ),
         ],
     }
@@ -281,6 +304,48 @@ struct Sub2ApiAccount {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct AccountStats {
+    #[serde(default)]
+    history: Vec<AccountStatsDay>,
+    #[serde(default)]
+    models: Vec<AccountStatsModel>,
+}
+
+#[derive(Deserialize)]
+struct AccountStatsDay {
+    date: String,
+    #[serde(default)]
+    tokens: u64,
+    #[serde(default)]
+    cost: Option<f64>,
+    #[serde(default)]
+    actual_cost: Option<f64>,
+}
+
+impl AccountStatsDay {
+    fn measured_cost(&self) -> Option<f64> {
+        measured_cost(self.actual_cost, self.cost)
+    }
+}
+
+#[derive(Deserialize)]
+struct AccountStatsModel {
+    model: String,
+    #[serde(default)]
+    total_tokens: u64,
+    #[serde(default)]
+    cost: Option<f64>,
+    #[serde(default)]
+    actual_cost: Option<f64>,
+}
+
+impl AccountStatsModel {
+    fn measured_cost(&self) -> Option<f64> {
+        measured_cost(self.actual_cost, self.cost)
+    }
+}
+
 struct LoginToken {
     value: Zeroizing<String>,
     expires_in: u64,
@@ -430,6 +495,30 @@ impl Sub2ApiClient {
             .data
             .filter(Value::is_object)
             .ok_or(Sub2ApiError::InvalidResponse)
+    }
+
+    fn stats(&self, token: &str, account_id: i64) -> Result<AccountStats, Sub2ApiError> {
+        let account_id = account_id.to_string();
+        let mut url = self.endpoint(&["api", "v1", "admin", "accounts", &account_id, "stats"])?;
+        url.query_pairs_mut().append_pair("days", "30");
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .header("Accept", "application/json")
+            .send()
+            .map_err(|error| transport_error("usage statistics", &error))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(status));
+        }
+        let envelope = response
+            .json::<Envelope<AccountStats>>()
+            .map_err(|_| Sub2ApiError::InvalidResponse)?;
+        if envelope.code != 0 {
+            return Err(Sub2ApiError::InvalidResponse);
+        }
+        envelope.data.ok_or(Sub2ApiError::InvalidResponse)
     }
 
     fn endpoint(&self, segments: &[&str]) -> Result<Url, Sub2ApiError> {
@@ -654,7 +743,7 @@ impl Sub2ApiProvider {
                 (mapped.plan, mapped.quotas, mapped.value_metrics)
             }
         };
-        let warnings = (session.account_count > 1)
+        let mut warnings = (session.account_count > 1)
             .then(|| {
                 format!(
                     "Showing {} upstream {}. {} active {} accounts were found.",
@@ -662,7 +751,26 @@ impl Sub2ApiProvider {
                 )
             })
             .into_iter()
-            .collect();
+            .collect::<Vec<_>>();
+        let stats = match client.stats(session.token.as_str(), session.account.id) {
+            Err(Sub2ApiError::Authentication) => {
+                if let Ok(mut cached) = self.session.lock() {
+                    *cached = None;
+                }
+                session = self.connect(config)?;
+                client.stats(session.token.as_str(), session.account.id)
+            }
+            result => result,
+        };
+        let usage = match stats {
+            Ok(stats) => map_stats(stats, Utc::now()),
+            Err(error) => {
+                warnings.push(format!(
+                    "Sub2API server usage statistics are unavailable: {error}"
+                ));
+                UsageHistory::default()
+            }
+        };
         Ok(ProviderSnapshot {
             provider_id: self.provider_id.clone(),
             plan,
@@ -670,7 +778,7 @@ impl Sub2ApiProvider {
             value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage,
             warnings,
             refreshed_at: Utc::now(),
         })
@@ -825,6 +933,123 @@ fn session_scope(config: &StoredConfig) -> String {
     )
 }
 
+fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistory {
+    stats.history.retain(|day| {
+        NaiveDate::parse_from_str(day.date.trim(), "%Y-%m-%d").is_ok()
+            && (day.tokens > 0 || day.measured_cost().is_some_and(|cost| cost > 0.0))
+    });
+    stats
+        .history
+        .sort_by(|left, right| left.date.cmp(&right.date));
+    let today = now.with_timezone(&Local).date_naive();
+    let yesterday = today.checked_sub_days(Days::new(1));
+    let source_note = "From Sub2API server usage logs";
+    let today_period = stats
+        .history
+        .iter()
+        .find(|day| day.date == today.to_string())
+        .and_then(stats_day_period);
+    let yesterday_period = yesterday.and_then(|date| {
+        stats
+            .history
+            .iter()
+            .find(|day| day.date == date.to_string())
+            .and_then(stats_day_period)
+    });
+    let daily = stats
+        .history
+        .iter()
+        .map(|day| DailyUsage {
+            date: day.date.clone(),
+            tokens: day.tokens,
+            estimated_cost_usd: day.measured_cost(),
+            estimate_complete: day.measured_cost().is_some(),
+        })
+        .collect::<Vec<_>>();
+    let total_tokens = stats
+        .history
+        .iter()
+        .fold(0_u64, |total, day| total.saturating_add(day.tokens));
+    let costs = stats
+        .history
+        .iter()
+        .map(AccountStatsDay::measured_cost)
+        .collect::<Option<Vec<_>>>();
+    let model_breakdown = stats_model_breakdown(stats.models, source_note);
+    let last_30_days = (!stats.history.is_empty()).then(|| UsagePeriod {
+        tokens: total_tokens,
+        estimated_cost_usd: costs
+            .as_ref()
+            .map(|values| values.iter().copied().sum::<f64>()),
+        cost_estimated: false,
+        estimate_complete: costs.is_some(),
+        model_breakdown,
+        unknown_models: Vec::new(),
+    });
+
+    UsageHistory {
+        today: today_period,
+        yesterday: yesterday_period,
+        last_30_days,
+        daily,
+        unknown_models: Vec::new(),
+    }
+}
+
+fn stats_day_period(day: &AccountStatsDay) -> Option<UsagePeriod> {
+    (day.tokens > 0 || day.measured_cost().is_some_and(|cost| cost > 0.0)).then(|| UsagePeriod {
+        tokens: day.tokens,
+        estimated_cost_usd: day.measured_cost(),
+        cost_estimated: false,
+        estimate_complete: day.measured_cost().is_some(),
+        model_breakdown: None,
+        unknown_models: Vec::new(),
+    })
+}
+
+fn stats_model_breakdown(
+    models: Vec<AccountStatsModel>,
+    source_note: &str,
+) -> Option<ModelUsageBreakdown> {
+    let mut models = models
+        .into_iter()
+        .filter_map(|model| {
+            let name = model.model.trim().to_owned();
+            if name.is_empty()
+                || (model.total_tokens == 0
+                    && !model.measured_cost().is_some_and(|cost| cost > 0.0))
+            {
+                return None;
+            }
+            Some(ModelUsageEntry {
+                model: name,
+                total_tokens: model.total_tokens,
+                cost_usd: model.measured_cost(),
+                variants: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| {
+        right
+            .cost_usd
+            .partial_cmp(&left.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.total_tokens.cmp(&left.total_tokens))
+            .then_with(|| left.model.cmp(&right.model))
+    });
+    (!models.is_empty()).then(|| ModelUsageBreakdown {
+        models,
+        source_note: source_note.to_owned(),
+    })
+}
+
+fn measured_cost(actual: Option<f64>, standard: Option<f64>) -> Option<f64> {
+    actual
+        .filter(|value| value.is_finite())
+        .or_else(|| standard.filter(|value| value.is_finite()))
+        .map(|value| value.max(0.0))
+}
+
 fn token_expiry(expires_in: u64) -> Instant {
     Instant::now() + Duration::from_secs(expires_in.saturating_sub(60).max(1))
 }
@@ -854,7 +1079,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        definition_for, normalize_base_url, StoredConfig, Sub2ApiClient, Sub2ApiError,
+        definition_for, map_stats, normalize_base_url, StoredConfig, Sub2ApiClient, Sub2ApiError,
         Sub2ApiProvider, Sub2ApiProviders,
     };
     use crate::providers::{
@@ -881,6 +1106,20 @@ mod tests {
       "seven_day_sonnet":{"utilization":8},
       "seven_day_fable":{"utilization":3},
       "subscription_tier":"PRO"
+    }"#;
+
+    const STATS_DATA: &str = r#"{
+      "history":[
+        {"date":"2026-08-22","requests":2,"tokens":1000,"cost":0.5,"actual_cost":0.4,"user_cost":0.6},
+        {"date":"2026-08-23","requests":3,"tokens":2500,"cost":1.5,"actual_cost":1.25,"user_cost":1.7}
+      ],
+      "summary":{"days":31,"actual_days_used":2,"total_cost":1.65,"total_requests":5,"total_tokens":3500},
+      "models":[
+        {"model":"claude-sonnet-5","requests":3,"total_tokens":2500,"cost":1.5,"actual_cost":1.25},
+        {"model":"claude-haiku-4-5","requests":2,"total_tokens":1000,"cost":0.5,"actual_cost":0.4}
+      ],
+      "endpoints":[],
+      "upstream_endpoints":[]
     }"#;
 
     fn serve_sequence(
@@ -932,6 +1171,14 @@ mod tests {
         assert_eq!(definition.id, "sub2api");
         assert_eq!(definition.display_name, "Sub2API");
         assert_eq!(definition.metrics[0].id, "sub2api.session");
+        assert!(definition
+            .metrics
+            .iter()
+            .any(|metric| metric.id == "sub2api.trend"));
+        assert!(definition
+            .metrics
+            .iter()
+            .any(|metric| metric.id == "sub2api.last30"));
         assert!(!definition.fallback_enabled);
     }
 
@@ -1163,6 +1410,101 @@ mod tests {
                 ("fable", 3.0),
             ]
         );
+    }
+
+    #[test]
+    fn stats_endpoint_maps_server_history_and_model_breakdown() {
+        let responses = vec![format!(
+            r#"{{"code":0,"message":"success","data":{STATS_DATA}}}"#
+        )];
+        let (base_url, requests, worker) = serve_sequence(responses);
+        let client = Sub2ApiClient::new(&base_url).unwrap();
+        let stats = client.stats("admin-jwt", 42).unwrap();
+        worker.join().unwrap();
+
+        let request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(request.starts_with("GET /api/v1/admin/accounts/42/stats?days=30 HTTP/1.1"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer admin-jwt"));
+
+        let history = map_stats(stats, Utc.with_ymd_and_hms(2026, 8, 23, 12, 0, 0).unwrap());
+        assert_eq!(history.daily.len(), 2);
+        assert_eq!(history.today.as_ref().unwrap().tokens, 2500);
+        assert_eq!(
+            history.today.as_ref().unwrap().estimated_cost_usd,
+            Some(1.25)
+        );
+        assert!(!history.today.as_ref().unwrap().cost_estimated);
+        assert_eq!(history.yesterday.as_ref().unwrap().tokens, 1000);
+        let last_30 = history.last_30_days.unwrap();
+        assert_eq!(last_30.tokens, 3500);
+        assert_eq!(last_30.estimated_cost_usd, Some(1.65));
+        assert_eq!(
+            last_30
+                .model_breakdown
+                .as_ref()
+                .unwrap()
+                .models
+                .iter()
+                .map(|model| (model.model.as_str(), model.total_tokens))
+                .collect::<Vec<_>>(),
+            [("claude-sonnet-5", 2500), ("claude-haiku-4-5", 1000)]
+        );
+        assert_eq!(
+            last_30.model_breakdown.unwrap().source_note,
+            "From Sub2API server usage logs"
+        );
+    }
+
+    #[test]
+    fn claude_refresh_combines_quota_with_server_usage_history() {
+        let responses = vec![
+            r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
+            r#"{"code":0,"message":"success","data":{"items":[{"id":7,"name":"Claude upstream"}],"total":1,"page":1,"page_size":1,"pages":1}}"#.into(),
+            format!(r#"{{"code":0,"message":"success","data":{CLAUDE_USAGE_DATA}}}"#),
+            format!(r#"{{"code":0,"message":"success","data":{STATS_DATA}}}"#),
+        ];
+        let (base_url, requests, worker) = serve_sequence(responses);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api@2".into(),
+            "Sub2API 2".into(),
+            directory.path().join("sub2api@2.configured"),
+            false,
+        );
+        let config = StoredConfig {
+            base_url,
+            email: "admin@example.com".into(),
+            password: "secret-password".into(),
+            upstream: super::Sub2ApiUpstream::Claude,
+        };
+
+        let snapshot = provider.refresh_snapshot(&config).unwrap();
+        worker.join().unwrap();
+
+        assert_eq!(
+            snapshot
+                .quotas
+                .iter()
+                .map(|quota| quota.id.as_str())
+                .collect::<Vec<_>>(),
+            ["session", "weekly", "sonnet", "fable"]
+        );
+        assert_eq!(snapshot.usage.daily.len(), 2);
+        assert_eq!(snapshot.usage.last_30_days.unwrap().tokens, 3500);
+        let request_paths = (0..4)
+            .map(|_| {
+                requests
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!(request_paths[3].starts_with("GET /api/v1/admin/accounts/7/stats?days=30 HTTP/1.1"));
     }
 
     #[test]
