@@ -101,6 +101,9 @@ fn mac_menu_bar_presentation(
     style: crate::models::MenuBarStyle,
 ) -> MacMenuBarPresentation {
     match style {
+        crate::models::MenuBarStyle::Icon => MacMenuBarPresentation {
+            icon: MacMenuBarIcon::Mark,
+        },
         crate::models::MenuBarStyle::Text => {
             let text_groups = text_groups(groups);
             MacMenuBarPresentation {
@@ -513,6 +516,33 @@ mod tests {
             MacMenuBarPresentation {
                 icon: MacMenuBarIcon::Bars(vec![0.75]),
             }
+        );
+    }
+
+    #[test]
+    fn mac_icon_style_always_uses_the_openquota_mark() {
+        let groups = vec![TrayGroup {
+            provider_id: "codex".into(),
+            metrics: vec![TrayMetric {
+                value: "75%".into(),
+                detail: String::new(),
+                gauge: Some(TrayGauge {
+                    display_fraction: 0.75,
+                    remaining_fraction: 0.75,
+                }),
+            }],
+        }];
+        let mark = MacMenuBarPresentation {
+            icon: MacMenuBarIcon::Mark,
+        };
+
+        assert_eq!(
+            mac_menu_bar_presentation(&groups, crate::models::MenuBarStyle::Icon),
+            mark
+        );
+        assert_eq!(
+            mac_menu_bar_presentation(&[], crate::models::MenuBarStyle::Icon),
+            mark
         );
     }
 

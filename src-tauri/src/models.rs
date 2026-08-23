@@ -597,12 +597,14 @@ pub enum DensityPreference {
     Compact,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum MenuBarStyle {
     Text,
-    #[serde(alias = "icon")]
     Bars,
+    #[default]
+    #[serde(other)]
+    Icon,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -734,7 +736,7 @@ impl Default for AppSettings {
             density: DensityPreference::Default,
             reduce_animations: false,
             window_mode: WindowMode::Popup,
-            menu_bar_style: MenuBarStyle::Text,
+            menu_bar_style: MenuBarStyle::Icon,
             usage_display: UsageDisplay::Left,
             reset_display: ResetDisplay::Countdown,
             time_format: TimeFormatPreference::System,
@@ -804,6 +806,21 @@ mod tests {
     }
 
     #[test]
+    fn menu_bar_icon_is_the_default_and_unknown_styles_fall_back_to_it() {
+        assert_eq!(AppSettings::default().menu_bar_style, MenuBarStyle::Icon);
+
+        let mut missing = serde_json::to_value(AppSettings::default()).unwrap();
+        missing.as_object_mut().unwrap().remove("menuBarStyle");
+        let settings: AppSettings = serde_json::from_value(missing).unwrap();
+        assert_eq!(settings.menu_bar_style, MenuBarStyle::Icon);
+
+        let mut unknown = serde_json::to_value(AppSettings::default()).unwrap();
+        unknown["menuBarStyle"] = serde_json::json!("futureStyle");
+        let settings: AppSettings = serde_json::from_value(unknown).unwrap();
+        assert_eq!(settings.menu_bar_style, MenuBarStyle::Icon);
+    }
+
+    #[test]
     fn unknown_persisted_log_levels_fall_back_to_info() {
         let mut value = serde_json::to_value(AppSettings::default()).unwrap();
         value["logLevel"] = serde_json::json!("trace");
@@ -817,14 +834,6 @@ mod tests {
         value["windowMode"] = serde_json::json!("detached");
         let settings: AppSettings = serde_json::from_value(value).unwrap();
         assert_eq!(settings.window_mode, WindowMode::Popup);
-    }
-
-    #[test]
-    fn legacy_icon_menu_bar_style_maps_to_bars() {
-        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
-        value["menuBarStyle"] = serde_json::json!("icon");
-        let settings: AppSettings = serde_json::from_value(value).unwrap();
-        assert_eq!(settings.menu_bar_style, MenuBarStyle::Bars);
     }
 
     #[test]

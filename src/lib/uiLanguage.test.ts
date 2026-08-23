@@ -74,6 +74,7 @@ describe('native UI language contract', () => {
       expect(settings).toContain(label);
     }
     expect(settings).toContain("{ value: 'system', label: 'Auto' }");
+    expect(settings).toContain("{ value: 'icon', label: 'OpenQuota' }");
     expect(settings).toContain("{ value: 'twelveHour', label: '12-hour' }");
     expect(settings).toContain("{ value: 'twentyFourHour', label: '24-hour' }");
     expect(settings).not.toContain('<h2>Startup</h2>');
