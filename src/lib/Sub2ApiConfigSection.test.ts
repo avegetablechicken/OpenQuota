@@ -9,20 +9,21 @@ describe('Sub2ApiConfigSection', () => {
   beforeEach(() => {
     mocks.invoke.mockReset().mockImplementation((command: string) => {
       if (command === 'get_sub2api_config_state') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '' });
+        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
       }
       if (command === 'save_sub2api_config') {
         return Promise.resolve({
           configured: true,
           baseUrl: 'https://sub2api.example.com',
           email: 'admin@example.com',
+          upstream: 'claude',
         });
       }
       if (command === 'clear_sub2api_config') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '' });
+        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
       }
       if (command === 'delete_sub2api_config') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '' });
+        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
       }
       return Promise.reject(new Error(`unexpected command ${command}`));
     });
@@ -30,7 +31,7 @@ describe('Sub2ApiConfigSection', () => {
 
   afterEach(cleanup);
 
-  it('saves a Sub2API administrator login without retaining the password in the UI', async () => {
+  it('saves a Claude upstream login without retaining the password in the UI', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api' });
     expect(await screen.findByRole('region', { name: 'Sub2API Connection' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
@@ -43,6 +44,7 @@ describe('Sub2ApiConfigSection', () => {
     const password = screen.getByLabelText('Sub2API administrator password');
     expect(password).toHaveAttribute('type', 'password');
     await fireEvent.input(password, { target: { value: 'secret-password' } });
+    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() =>
@@ -52,11 +54,13 @@ describe('Sub2ApiConfigSection', () => {
           baseUrl: 'https://sub2api.example.com',
           email: 'admin@example.com',
           password: 'secret-password',
+          upstream: 'claude',
         },
       }),
     );
     expect(screen.queryByDisplayValue('secret-password')).not.toBeInTheDocument();
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
+    expect(screen.getByText('Claude upstream')).toBeInTheDocument();
   });
 
   it('clears saved connection fields without deleting the Sub2API item', async () => {
@@ -66,10 +70,11 @@ describe('Sub2ApiConfigSection', () => {
           configured: true,
           baseUrl: 'https://sub2api.example.com',
           email: 'admin@example.com',
+          upstream: 'codex',
         });
       }
       if (command === 'clear_sub2api_config') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '' });
+        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
       }
       return Promise.reject(new Error(`unexpected command ${command}`));
     });
