@@ -28,6 +28,10 @@ const definitions = [
   quota('spark', 'Spark'),
   quota('sparkWeekly', 'Spark Weekly'),
   {
+    ...quota('extra', 'Extra Usage'),
+    source: { kind: 'quotaOrValue' as const, sourceId: 'extra', sessionWindow: false },
+  },
+  {
     ...quota('rateLimitResets', 'Rate Limit Resets'),
     source: { kind: 'value' as const, sourceId: 'sub2apiRateLimitResets' },
   },
@@ -123,6 +127,7 @@ describe('CustomizeProviderDetail Sub2API metric availability', () => {
     expect(screen.getByRole('checkbox', { name: 'Show Rate Limit Resets' })).toBeDisabled();
     expect(screen.getByRole('checkbox', { name: 'Show Sonnet' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Fable' })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: 'Show Extra Usage' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Pin Spark' })).not.toBeInTheDocument();
   });
 
@@ -134,6 +139,7 @@ describe('CustomizeProviderDetail Sub2API metric availability', () => {
     expect(screen.getByRole('checkbox', { name: 'Show Spark' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Spark Weekly' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Rate Limit Resets' })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: 'Show Extra Usage' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Pin Sonnet' })).not.toBeInTheDocument();
   });
 });

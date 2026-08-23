@@ -37,7 +37,9 @@ describe('Sub2API connection labels', () => {
     expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.spark', 'claude')).toBe(false);
     expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.rateLimitResets', 'claude')).toBe(false);
     expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.sonnet', 'claude')).toBe(true);
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.extra', 'claude')).toBe(false);
     expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.sonnet', 'codex')).toBe(false);
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.extra', 'codex')).toBe(false);
     expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.spark', 'codex')).toBe(true);
     expect(sub2ApiMetricSupported('codex', 'codex.spark', 'codex')).toBe(true);
   });

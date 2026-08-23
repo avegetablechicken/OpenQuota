@@ -85,6 +85,15 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
                 false,
                 "F",
             ),
+            MetricDefinition::quota_or_value(
+                &metric_id("extra"),
+                "Extra Usage",
+                "extra",
+                false,
+                MetricSection::OnDemand,
+                false,
+                "E",
+            ),
             MetricDefinition::trend(&metric_id("trend")),
             MetricDefinition::quota(
                 &metric_id("spark"),
@@ -157,6 +166,7 @@ pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<Metr
             metric("trend", true, always, false),
             metric("sonnet", false, demand, false),
             metric("fable", false, demand, false),
+            metric("extra", false, demand, false),
             metric("today", true, demand, false),
             metric("yesterday", true, demand, false),
             metric("last30", true, demand, false),
@@ -176,6 +186,7 @@ pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<Metr
             metric("last30", true, demand, false),
             metric("sonnet", false, demand, false),
             metric("fable", false, demand, false),
+            metric("extra", false, demand, false),
         ],
     }
 }
@@ -1310,6 +1321,11 @@ mod tests {
         assert!(codex
             .iter()
             .filter(|metric| metric.id.ends_with("sonnet") || metric.id.ends_with("fable"))
+            .all(|metric| !metric.enabled));
+        assert!(claude
+            .iter()
+            .chain(codex.iter())
+            .filter(|metric| metric.id.ends_with("extra"))
             .all(|metric| !metric.enabled));
     }
 
