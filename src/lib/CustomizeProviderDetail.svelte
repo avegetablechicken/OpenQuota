@@ -10,6 +10,7 @@
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
   import { canRenameProvider } from './providerNames';
+  import { sub2ApiMetricSupported, sub2ApiUpstreams } from './sub2ApiUpstreams';
 
   interface Props {
     settings: AppSettings;
@@ -44,6 +45,8 @@
     if (messageTimer) clearTimeout(messageTimer);
   });
   const provider = $derived(settings.providers.find((item) => item.id === providerId));
+  const metricSupported = (metricId: string) =>
+    sub2ApiMetricSupported(providerId, metricId, $sub2ApiUpstreams[providerId]);
 
   function updateProvider(next: ProviderLayout) {
     onChange({
@@ -52,14 +55,14 @@
     });
   }
   function updateMetric(metric: MetricLayout) {
-    if (!provider) return;
+    if (!provider || !metricSupported(metric.id)) return;
     updateProvider({
       ...provider,
       metrics: provider.metrics.map((item) => (item.id === metric.id ? metric : item)),
     });
   }
   function togglePin(metric: MetricLayout, button: HTMLButtonElement) {
-    if (!provider || !metricDefinition(metric.id)?.pinnable) return;
+    if (!provider || !metricSupported(metric.id) || !metricDefinition(metric.id)?.pinnable) return;
     if (!metric.pinned && provider.metrics.filter((item) => item.pinned).length >= 2) {
       showMessage('Up to 2 stars per provider', 'denied');
       if (!reducedMotion) {
@@ -92,7 +95,7 @@
     target: MetricLayout,
     section: MetricSection = target.section,
   ) {
-    if (!provider || draggedId === target.id) return;
+    if (!provider || !metricSupported(draggedId) || draggedId === target.id) return;
     const metrics = [...provider.metrics];
     const from = metrics.findIndex((metric) => metric.id === draggedId);
     const to = metrics.findIndex((metric) => metric.id === target.id);
@@ -103,7 +106,7 @@
     updateProvider({ ...provider, metrics });
   }
   function moveIntoSection(draggedId: string, section: MetricSection) {
-    if (!provider) return;
+    if (!provider || !metricSupported(draggedId)) return;
     const metrics = [...provider.metrics];
     const from = metrics.findIndex((metric) => metric.id === draggedId);
     if (from < 0) return;
@@ -150,7 +153,7 @@
           {#each sectionMetrics as metric (metric.id)}
             <div
               role="listitem"
-              class:disabled={!metric.enabled}
+              class:disabled={!metric.enabled || !metricSupported(metric.id)}
               class="customize-metric-row"
               data-reorder-group={`customize-metrics:${provider.id}`}
               data-reorder-id={metric.id}
@@ -158,6 +161,7 @@
                 id: metric.id,
                 group: `customize-metrics:${provider.id}`,
                 label: metricDefinition(metric.id)?.label ?? metric.id,
+                disabled: !metricSupported(metric.id),
                 gripOnly: true,
                 touchGripOnly: true,
                 onReorder: (targetId) => {
@@ -178,7 +182,8 @@
                 data-reorder-handle
                 data-reorder-touch-handle
                 role="button"
-                tabindex="0"
+                tabindex={metricSupported(metric.id) ? 0 : undefined}
+                aria-disabled={!metricSupported(metric.id) ? 'true' : undefined}
                 aria-label={`Move ${metricDefinition(metric.id)?.label ?? metric.id}`}
                 aria-describedby="reorder-instructions"
                 aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
@@ -188,7 +193,7 @@
                 >{metricDefinition(metric.id)?.label ?? metric.id}</span
               >
               <span class="customize-metric-pin-slot">
-                {#if metricDefinition(metric.id)?.pinnable}<button
+                {#if metricSupported(metric.id) && metricDefinition(metric.id)?.pinnable}<button
                     class:pinned={metric.pinned}
                     class="pin-button"
                     type="button"
@@ -205,7 +210,8 @@
                 ><input
                   aria-label={`Show ${metricDefinition(metric.id)?.label ?? metric.id}`}
                   type="checkbox"
-                  checked={metric.enabled}
+                  checked={metricSupported(metric.id) && metric.enabled}
+                  disabled={!metricSupported(metric.id)}
                   onchange={(event) =>
                     updateMetric({
                       ...metric,

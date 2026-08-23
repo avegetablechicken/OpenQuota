@@ -585,6 +585,16 @@ impl SettingsService {
         detected: bool,
         enable: bool,
     ) -> Result<AppSettings, String> {
+        self.reconcile_provider_credential_state_with_metrics(provider_id, detected, enable, None)
+    }
+
+    pub fn reconcile_provider_credential_state_with_metrics(
+        &self,
+        provider_id: &str,
+        detected: bool,
+        enable: bool,
+        metric_template: Option<Vec<MetricLayout>>,
+    ) -> Result<AppSettings, String> {
         let mut current = self
             .settings
             .write()
@@ -599,6 +609,9 @@ impl SettingsService {
         provider.detected = detected;
         if enable {
             provider.enabled = true;
+        }
+        if let Some(metrics) = metric_template {
+            provider.metrics = metrics;
         }
         self.storage
             .save_settings(&next)
@@ -2268,6 +2281,50 @@ mod tests {
             .unwrap();
         assert!(!openrouter.detected);
         assert!(openrouter.enabled);
+    }
+
+    #[test]
+    fn credential_reconciliation_persists_a_metric_template_with_provider_state() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+        let service =
+            SettingsService::new_for_test(storage.clone(), catalog(), &HashSet::new()).unwrap();
+        let mut template = service
+            .get()
+            .providers
+            .into_iter()
+            .find(|provider| provider.id == "openrouter")
+            .unwrap()
+            .metrics;
+        template.reverse();
+        template[0].enabled = false;
+
+        let saved = service
+            .reconcile_provider_credential_state_with_metrics(
+                "openrouter",
+                true,
+                true,
+                Some(template.clone()),
+            )
+            .unwrap();
+        let provider = saved
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openrouter")
+            .unwrap();
+        assert!(provider.detected);
+        assert!(provider.enabled);
+        assert_eq!(provider.metrics, template);
+        let persisted = storage.load_settings().unwrap().unwrap();
+        assert_eq!(
+            persisted
+                .providers
+                .iter()
+                .find(|provider| provider.id == "openrouter")
+                .unwrap()
+                .metrics,
+            template
+        );
     }
 
     #[test]

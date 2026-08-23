@@ -42,7 +42,7 @@ describe('native UI language contract', () => {
 
   it('keeps Customize concise and free of duplicate status and count copy', () => {
     expect(customizeList).toContain('Notifications, appearance and more');
-    expect(customizeList).toContain('{provider.metrics.length} metrics');
+    expect(customizeList).toContain('{providerListSubtitle(provider)}');
     expect(customizeList).not.toContain('Detected locally');
     expect(customizeList).not.toContain('screen-intro');
     expect(customizeList).not.toContain('pinned\n');

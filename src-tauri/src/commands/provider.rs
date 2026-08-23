@@ -6,11 +6,13 @@ use zeroize::Zeroizing;
 
 use crate::{
     commands::settings::settings_view_state,
-    models::{ApiKeyMutationOutcome, ApiKeyStatus, ProviderApiKeyState, ProviderLink},
+    models::{
+        ApiKeyMutationOutcome, ApiKeyStatus, MetricLayout, ProviderApiKeyState, ProviderLink,
+    },
     notifications::finish_refresh,
     pacing::NotificationEvaluator,
     providers::{
-        sub2api::{Sub2ApiConfigInput, Sub2ApiConfigState, Sub2ApiProviders},
+        sub2api::{metric_template, Sub2ApiConfigInput, Sub2ApiConfigState, Sub2ApiProviders},
         ProviderRegistry, UsageProvider,
     },
     service::ProviderService,
@@ -131,8 +133,18 @@ fn reconcile_provider_credential_state(
     provider_id: &str,
     detected: bool,
     enable: bool,
+    metric_template: Option<Vec<MetricLayout>>,
 ) -> Result<(), String> {
-    let updated = settings.reconcile_provider_credential_state(provider_id, detected, enable)?;
+    let updated = if metric_template.is_some() {
+        settings.reconcile_provider_credential_state_with_metrics(
+            provider_id,
+            detected,
+            enable,
+            metric_template,
+        )?
+    } else {
+        settings.reconcile_provider_credential_state(provider_id, detected, enable)?
+    };
     tray_presentation::update(app, &service.state(), &updated, settings.registry());
     let _ = app.emit("settings-state", settings_view_state(app, settings));
     Ok(())
@@ -187,6 +199,7 @@ pub async fn save_provider_api_key(
         &provider_id,
         true,
         true,
+        None,
     ) {
         Ok(()) => true,
         Err(error) => {
@@ -251,6 +264,7 @@ pub async fn delete_provider_api_key(
         &provider_id,
         detected,
         false,
+        None,
     ) {
         Ok(()) => true,
         Err(error) => {
@@ -317,13 +331,39 @@ pub async fn save_sub2api_config(
     let provider = providers
         .provider(&provider_id)
         .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
-    let state = tauri::async_runtime::spawn_blocking(move || provider.save_config(config))
-        .await
-        .map_err(|_| "The Sub2API connection could not be saved.".to_owned())?
-        .map_err(|error| error.to_string())?;
+    let provider_for_save = provider.clone();
+    let outcome =
+        tauri::async_runtime::spawn_blocking(move || provider_for_save.save_config(config))
+            .await
+            .map_err(|_| "The Sub2API connection could not be saved.".to_owned())?
+            .map_err(|error| error.to_string())?;
 
     let command_guard = settings.lock_command_mutation().await;
-    reconcile_provider_credential_state(&app, &service, &settings, &provider_id, true, true)?;
+    let template = outcome
+        .apply_metric_template
+        .then(|| metric_template(&provider_id, outcome.state.upstream));
+    reconcile_provider_credential_state(
+        &app,
+        &service,
+        &settings,
+        &provider_id,
+        true,
+        true,
+        template,
+    )?;
+    if outcome.apply_metric_template {
+        let provider = provider.clone();
+        if let Err(error) =
+            tauri::async_runtime::spawn_blocking(move || provider.mark_metric_template_applied())
+                .await
+                .map_err(|_| "The Sub2API metric template state could not be saved.".to_owned())?
+        {
+            crate::app_warn!(
+                "auth",
+                "Sub2API metric template was applied but could not be marked complete: {error}"
+            );
+        }
+    }
     service
         .clear_provider_data(&provider_id)
         .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;
@@ -334,7 +374,7 @@ pub async fn save_sub2api_config(
     let _ = app.emit("usage-state", &usage);
     finish_refresh(&app, &usage, &settings, &notifications);
     crate::app_info!("auth", "Sub2API connection saved");
-    Ok(state)
+    Ok(outcome.state)
 }
 
 #[tauri::command]
@@ -356,7 +396,15 @@ pub async fn clear_sub2api_config(
         .map_err(|error| error.to_string())?;
 
     let command_guard = settings.lock_command_mutation().await;
-    reconcile_provider_credential_state(&app, &service, &settings, &provider_id, false, true)?;
+    reconcile_provider_credential_state(
+        &app,
+        &service,
+        &settings,
+        &provider_id,
+        false,
+        true,
+        None,
+    )?;
     service
         .clear_provider_data(&provider_id)
         .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;

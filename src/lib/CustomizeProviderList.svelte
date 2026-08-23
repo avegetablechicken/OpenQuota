@@ -12,6 +12,7 @@
     rememberSub2ApiUpstream,
     sub2ApiDisplayName,
     sub2ApiEndpoints,
+    sub2ApiMetricSupported,
     sub2ApiUpstreams,
   } from './sub2ApiUpstreams';
 
@@ -64,9 +65,15 @@
   function providerListSubtitle(provider: ProviderLayout) {
     const upstream = $sub2ApiUpstreams[provider.id];
     if (upstream && repeatedSub2ApiUpstreams.includes(upstream)) {
-      return $sub2ApiEndpoints[provider.id] ?? `${provider.metrics.length} metrics`;
+      return $sub2ApiEndpoints[provider.id] ?? `${availableMetricCount(provider)} metrics`;
     }
-    return `${provider.metrics.length} metrics`;
+    return `${availableMetricCount(provider)} metrics`;
+  }
+  function availableMetricCount(provider: ProviderLayout) {
+    const upstream = $sub2ApiUpstreams[provider.id];
+    return provider.metrics.filter((metric) =>
+      sub2ApiMetricSupported(provider.id, metric.id, upstream),
+    ).length;
   }
   const addableProvider = $derived(
     settings.providers.find(

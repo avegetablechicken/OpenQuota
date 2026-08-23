@@ -17,8 +17,9 @@ use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::models::{
-    DailyUsage, MetricDefinition, MetricSection, ModelUsageBreakdown, ModelUsageEntry,
-    ProviderDefinition, ProviderSnapshot, UsageHistory, UsagePeriod, UsagePeriodSelection,
+    DailyUsage, MetricDefinition, MetricLayout, MetricSection, ModelUsageBreakdown,
+    ModelUsageEntry, ProviderDefinition, ProviderSnapshot, UsageHistory, UsagePeriod,
+    UsagePeriodSelection,
 };
 use crate::storage::Storage;
 
@@ -32,6 +33,7 @@ use super::{
 const PROVIDER_ID: &str = "sub2api";
 const PROVIDER_SLOTS: usize = 8;
 const CREDENTIAL_SERVICE: &str = "io.github.deviffyy.openquota.sub2api";
+const METRIC_TEMPLATE_VERSION: u8 = 1;
 
 fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
     let metric_id = |suffix: &str| format!("{provider_id}.{suffix}");
@@ -139,6 +141,45 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
     }
 }
 
+pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<MetricLayout> {
+    let metric = |suffix: &str, enabled: bool, section: MetricSection, pinned: bool| MetricLayout {
+        id: format!("{provider_id}.{suffix}"),
+        enabled,
+        section,
+        pinned,
+    };
+    let always = MetricSection::AlwaysVisible;
+    let demand = MetricSection::OnDemand;
+    match upstream {
+        Sub2ApiUpstream::Claude => vec![
+            metric("session", true, always, true),
+            metric("weekly", true, always, true),
+            metric("trend", true, always, false),
+            metric("sonnet", false, demand, false),
+            metric("fable", false, demand, false),
+            metric("today", true, demand, false),
+            metric("yesterday", true, demand, false),
+            metric("last30", true, demand, false),
+            metric("spark", false, demand, false),
+            metric("sparkWeekly", false, demand, false),
+            metric("rateLimitResets", false, demand, false),
+        ],
+        Sub2ApiUpstream::Codex => vec![
+            metric("session", true, always, true),
+            metric("weekly", true, always, true),
+            metric("trend", true, always, false),
+            metric("spark", true, demand, false),
+            metric("sparkWeekly", true, demand, false),
+            metric("rateLimitResets", true, demand, false),
+            metric("today", true, demand, false),
+            metric("yesterday", true, demand, false),
+            metric("last30", true, demand, false),
+            metric("sonnet", false, demand, false),
+            metric("fable", false, demand, false),
+        ],
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sub2ApiConfigInput {
@@ -201,6 +242,8 @@ struct StoredConfig {
     password: String,
     #[serde(default)]
     upstream: Sub2ApiUpstream,
+    #[serde(default)]
+    metric_template_version: u8,
 }
 
 impl Clone for StoredConfig {
@@ -210,8 +253,14 @@ impl Clone for StoredConfig {
             email: self.email.clone(),
             password: self.password.clone(),
             upstream: self.upstream,
+            metric_template_version: self.metric_template_version,
         }
     }
+}
+
+pub struct Sub2ApiConfigSaveOutcome {
+    pub state: Sub2ApiConfigState,
+    pub apply_metric_template: bool,
 }
 
 impl Drop for StoredConfig {
@@ -606,7 +655,7 @@ impl Sub2ApiProvider {
     pub fn save_config(
         &self,
         input: Sub2ApiConfigInput,
-    ) -> Result<Sub2ApiConfigState, ProviderError> {
+    ) -> Result<Sub2ApiConfigSaveOutcome, ProviderError> {
         let previous = self.load_config()?;
         let password = if input.password.trim().is_empty() {
             previous
@@ -616,31 +665,38 @@ impl Sub2ApiProvider {
         } else {
             input.password.trim().to_owned()
         };
+        let apply_metric_template = should_apply_metric_template(previous.as_ref(), input.upstream);
         let config = StoredConfig {
             base_url: normalized_base_url_text(&input.base_url)?,
             email: input.email.trim().to_owned(),
             password,
             upstream: input.upstream,
+            metric_template_version: if apply_metric_template {
+                0
+            } else {
+                METRIC_TEMPLATE_VERSION
+            },
         };
         if config.email.is_empty() || config.password.is_empty() {
             return Err(Sub2ApiError::InvalidConfig.into());
         }
 
         let session = self.validate_config(&config)?;
-        let bytes = Zeroizing::new(
-            serde_json::to_vec(&config).map_err(|_| Sub2ApiError::CredentialStorage)?,
-        );
-        write_owned_password(
-            CREDENTIAL_SERVICE,
-            self.credential_account(),
-            bytes.as_slice(),
-        )
-        .map_err(|_| Sub2ApiError::CredentialStorage)?;
+        self.write_config(&config)?;
         self.set_configured(true)?;
         if let Ok(mut cached) = self.session.lock() {
             *cached = session;
         }
-        Ok(config.state())
+        Ok(Sub2ApiConfigSaveOutcome {
+            state: config.state(),
+            apply_metric_template,
+        })
+    }
+
+    pub fn mark_metric_template_applied(&self) -> Result<(), ProviderError> {
+        let mut config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
+        config.metric_template_version = METRIC_TEMPLATE_VERSION;
+        self.write_config(&config).map_err(ProviderError::from)
     }
 
     pub fn delete_config(&self) -> Result<Sub2ApiConfigState, ProviderError> {
@@ -823,6 +879,18 @@ impl Sub2ApiProvider {
             .map(Some)
             .map_err(|_| Sub2ApiError::CredentialStorage)
     }
+
+    fn write_config(&self, config: &StoredConfig) -> Result<(), Sub2ApiError> {
+        let bytes = Zeroizing::new(
+            serde_json::to_vec(config).map_err(|_| Sub2ApiError::CredentialStorage)?,
+        );
+        write_owned_password(
+            CREDENTIAL_SERVICE,
+            self.credential_account(),
+            bytes.as_slice(),
+        )
+        .map_err(|_| Sub2ApiError::CredentialStorage)
+    }
 }
 
 pub struct Sub2ApiProviders {
@@ -931,6 +999,15 @@ fn session_scope(config: &StoredConfig) -> String {
         )
         .as_bytes(),
     )
+}
+
+fn should_apply_metric_template(
+    previous: Option<&StoredConfig>,
+    upstream: Sub2ApiUpstream,
+) -> bool {
+    previous.is_none_or(|previous| {
+        previous.upstream != upstream || previous.metric_template_version < METRIC_TEMPLATE_VERSION
+    })
 }
 
 fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistory {
@@ -1079,8 +1156,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        definition_for, map_stats, normalize_base_url, StoredConfig, Sub2ApiClient, Sub2ApiError,
-        Sub2ApiProvider, Sub2ApiProviders,
+        definition_for, map_stats, metric_template, normalize_base_url,
+        should_apply_metric_template, StoredConfig, Sub2ApiClient, Sub2ApiError, Sub2ApiProvider,
+        Sub2ApiProviders,
     };
     use crate::providers::{
         codex::{client::UsageResponse, mapper::map_usage},
@@ -1180,6 +1258,88 @@ mod tests {
             .iter()
             .any(|metric| metric.id == "sub2api.last30"));
         assert!(!definition.fallback_enabled);
+    }
+
+    #[test]
+    fn metric_templates_match_the_supported_native_provider_defaults() {
+        for (upstream, native, unsupported) in [
+            (
+                super::Sub2ApiUpstream::Codex,
+                crate::providers::codex::definition(),
+                "credits",
+            ),
+            (
+                super::Sub2ApiUpstream::Claude,
+                crate::providers::claude::definition(),
+                "extra",
+            ),
+        ] {
+            let template = metric_template("sub2api@2", upstream);
+            for definition in native.metrics {
+                let suffix = definition.id.split_once('.').unwrap().1;
+                if suffix == unsupported {
+                    continue;
+                }
+                let metric = template
+                    .iter()
+                    .find(|metric| metric.id == format!("sub2api@2.{suffix}"))
+                    .unwrap();
+                assert_eq!(
+                    metric.enabled, definition.default_enabled,
+                    "{upstream} {suffix}"
+                );
+                assert_eq!(
+                    metric.section, definition.default_section,
+                    "{upstream} {suffix}"
+                );
+                assert_eq!(
+                    metric.pinned, definition.default_pinned,
+                    "{upstream} {suffix}"
+                );
+            }
+        }
+
+        let claude = metric_template("sub2api@2", super::Sub2ApiUpstream::Claude);
+        assert!(claude
+            .iter()
+            .filter(|metric| metric.id.ends_with("spark")
+                || metric.id.ends_with("sparkWeekly")
+                || metric.id.ends_with("rateLimitResets"))
+            .all(|metric| !metric.enabled));
+        let codex = metric_template("sub2api@2", super::Sub2ApiUpstream::Codex);
+        assert!(codex
+            .iter()
+            .filter(|metric| metric.id.ends_with("sonnet") || metric.id.ends_with("fable"))
+            .all(|metric| !metric.enabled));
+    }
+
+    #[test]
+    fn metric_template_runs_once_per_version_or_upstream_change() {
+        let mut config = StoredConfig {
+            base_url: "https://sub2api.example.com".into(),
+            email: "admin@example.com".into(),
+            password: "secret".into(),
+            upstream: super::Sub2ApiUpstream::Codex,
+            metric_template_version: 0,
+        };
+
+        assert!(should_apply_metric_template(
+            Some(&config),
+            super::Sub2ApiUpstream::Codex
+        ));
+        config.metric_template_version = super::METRIC_TEMPLATE_VERSION;
+        assert!(!should_apply_metric_template(
+            Some(&config),
+            super::Sub2ApiUpstream::Codex
+        ));
+        assert!(should_apply_metric_template(
+            Some(&config),
+            super::Sub2ApiUpstream::Claude
+        ));
+        assert!(should_apply_metric_template(
+            None,
+            super::Sub2ApiUpstream::Claude
+        ));
     }
 
     #[test]
@@ -1284,6 +1444,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "secret-password".into(),
             upstream: super::Sub2ApiUpstream::Codex,
+            metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
 
         assert!(provider.validate_config(&config).unwrap().is_none());
@@ -1478,6 +1639,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "secret-password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
+            metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
 
         let snapshot = provider.refresh_snapshot(&config).unwrap();
@@ -1515,6 +1677,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.upstream, super::Sub2ApiUpstream::Codex);
+        assert_eq!(config.metric_template_version, 0);
     }
 
     #[test]

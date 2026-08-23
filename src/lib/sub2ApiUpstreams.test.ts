@@ -5,6 +5,7 @@ import {
   rememberSub2ApiUpstream,
   sub2ApiDisplayName,
   sub2ApiEndpoints,
+  sub2ApiMetricSupported,
 } from './sub2ApiUpstreams';
 
 describe('Sub2API connection labels', () => {
@@ -30,5 +31,14 @@ describe('Sub2API connection labels', () => {
     expect(sub2ApiDisplayName('sub2api', 'codex')).toBe('Sub2API · Codex');
     expect(sub2ApiDisplayName('sub2api@2', 'claude')).toBe('Sub2API · Claude');
     expect(sub2ApiDisplayName('codex', 'codex')).toBeNull();
+  });
+
+  it('separates unsupported metrics from supported metrics that default off', () => {
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.spark', 'claude')).toBe(false);
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.rateLimitResets', 'claude')).toBe(false);
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.sonnet', 'claude')).toBe(true);
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.sonnet', 'codex')).toBe(false);
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.spark', 'codex')).toBe(true);
+    expect(sub2ApiMetricSupported('codex', 'codex.spark', 'codex')).toBe(true);
   });
 });

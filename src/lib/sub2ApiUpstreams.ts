@@ -54,6 +54,21 @@ export function sub2ApiDisplayName(providerId: string, upstream?: Sub2ApiUpstrea
   return `Sub2API · ${upstream === 'claude' ? 'Claude' : 'Codex'}`;
 }
 
+export function sub2ApiMetricSupported(
+  providerId: string,
+  metricId: string,
+  upstream?: Sub2ApiUpstream,
+) {
+  if (sub2ApiDisplayName(providerId, upstream) === null || !upstream) return true;
+  const prefix = `${providerId}.`;
+  if (!metricId.startsWith(prefix)) return true;
+  const suffix = metricId.slice(prefix.length);
+  if (upstream === 'claude') {
+    return !['spark', 'sparkWeekly', 'rateLimitResets'].includes(suffix);
+  }
+  return !['sonnet', 'fable'].includes(suffix);
+}
+
 function persist(upstreams: Record<string, Sub2ApiUpstream>) {
   try {
     storage()?.setItem(storageKey, JSON.stringify(upstreams));
