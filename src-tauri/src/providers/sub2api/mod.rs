@@ -22,6 +22,7 @@ use crate::models::{
 use crate::storage::Storage;
 
 use super::{
+    claude::map_sub2api_usage,
     codex::{client::UsageResponse, mapper::map_usage},
     credential_store::{delete_owned_password, read_owned_password, write_owned_password},
     CacheIdentity, ProviderError, UsageProvider,
@@ -60,6 +61,26 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
                 MetricSection::AlwaysVisible,
                 true,
                 "W",
+            ),
+            MetricDefinition::quota(
+                &metric_id("sonnet"),
+                "Sonnet",
+                "sonnet",
+                false,
+                false,
+                MetricSection::OnDemand,
+                false,
+                "Sn",
+            ),
+            MetricDefinition::quota(
+                &metric_id("fable"),
+                "Fable",
+                "fable",
+                false,
+                false,
+                MetricSection::OnDemand,
+                false,
+                "F",
             ),
             MetricDefinition::quota(
                 &metric_id("spark"),
@@ -101,6 +122,8 @@ pub struct Sub2ApiConfigInput {
     pub base_url: String,
     pub email: String,
     pub password: String,
+    #[serde(default)]
+    pub upstream: Sub2ApiUpstream,
 }
 
 impl Drop for Sub2ApiConfigInput {
@@ -115,6 +138,37 @@ pub struct Sub2ApiConfigState {
     pub configured: bool,
     pub base_url: String,
     pub email: String,
+    pub upstream: Sub2ApiUpstream,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Sub2ApiUpstream {
+    #[default]
+    Codex,
+    Claude,
+}
+
+impl Sub2ApiUpstream {
+    fn platform(self) -> &'static str {
+        match self {
+            Self::Codex => "openai",
+            Self::Claude => "anthropic",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
+}
+
+impl std::fmt::Display for Sub2ApiUpstream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -122,6 +176,8 @@ struct StoredConfig {
     base_url: String,
     email: String,
     password: String,
+    #[serde(default)]
+    upstream: Sub2ApiUpstream,
 }
 
 impl Clone for StoredConfig {
@@ -130,6 +186,7 @@ impl Clone for StoredConfig {
             base_url: self.base_url.clone(),
             email: self.email.clone(),
             password: self.password.clone(),
+            upstream: self.upstream,
         }
     }
 }
@@ -146,6 +203,7 @@ impl StoredConfig {
             configured: true,
             base_url: self.base_url.clone(),
             email: self.email.clone(),
+            upstream: self.upstream,
         }
     }
 }
@@ -164,8 +222,8 @@ enum Sub2ApiError {
     Permission,
     #[error("Sub2API requires two-factor authentication, which is not supported yet.")]
     TwoFactorRequired,
-    #[error("No active Codex upstream account was found in Sub2API.")]
-    NoCodexAccount,
+    #[error("No active {0} upstream account was found in Sub2API.")]
+    NoUpstreamAccount(Sub2ApiUpstream),
     #[error("Sub2API is rate limiting requests. Try again later.")]
     RateLimited,
     #[error("Sub2API request failed (HTTP {0}).")]
@@ -189,7 +247,9 @@ impl From<Sub2ApiError> for ProviderError {
             Sub2ApiError::RateLimited => Kind::RateLimited,
             Sub2ApiError::RequestFailed(_) | Sub2ApiError::ConnectionFailed => Kind::Network,
             Sub2ApiError::InvalidConfig => Kind::Internal,
-            Sub2ApiError::NoCodexAccount | Sub2ApiError::InvalidResponse => Kind::InvalidResponse,
+            Sub2ApiError::NoUpstreamAccount(_) | Sub2ApiError::InvalidResponse => {
+                Kind::InvalidResponse
+            }
         };
         ProviderError::from_display(kind, error)
     }
@@ -242,12 +302,12 @@ struct Sub2ApiClient {
 impl Sub2ApiClient {
     fn new(base_url: &str) -> Result<Self, Sub2ApiError> {
         let base_url = normalize_base_url(base_url)?;
-        let client = Client::builder()
+        let client = crate::http_client::blocking_client_builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map_err(|_| Sub2ApiError::ConnectionFailed)?;
+            .map_err(|error| transport_error("client setup", &error))?;
         Ok(Self { client, base_url })
     }
 
@@ -264,7 +324,7 @@ impl Sub2ApiClient {
             .header("Accept", "application/json")
             .json(&LoginRequest { email, password })
             .send()
-            .map_err(|_| Sub2ApiError::ConnectionFailed)?;
+            .map_err(|error| transport_error("login", &error))?;
         let status = response.status();
         if !status.is_success() {
             return Err(classify_status(status));
@@ -290,12 +350,16 @@ impl Sub2ApiClient {
         })
     }
 
-    fn first_codex_account(&self, token: &str) -> Result<(Sub2ApiAccount, usize), Sub2ApiError> {
+    fn first_account(
+        &self,
+        token: &str,
+        upstream: Sub2ApiUpstream,
+    ) -> Result<(Sub2ApiAccount, usize), Sub2ApiError> {
         let mut url = self.endpoint(&["api", "v1", "admin", "accounts"])?;
         url.query_pairs_mut()
             .append_pair("page", "1")
             .append_pair("page_size", "1")
-            .append_pair("platform", "openai")
+            .append_pair("platform", upstream.platform())
             .append_pair("type", "oauth")
             .append_pair("status", "active")
             .append_pair("sort_by", "name")
@@ -306,7 +370,7 @@ impl Sub2ApiClient {
             .bearer_auth(token)
             .header("Accept", "application/json")
             .send()
-            .map_err(|_| Sub2ApiError::ConnectionFailed)?;
+            .map_err(|error| transport_error("account discovery", &error))?;
         let status = response.status();
         if !status.is_success() {
             return Err(classify_status(status));
@@ -322,15 +386,19 @@ impl Sub2ApiClient {
             .items
             .drain(..)
             .next()
-            .ok_or(Sub2ApiError::NoCodexAccount)?;
+            .ok_or(Sub2ApiError::NoUpstreamAccount(upstream))?;
         Ok((account, page.total))
     }
 
-    fn quota(&self, token: &str, account_id: i64) -> Result<Value, Sub2ApiError> {
+    fn usage(
+        &self,
+        token: &str,
+        account_id: i64,
+        upstream: Sub2ApiUpstream,
+    ) -> Result<Value, Sub2ApiError> {
         let account_id = account_id.to_string();
-        let response = self
-            .client
-            .get(self.endpoint(&[
+        let segments: &[&str] = match upstream {
+            Sub2ApiUpstream::Codex => &[
                 "api",
                 "v1",
                 "admin",
@@ -338,11 +406,16 @@ impl Sub2ApiClient {
                 "accounts",
                 &account_id,
                 "quota",
-            ])?)
+            ],
+            Sub2ApiUpstream::Claude => &["api", "v1", "admin", "accounts", &account_id, "usage"],
+        };
+        let response = self
+            .client
+            .get(self.endpoint(segments)?)
             .bearer_auth(token)
             .header("Accept", "application/json")
             .send()
-            .map_err(|_| Sub2ApiError::ConnectionFailed)?;
+            .map_err(|error| transport_error("upstream usage", &error))?;
         let status = response.status();
         if !status.is_success() {
             return Err(classify_status(status));
@@ -399,6 +472,18 @@ fn classify_status(status: StatusCode) -> Sub2ApiError {
     }
 }
 
+fn transport_error(stage: &str, error: &reqwest::Error) -> Sub2ApiError {
+    let reason = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else {
+        "transport"
+    };
+    crate::app_warn!("http", "Sub2API {stage} request failed ({reason})");
+    Sub2ApiError::ConnectionFailed
+}
+
 pub struct Sub2ApiProvider {
     provider_id: String,
     display_name: String,
@@ -446,6 +531,7 @@ impl Sub2ApiProvider {
             base_url: normalized_base_url_text(&input.base_url)?,
             email: input.email.trim().to_owned(),
             password,
+            upstream: input.upstream,
         };
         if config.email.is_empty() || config.password.is_empty() {
             return Err(Sub2ApiError::InvalidConfig.into());
@@ -481,7 +567,8 @@ impl Sub2ApiProvider {
     fn connect(&self, config: &StoredConfig) -> Result<CachedSession, Sub2ApiError> {
         let client = Sub2ApiClient::new(&config.base_url)?;
         let login = client.login(&config.email, &config.password)?;
-        let (account, account_count) = client.first_codex_account(login.value.as_str())?;
+        let (account, account_count) =
+            client.first_account(login.value.as_str(), config.upstream)?;
         Ok(CachedSession {
             scope: session_scope(config),
             token: login.value,
@@ -497,12 +584,13 @@ impl Sub2ApiProvider {
     ) -> Result<Option<CachedSession>, Sub2ApiError> {
         let client = Sub2ApiClient::new(&config.base_url)?;
         let login = client.login(&config.email, &config.password)?;
-        let (account, account_count) = match client.first_codex_account(login.value.as_str()) {
-            Ok(account) => account,
-            Err(Sub2ApiError::NoCodexAccount) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        client.quota(login.value.as_str(), account.id)?;
+        let (account, account_count) =
+            match client.first_account(login.value.as_str(), config.upstream) {
+                Ok(account) => account,
+                Err(Sub2ApiError::NoUpstreamAccount(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+        client.usage(login.value.as_str(), account.id, config.upstream)?;
         Ok(Some(CachedSession {
             scope: session_scope(config),
             token: login.value,
@@ -532,45 +620,54 @@ impl Sub2ApiProvider {
     fn refresh_snapshot(&self, config: &StoredConfig) -> Result<ProviderSnapshot, Sub2ApiError> {
         let client = Sub2ApiClient::new(&config.base_url)?;
         let mut session = self.session(config)?;
-        let body = match client.quota(session.token.as_str(), session.account.id) {
+        let body = match client.usage(session.token.as_str(), session.account.id, config.upstream) {
             Err(Sub2ApiError::Authentication) => {
                 if let Ok(mut cached) = self.session.lock() {
                     *cached = None;
                 }
                 session = self.connect(config)?;
-                client.quota(session.token.as_str(), session.account.id)?
+                client.usage(session.token.as_str(), session.account.id, config.upstream)?
             }
             result => result?,
         };
-        let response = UsageResponse {
-            status: StatusCode::OK,
-            headers: HashMap::new(),
-            body,
-        };
-        let mut mapped =
-            map_usage(&response, None, Utc::now()).map_err(|_| Sub2ApiError::InvalidResponse)?;
-        mapped.value_metrics.retain_mut(|metric| {
-            if metric.id != "rateLimitResets" {
-                return false;
+        let (plan, quotas, value_metrics) = match config.upstream {
+            Sub2ApiUpstream::Codex => {
+                let response = UsageResponse {
+                    status: StatusCode::OK,
+                    headers: HashMap::new(),
+                    body,
+                };
+                let mut mapped = map_usage(&response, None, Utc::now())
+                    .map_err(|_| Sub2ApiError::InvalidResponse)?;
+                mapped.value_metrics.retain_mut(|metric| {
+                    if metric.id != "rateLimitResets" {
+                        return false;
+                    }
+                    metric.id = "sub2apiRateLimitResets".into();
+                    metric.expiries_at.clear();
+                    true
+                });
+                (mapped.plan, mapped.quotas, mapped.value_metrics)
             }
-            metric.id = "sub2apiRateLimitResets".into();
-            metric.expiries_at.clear();
-            true
-        });
+            Sub2ApiUpstream::Claude => {
+                let mapped = map_sub2api_usage(&body).map_err(|_| Sub2ApiError::InvalidResponse)?;
+                (mapped.plan, mapped.quotas, mapped.value_metrics)
+            }
+        };
         let warnings = (session.account_count > 1)
             .then(|| {
                 format!(
-                    "Showing Codex upstream {}. {} active Codex accounts were found.",
-                    session.account.name, session.account_count
+                    "Showing {} upstream {}. {} active {} accounts were found.",
+                    config.upstream, session.account.name, session.account_count, config.upstream
                 )
             })
             .into_iter()
             .collect();
         Ok(ProviderSnapshot {
             provider_id: self.provider_id.clone(),
-            plan: mapped.plan,
-            quotas: mapped.quotas,
-            value_metrics: mapped.value_metrics,
+            plan,
+            quotas,
+            value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
             usage: UsageHistory::default(),
@@ -717,7 +814,15 @@ fn normalized_base_url_text(value: &str) -> Result<String, Sub2ApiError> {
 }
 
 fn session_scope(config: &StoredConfig) -> String {
-    crate::hashing::sha256_hex(format!("{}\0{}", config.base_url, config.email).as_bytes())
+    crate::hashing::sha256_hex(
+        format!(
+            "{}\0{}\0{}",
+            config.base_url,
+            config.email,
+            config.upstream.label()
+        )
+        .as_bytes(),
+    )
 }
 
 fn token_expiry(expires_in: u64) -> Instant {
@@ -767,6 +872,15 @@ mod tests {
       "additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_after_seconds":18000,"reset_at":1787449578},"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1788036378}}}],
       "rate_limit_reset_credits":{"available_count":1,"credits":[{"expires_at":"2026-09-21T00:19:21.387776Z"}]},
       "fetched_at":1787431578
+    }"#;
+
+    const CLAUDE_USAGE_DATA: &str = r#"{
+      "source":"active",
+      "five_hour":{"utilization":12.5,"resets_at":"2026-08-23T05:00:00Z","remaining_seconds":123},
+      "seven_day":{"utilization":34,"resets_at":"2026-08-29T00:00:00Z"},
+      "seven_day_sonnet":{"utilization":8},
+      "seven_day_fable":{"utilization":3},
+      "subscription_tier":"PRO"
     }"#;
 
     fn serve_sequence(
@@ -922,6 +1036,7 @@ mod tests {
             base_url,
             email: "admin@example.com".into(),
             password: "secret-password".into(),
+            upstream: super::Sub2ApiUpstream::Codex,
         };
 
         assert!(provider.validate_config(&config).unwrap().is_none());
@@ -952,8 +1067,16 @@ mod tests {
         let login = client
             .login("admin@example.com", "secret-password")
             .unwrap();
-        let (account, count) = client.first_codex_account(login.value.as_str()).unwrap();
-        let body = client.quota(login.value.as_str(), account.id).unwrap();
+        let (account, count) = client
+            .first_account(login.value.as_str(), super::Sub2ApiUpstream::Codex)
+            .unwrap();
+        let body = client
+            .usage(
+                login.value.as_str(),
+                account.id,
+                super::Sub2ApiUpstream::Codex,
+            )
+            .unwrap();
         worker.join().unwrap();
 
         assert_eq!(account.name, "Codex upstream");
@@ -990,6 +1113,66 @@ mod tests {
         );
         assert_eq!(mapped.value_metrics[0].id, "rateLimitResets");
         assert_eq!(mapped.value_metrics[0].values[0].number, 1.0);
+    }
+
+    #[test]
+    fn discovers_a_claude_account_and_maps_its_usage() {
+        let responses = vec![
+            r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
+            r#"{"code":0,"message":"success","data":{"items":[{"id":1,"name":"Claude upstream"}],"total":1,"page":1,"page_size":1,"pages":1}}"#.into(),
+            format!(r#"{{"code":0,"message":"success","data":{CLAUDE_USAGE_DATA}}}"#),
+        ];
+        let (base_url, requests, worker) = serve_sequence(responses);
+        let client = Sub2ApiClient::new(&base_url).unwrap();
+        let login = client
+            .login("admin@example.com", "secret-password")
+            .unwrap();
+        let (account, count) = client
+            .first_account(login.value.as_str(), super::Sub2ApiUpstream::Claude)
+            .unwrap();
+        let body = client
+            .usage(
+                login.value.as_str(),
+                account.id,
+                super::Sub2ApiUpstream::Claude,
+            )
+            .unwrap();
+        worker.join().unwrap();
+
+        assert_eq!(account.name, "Claude upstream");
+        assert_eq!(count, 1);
+        let _login_request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+        let accounts_request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(accounts_request.contains("platform=anthropic"));
+        assert!(accounts_request.contains("type=oauth"));
+        let usage_request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(usage_request.starts_with("GET /api/v1/admin/accounts/1/usage HTTP/1.1"));
+
+        let mapped = crate::providers::claude::map_sub2api_usage(&body).unwrap();
+        assert_eq!(mapped.plan.as_deref(), Some("Pro"));
+        assert_eq!(
+            mapped
+                .quotas
+                .iter()
+                .map(|quota| (quota.id.as_str(), quota.used_percent))
+                .collect::<Vec<_>>(),
+            [
+                ("session", 12.5),
+                ("weekly", 34.0),
+                ("sonnet", 8.0),
+                ("fable", 3.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn stored_connections_without_an_upstream_remain_codex_connections() {
+        let config: StoredConfig = serde_json::from_str(
+            r#"{"base_url":"https://sub2api.example.com","email":"admin@example.com","password":"secret"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.upstream, super::Sub2ApiUpstream::Codex);
     }
 
     #[test]

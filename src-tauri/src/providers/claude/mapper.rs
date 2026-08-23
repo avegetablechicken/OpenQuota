@@ -6,7 +6,7 @@ use crate::models::{MetricValue, MetricValueKind, QuotaFormat, QuotaWindow, Valu
 
 use super::{auth::ClaudeOAuth, ClaudeError};
 
-pub struct ClaudeMappedUsage {
+pub(crate) struct ClaudeMappedUsage {
     pub plan: Option<String>,
     pub quotas: Vec<QuotaWindow>,
     pub value_metrics: Vec<ValueMetric>,
@@ -47,22 +47,31 @@ pub fn map_usage(
         object.get("seven_day_sonnet"),
         7 * 24 * 60 * 60,
     );
-    if let Some(limits) = object.get("limits").and_then(Value::as_array) {
-        if let Some(limit) = limits.iter().find(|limit| {
-            limit.get("kind").and_then(Value::as_str) == Some("weekly_scoped")
-                && limit
-                    .pointer("/scope/model/display_name")
-                    .and_then(Value::as_str)
-                    == Some("Fable")
-        }) {
-            append_percent(
-                &mut quotas,
-                "fable",
-                "Fable",
-                limit.get("percent").and_then(number),
-                limit.get("resets_at").and_then(reset_date),
-                7 * 24 * 60 * 60,
-            );
+    append_window(
+        &mut quotas,
+        "fable",
+        "Fable",
+        object.get("seven_day_fable"),
+        7 * 24 * 60 * 60,
+    );
+    if !quotas.iter().any(|quota| quota.id == "fable") {
+        if let Some(limits) = object.get("limits").and_then(Value::as_array) {
+            if let Some(limit) = limits.iter().find(|limit| {
+                limit.get("kind").and_then(Value::as_str) == Some("weekly_scoped")
+                    && limit
+                        .pointer("/scope/model/display_name")
+                        .and_then(Value::as_str)
+                        == Some("Fable")
+            }) {
+                append_percent(
+                    &mut quotas,
+                    "fable",
+                    "Fable",
+                    limit.get("percent").and_then(number),
+                    limit.get("resets_at").and_then(reset_date),
+                    7 * 24 * 60 * 60,
+                );
+            }
         }
     }
     if let Some(extra) = object.get("extra_usage").and_then(Value::as_object) {
@@ -112,6 +121,21 @@ pub fn map_usage(
         quotas,
         value_metrics,
     })
+}
+
+pub(crate) fn map_sub2api_usage(body: &Value) -> Result<ClaudeMappedUsage, ClaudeError> {
+    let subscription_type = body
+        .get("subscription_tier")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    map_usage(
+        StatusCode::OK,
+        body,
+        &ClaudeOAuth {
+            subscription_type,
+            ..ClaudeOAuth::default()
+        },
+    )
 }
 
 fn append_window(

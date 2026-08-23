@@ -169,12 +169,16 @@ export interface Sub2ApiConfigState {
   configured: boolean;
   baseUrl: string;
   email: string;
+  upstream: Sub2ApiUpstream;
 }
+
+export type Sub2ApiUpstream = 'codex' | 'claude';
 
 export interface Sub2ApiConfigInput {
   baseUrl: string;
   email: string;
   password: string;
+  upstream: Sub2ApiUpstream;
 }
 
 export interface ProviderDefinition {

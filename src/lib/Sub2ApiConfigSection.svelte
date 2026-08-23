@@ -8,7 +8,8 @@
   } from './backend';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
-  import type { Sub2ApiConfigState } from './types';
+  import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
+  import type { Sub2ApiConfigState, Sub2ApiUpstream } from './types';
 
   interface Props {
     providerId: string;
@@ -21,11 +22,13 @@
     configured: false,
     baseUrl: '',
     email: '',
+    upstream: 'codex',
   });
   let open = $state(false);
   let baseUrl = $state('');
   let email = $state('');
   let password = $state('');
+  let upstream = $state<Sub2ApiUpstream>('codex');
   let revealPassword = $state(false);
   let saving = $state(false);
   let confirmingClear = $state(false);
@@ -36,6 +39,7 @@
   let clearCancelButton = $state<HTMLButtonElement>();
   let removeItemButton = $state<HTMLButtonElement>();
   let removeItemCancelButton = $state<HTMLButtonElement>();
+  const upstreamOptions: Sub2ApiUpstream[] = ['codex', 'claude'];
 
   const canSave = $derived(
     Boolean(
@@ -52,6 +56,7 @@
   function resetEditor(next = connectionState) {
     baseUrl = next.baseUrl;
     email = next.email;
+    upstream = next.upstream;
     password = '';
     revealPassword = false;
     confirmingClear = false;
@@ -72,7 +77,9 @@
         baseUrl: baseUrl.trim(),
         email: email.trim(),
         password,
+        upstream,
       });
+      rememberSub2ApiUpstream(providerId, connectionState.upstream);
       resetEditor(connectionState);
       open = false;
       await tick();
@@ -91,6 +98,7 @@
     error = null;
     try {
       connectionState = await clearSub2ApiConfig(providerId);
+      rememberSub2ApiUpstream(providerId, connectionState.upstream);
       resetEditor(connectionState);
       await tick();
       clearButton?.focus();
@@ -107,6 +115,7 @@
     error = null;
     try {
       connectionState = await deleteSub2ApiConfig(providerId);
+      forgetSub2ApiUpstream(providerId);
       resetEditor(connectionState);
       confirmingItemRemoval = false;
       open = false;
@@ -162,6 +171,7 @@
     void getSub2ApiConfigState(providerId)
       .then((next) => {
         connectionState = next;
+        rememberSub2ApiUpstream(providerId, next.upstream);
         resetEditor(next);
       })
       .catch((cause) => {
@@ -175,9 +185,9 @@
   <h2>Connection</h2>
   <div class="sub2api-config-card">
     <div class="sub2api-config-summary">
-      <ProviderIcon {providerId} size={20} />
+      <ProviderIcon {providerId} upstreamProvider={connectionState.upstream} size={20} />
       <span>
-        <b>Codex upstream</b>
+        <b>{connectionState.upstream === 'claude' ? 'Claude' : 'Codex'} upstream</b>
         <small>{connectionState.configured ? connectionState.email : 'Not configured'}</small>
       </span>
       <i class:missing={!connectionState.configured} aria-hidden="true"></i>
@@ -188,6 +198,24 @@
 
     {#if open}
       <div class="sub2api-config-editor">
+        <fieldset class="upstream-field">
+          <legend>Upstream</legend>
+          <div class="upstream-options">
+            {#each upstreamOptions as option (option)}
+              <label class:active={upstream === option}>
+                <input
+                  type="radio"
+                  name={`${providerId}-upstream`}
+                  value={option}
+                  bind:group={upstream}
+                  disabled={saving}
+                />
+                <ProviderIcon providerId={option} size={15} />
+                <span>{option === 'claude' ? 'Claude' : 'Codex'}</span>
+              </label>
+            {/each}
+          </div>
+        </fieldset>
         <label>
           <span>Base URL</span>
           <input
@@ -427,6 +455,61 @@
   .sub2api-config-editor > label {
     display: grid;
     gap: 4px;
+  }
+
+  .upstream-field {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    padding: 0;
+  }
+
+  .upstream-field legend {
+    padding: 0;
+    color: var(--secondary);
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .upstream-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2px;
+    border-radius: 7px;
+    padding: 2px;
+    background: var(--tray);
+  }
+
+  .upstream-options label {
+    position: relative;
+    display: flex;
+    min-width: 0;
+    height: 28px;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border-radius: 5px;
+    color: var(--secondary);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .upstream-options label.active {
+    color: var(--text);
+    background: var(--button-hover);
+  }
+
+  .upstream-options input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+  }
+
+  .upstream-options label:has(input:focus-visible) {
+    outline: 2px solid color-mix(in srgb, var(--meter-fill) 35%, transparent);
   }
 
   .sub2api-config-editor > label > span {

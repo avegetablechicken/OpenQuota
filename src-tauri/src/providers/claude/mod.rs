@@ -4,6 +4,8 @@ mod client;
 mod local_usage;
 mod mapper;
 
+pub(crate) use mapper::map_sub2api_usage;
+
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},

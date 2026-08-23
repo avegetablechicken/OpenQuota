@@ -5,17 +5,21 @@
     providerIconPath,
     providerIconViewBox,
   } from './providerIconPaths';
+  import { sub2ApiUpstreams } from './sub2ApiUpstreams';
 
   interface Props {
     providerId: string;
     size?: number;
+    upstreamProvider?: 'codex' | 'claude';
   }
 
-  let { providerId, size = 18 }: Props = $props();
+  let { providerId, size = 18, upstreamProvider }: Props = $props();
   const family = $derived(providerFamily(providerId));
   const composite = $derived(family === 'sub2api');
   const path = $derived(providerIconPath(providerId));
-  const codexPath = providerIconPath('codex');
+  const resolvedUpstream = $derived(upstreamProvider ?? $sub2ApiUpstreams[providerId] ?? 'codex');
+  const upstreamPath = $derived(providerIconPath(resolvedUpstream));
+  const upstreamColor = $derived(providerIconColor(resolvedUpstream));
   const color = $derived(providerIconColor(providerId));
   const viewBox = $derived(composite ? '0 0 100 100' : providerIconViewBox(providerId));
 </script>
@@ -34,7 +38,7 @@
     </g>
     <circle cx="76" cy="76" r="21" fill="var(--card)" stroke="var(--separator)" stroke-width="4" />
     <g transform="translate(60 60) scale(.32)">
-      <path d={codexPath} fill="currentColor" />
+      <path d={upstreamPath} fill={upstreamColor ?? 'currentColor'} />
     </g>
   {:else}
     <path d={path} fill={color ?? 'currentColor'} />
