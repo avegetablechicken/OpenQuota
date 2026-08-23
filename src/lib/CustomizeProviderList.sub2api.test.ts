@@ -39,6 +39,7 @@ const settings: AppSettings = {
         { id: 'sub2api@2.spark', enabled: false, section: 'onDemand', pinned: false },
         { id: 'sub2api@2.sparkWeekly', enabled: false, section: 'onDemand', pinned: false },
         { id: 'sub2api@2.rateLimitResets', enabled: false, section: 'onDemand', pinned: false },
+        { id: 'sub2api@2.extra', enabled: false, section: 'onDemand', pinned: false },
       ],
     },
   ],

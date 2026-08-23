@@ -63,6 +63,7 @@ export function sub2ApiMetricSupported(
   const prefix = `${providerId}.`;
   if (!metricId.startsWith(prefix)) return true;
   const suffix = metricId.slice(prefix.length);
+  if (suffix === 'extra') return false;
   if (upstream === 'claude') {
     return !['spark', 'sparkWeekly', 'rateLimitResets'].includes(suffix);
   }
