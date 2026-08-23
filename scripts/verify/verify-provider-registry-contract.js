@@ -22,7 +22,7 @@ const frontendConsumers = [
   'src/lib/shareCard.ts',
 ];
 const providerLiteral =
-  /["'](?:claude|codex|cursor|antigravity|copilot|devin|grok|opencode|openrouter|zai|kimi|minimax)["']/;
+  /["'](?:claude|codex|cursor|antigravity|copilot|devin|grok|opencode|openrouter|zai|kimi|minimax|sub2api)["']/;
 
 for (const file of rustConsumers) {
   const source = fs.readFileSync(new URL(file, root), 'utf8').split('#[cfg(test)]')[0];
@@ -79,6 +79,7 @@ const runtimeOrder = [
   'ClaudeProvider',
   ...[...runtimeBlock.matchAll(/Arc::new\((\w+Provider)::new\b/g)].map(([, provider]) => provider),
 ];
+if (/sub2api\.clone\(\)/.test(runtimeBlock)) runtimeOrder.push('Sub2ApiProvider');
 const expectedRuntimeOrder = [
   'ClaudeProvider',
   'CodexProvider',
@@ -92,6 +93,7 @@ const expectedRuntimeOrder = [
   'ZaiProvider',
   'KimiProvider',
   'MiniMaxProvider',
+  'Sub2ApiProvider',
 ];
 if (runtimeOrder.join(',') !== expectedRuntimeOrder.join(',')) {
   throw new Error(

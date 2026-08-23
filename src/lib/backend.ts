@@ -7,6 +7,8 @@ import type {
   ProviderApiKeyState,
   ResetClaimOutcome,
   SettingsViewState,
+  Sub2ApiConfigInput,
+  Sub2ApiConfigState,
   UpdateProgress,
   UpdateStatus,
   UsageViewState,
@@ -51,6 +53,18 @@ export function saveProviderApiKey(providerId: string, apiKey: string) {
 
 export function deleteProviderApiKey(providerId: string) {
   return invoke<ApiKeyMutationOutcome>('delete_provider_api_key', { providerId });
+}
+
+export function getSub2ApiConfigState() {
+  return invoke<Sub2ApiConfigState>('get_sub2api_config_state');
+}
+
+export function saveSub2ApiConfig(config: Sub2ApiConfigInput) {
+  return invoke<Sub2ApiConfigState>('save_sub2api_config', { config });
+}
+
+export function deleteSub2ApiConfig() {
+  return invoke<Sub2ApiConfigState>('delete_sub2api_config');
 }
 
 export function getAppSettings() {

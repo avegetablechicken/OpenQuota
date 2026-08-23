@@ -6,6 +6,7 @@
   import Icon from './Icon.svelte';
   import ProviderApiKeySection from './ProviderApiKeySection.svelte';
   import ProviderNameSection from './ProviderNameSection.svelte';
+  import Sub2ApiConfigSection from './Sub2ApiConfigSection.svelte';
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
   import { canRenameProvider } from './providerNames';
@@ -215,10 +216,14 @@
         </div>
       </div>
     {/each}
-    <ProviderApiKeySection
-      providerId={provider.id}
-      providerName={providerDisplayName(provider.id)}
-    />
+    {#if catalog.supportsConnectionConfiguration(provider.id)}
+      <Sub2ApiConfigSection />
+    {:else}
+      <ProviderApiKeySection
+        providerId={provider.id}
+        providerName={providerDisplayName(provider.id)}
+      />
+    {/if}
     {#if message}
       <div class:denied={messageKind === 'denied'} class="customization-pill" role="status">
         <Icon

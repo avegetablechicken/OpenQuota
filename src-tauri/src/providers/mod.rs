@@ -16,6 +16,7 @@ pub mod opencode;
 pub mod openrouter;
 mod pi_usage;
 mod registry;
+pub mod sub2api;
 #[cfg(test)]
 pub mod test_http;
 pub mod zai;
@@ -134,6 +135,10 @@ pub trait UsageProvider: Send + Sync {
     }
 
     fn supports_api_key_configuration(&self) -> bool {
+        false
+    }
+
+    fn supports_connection_configuration(&self) -> bool {
         false
     }
 

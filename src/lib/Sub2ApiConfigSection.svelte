@@ -1,0 +1,439 @@
+<script lang="ts">
+  import { onMount, tick } from 'svelte';
+  import { deleteSub2ApiConfig, getSub2ApiConfigState, saveSub2ApiConfig } from './backend';
+  import Icon from './Icon.svelte';
+  import ProviderIcon from './ProviderIcon.svelte';
+  import type { Sub2ApiConfigState } from './types';
+
+  let connectionState = $state<Sub2ApiConfigState>({
+    configured: false,
+    baseUrl: '',
+    email: '',
+  });
+  let open = $state(false);
+  let baseUrl = $state('');
+  let email = $state('');
+  let password = $state('');
+  let revealPassword = $state(false);
+  let saving = $state(false);
+  let confirmingRemoval = $state(false);
+  let error = $state<string | null>(null);
+  let toggleButton = $state<HTMLButtonElement>();
+  let removeButton = $state<HTMLButtonElement>();
+  let cancelButton = $state<HTMLButtonElement>();
+
+  const canSave = $derived(
+    Boolean(
+      baseUrl.trim() && email.trim() && (connectionState.configured || password.trim()) && !saving,
+    ),
+  );
+
+  function errorMessage(cause: unknown, fallback: string) {
+    if (typeof cause === 'string') return cause;
+    if (cause instanceof Error && cause.message) return cause.message;
+    return fallback;
+  }
+
+  function resetEditor(next = connectionState) {
+    baseUrl = next.baseUrl;
+    email = next.email;
+    password = '';
+    revealPassword = false;
+    confirmingRemoval = false;
+    error = null;
+  }
+
+  function toggleEditor() {
+    open = !open;
+    if (open) resetEditor();
+  }
+
+  async function save() {
+    if (!canSave) return;
+    saving = true;
+    error = null;
+    try {
+      connectionState = await saveSub2ApiConfig({
+        baseUrl: baseUrl.trim(),
+        email: email.trim(),
+        password,
+      });
+      resetEditor(connectionState);
+      open = false;
+      await tick();
+      toggleButton?.focus();
+    } catch (cause) {
+      error = errorMessage(cause, 'The Sub2API connection could not be saved.');
+    } finally {
+      password = '';
+      saving = false;
+    }
+  }
+
+  async function remove() {
+    if (saving) return;
+    saving = true;
+    error = null;
+    try {
+      connectionState = await deleteSub2ApiConfig();
+      resetEditor(connectionState);
+      open = false;
+      await tick();
+      toggleButton?.focus();
+    } catch (cause) {
+      error = errorMessage(cause, 'The Sub2API connection could not be removed.');
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function requestRemoval() {
+    confirmingRemoval = true;
+    error = null;
+    await tick();
+    cancelButton?.focus();
+  }
+
+  async function cancelRemoval() {
+    confirmingRemoval = false;
+    await tick();
+    removeButton?.focus();
+  }
+
+  function handleRemovalKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || saving) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void cancelRemoval();
+  }
+
+  onMount(() => {
+    void getSub2ApiConfigState()
+      .then((next) => {
+        connectionState = next;
+        resetEditor(next);
+      })
+      .catch((cause) => {
+        error = errorMessage(cause, 'The Sub2API connection could not be read.');
+        open = true;
+      });
+  });
+</script>
+
+<section class="sub2api-config-section" aria-label="Sub2API Connection">
+  <h2>Connection</h2>
+  <div class="sub2api-config-card">
+    <div class="sub2api-config-summary">
+      <ProviderIcon providerId="sub2api" size={20} />
+      <span>
+        <b>Codex upstream</b>
+        <small>{connectionState.configured ? connectionState.email : 'Not configured'}</small>
+      </span>
+      <i class:missing={!connectionState.configured} aria-hidden="true"></i>
+      <button bind:this={toggleButton} type="button" onclick={toggleEditor}
+        >{open ? 'Done' : connectionState.configured ? 'Edit' : 'Add'}</button
+      >
+    </div>
+
+    {#if open}
+      <div class="sub2api-config-editor">
+        <label>
+          <span>Base URL</span>
+          <input
+            type="url"
+            bind:value={baseUrl}
+            autocomplete="url"
+            spellcheck="false"
+            placeholder="https://sub2api.example.com"
+            aria-label="Sub2API Base URL"
+            disabled={saving}
+          />
+        </label>
+        <label>
+          <span>Email</span>
+          <input
+            type="email"
+            bind:value={email}
+            autocomplete="username"
+            spellcheck="false"
+            placeholder="admin@example.com"
+            aria-label="Sub2API administrator email"
+            disabled={saving}
+          />
+        </label>
+        <label>
+          <span>Password</span>
+          <div class="password-field">
+            <input
+              type={revealPassword ? 'text' : 'password'}
+              bind:value={password}
+              autocomplete="current-password"
+              placeholder={connectionState.configured
+                ? 'Leave blank to keep saved password'
+                : 'Password'}
+              aria-label="Sub2API administrator password"
+              disabled={saving}
+            />
+            <button
+              type="button"
+              aria-label={revealPassword ? 'Hide password' : 'Show password'}
+              onclick={() => (revealPassword = !revealPassword)}
+            >
+              <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
+            </button>
+          </div>
+        </label>
+
+        <div class="sub2api-config-actions">
+          <button class="primary" type="button" disabled={!canSave} onclick={() => void save()}
+            >{saving ? 'Connecting…' : 'Save'}</button
+          >
+          {#if connectionState.configured}
+            <button
+              bind:this={removeButton}
+              class="remove"
+              type="button"
+              disabled={saving || confirmingRemoval}
+              aria-label="Remove Sub2API connection"
+              onclick={() => void requestRemoval()}
+            >
+              <Icon name="clear-filled" size={15} />
+            </button>
+          {/if}
+        </div>
+
+        {#if confirmingRemoval}
+          <div
+            class="remove-confirm"
+            role="group"
+            aria-labelledby="remove-sub2api-title"
+            aria-describedby="remove-sub2api-message"
+          >
+            <strong id="remove-sub2api-title">Remove Sub2API connection?</strong>
+            <span id="remove-sub2api-message"
+              >The saved login will be removed from secure storage.</span
+            >
+            <div>
+              <button
+                bind:this={cancelButton}
+                type="button"
+                disabled={saving}
+                onkeydown={handleRemovalKeydown}
+                onclick={() => void cancelRemoval()}>Cancel</button
+              >
+              <button
+                class="destructive"
+                type="button"
+                disabled={saving}
+                onkeydown={handleRemovalKeydown}
+                onclick={() => void remove()}>{saving ? 'Removing…' : 'Remove'}</button
+              >
+            </div>
+          </div>
+        {/if}
+        {#if error}<div class="config-error" role="alert">{error}</div>{/if}
+      </div>
+    {:else if error}
+      <div class="config-error summary-error" role="alert">{error}</div>
+    {/if}
+  </div>
+</section>
+
+<style>
+  .sub2api-config-section {
+    margin-bottom: 14px;
+  }
+
+  .sub2api-config-section h2 {
+    margin: 0 8px 5px;
+    color: var(--secondary);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .sub2api-config-card {
+    overflow: hidden;
+    border-radius: 12px;
+    background: var(--card);
+  }
+
+  .sub2api-config-summary {
+    display: flex;
+    min-height: 42px;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+  }
+
+  .sub2api-config-summary > span {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+  }
+
+  .sub2api-config-summary b {
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sub2api-config-summary small {
+    overflow: hidden;
+    color: var(--secondary);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sub2api-config-summary i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #34c759;
+  }
+
+  .sub2api-config-summary i.missing {
+    background: var(--meter-critical);
+  }
+
+  .sub2api-config-summary > button,
+  .sub2api-config-actions button,
+  .remove-confirm button {
+    min-height: 26px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--text);
+    background: var(--button-hover);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .sub2api-config-summary > button {
+    padding: 0 10px;
+  }
+
+  .sub2api-config-editor {
+    display: grid;
+    gap: 10px;
+    padding: 11px 12px 12px;
+    border-top: 1px solid var(--separator);
+  }
+
+  .sub2api-config-editor > label {
+    display: grid;
+    gap: 4px;
+  }
+
+  .sub2api-config-editor > label > span {
+    color: var(--secondary);
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .sub2api-config-editor input {
+    box-sizing: border-box;
+    width: 100%;
+    height: 32px;
+    border: 1px solid var(--separator);
+    border-radius: 6px;
+    outline: none;
+    padding: 0 9px;
+    color: var(--text);
+    background: var(--tray);
+    font: inherit;
+    font-size: 12px;
+  }
+
+  .sub2api-config-editor input:focus {
+    border-color: var(--meter-fill);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--meter-fill) 20%, transparent);
+  }
+
+  .password-field {
+    position: relative;
+  }
+
+  .password-field input {
+    padding-right: 34px;
+  }
+
+  .password-field button,
+  .sub2api-config-actions .remove {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 0;
+    color: var(--secondary);
+    background: transparent;
+  }
+
+  .password-field button {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+  }
+
+  .sub2api-config-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .sub2api-config-actions .primary {
+    min-width: 62px;
+    padding: 0 12px;
+    color: white;
+    background: var(--meter-fill);
+  }
+
+  .sub2api-config-actions button:disabled,
+  .remove-confirm button:disabled {
+    opacity: 0.5;
+  }
+
+  .remove-confirm {
+    display: grid;
+    gap: 7px;
+    border-radius: 7px;
+    padding: 9px;
+    background: color-mix(in srgb, var(--meter-critical) 8%, transparent);
+    font-size: 11px;
+  }
+
+  .remove-confirm strong {
+    font-size: 11px;
+  }
+
+  .remove-confirm span {
+    color: var(--secondary);
+    line-height: 15px;
+  }
+
+  .remove-confirm > div {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .remove-confirm button {
+    padding: 0 10px;
+  }
+
+  .remove-confirm .destructive {
+    color: var(--error);
+  }
+
+  .config-error {
+    color: var(--error);
+    font-size: 10px;
+    line-height: 14px;
+  }
+
+  .summary-error {
+    padding: 0 12px 10px 42px;
+  }
+</style>
