@@ -9,6 +9,7 @@ import kimi from '../assets/provider-icons/kimi.svg?raw';
 import minimax from '../assets/provider-icons/minimax.svg?raw';
 import opencode from '../assets/provider-icons/opencode.svg?raw';
 import openrouter from '../assets/provider-icons/openrouter.svg?raw';
+import sub2api from '../assets/provider-icons/sub2api.svg?raw';
 import zai from '../assets/provider-icons/zai.svg?raw';
 
 const visuals: Record<string, { source: string; color: string | null }> = {
@@ -23,6 +24,7 @@ const visuals: Record<string, { source: string; color: string | null }> = {
   minimax: { source: minimax, color: '#E2167E' },
   opencode: { source: opencode, color: null },
   openrouter: { source: openrouter, color: null },
+  sub2api: { source: sub2api, color: '#39D9E7' },
   zai: { source: zai, color: null },
 };
 

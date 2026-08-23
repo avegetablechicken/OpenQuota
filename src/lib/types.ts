@@ -165,6 +165,18 @@ export interface ApiKeyMutationOutcome extends ProviderApiKeyState {
   warning?: string;
 }
 
+export interface Sub2ApiConfigState {
+  configured: boolean;
+  baseUrl: string;
+  email: string;
+}
+
+export interface Sub2ApiConfigInput {
+  baseUrl: string;
+  email: string;
+  password: string;
+}
+
 export interface ProviderDefinition {
   id: string;
   displayName: string;
@@ -178,6 +190,7 @@ export interface ProviderDefinition {
 export interface ProviderCatalog {
   providers: ProviderDefinition[];
   apiKeyProviderIds?: string[];
+  connectionConfigProviderIds?: string[];
 }
 
 export interface MetricLayout {

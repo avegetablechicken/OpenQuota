@@ -507,7 +507,7 @@
             >
             <span class="provider-error-row__message" role="alert">{state.error}</span>
             <span class="provider-error-row__actions">
-              {#if catalog.supportsApiKeyConfiguration(provider.id) && (state.errorKind === 'authentication' || state.errorKind === 'permission' || state.errorKind === 'credentialStorage')}
+              {#if (catalog.supportsApiKeyConfiguration(provider.id) || catalog.supportsConnectionConfiguration(provider.id)) && (state.errorKind === 'authentication' || state.errorKind === 'permission' || state.errorKind === 'credentialStorage')}
                 <button
                   type="button"
                   aria-label={`Configure ${providerDisplayName(provider.id)}`}

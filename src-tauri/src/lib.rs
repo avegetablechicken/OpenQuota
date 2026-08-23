@@ -51,7 +51,7 @@ use crate::{
         codex::CodexProvider, copilot::CopilotProvider, cursor::CursorProvider,
         detect_local_credentials, devin::DevinProvider, grok::GrokProvider, kimi::KimiProvider,
         minimax::MiniMaxProvider, opencode::OpenCodeProvider, openrouter::OpenRouterProvider,
-        zai::ZaiProvider, ProviderRegistry, UsageProvider,
+        sub2api::Sub2ApiProvider, zai::ZaiProvider, ProviderRegistry, UsageProvider,
     },
     storage::Storage,
     window::{
@@ -366,6 +366,7 @@ pub fn run() {
             app.manage(Arc::new(PanelResizeSession::new(storage.clone())));
             app_debug!("cache", "application database opened");
             let pricing = Arc::new(PricingStore::new(app_data_dir.join("pricing"))?);
+            let sub2api = Arc::new(Sub2ApiProvider::new());
             let mut providers = claude::runtimes(storage.clone(), pricing.clone())?;
             providers.extend(vec![
                 Arc::new(CodexProvider::new(storage.clone(), pricing.clone())?)
@@ -383,6 +384,7 @@ pub fn run() {
                 Arc::new(ZaiProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(KimiProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(MiniMaxProvider::new()?) as Arc<dyn UsageProvider>,
+                sub2api.clone() as Arc<dyn UsageProvider>,
             ]);
             let registry = Arc::new(ProviderRegistry::new(providers)?);
             let (settings_service, credential_detection_plan) =
@@ -406,6 +408,7 @@ pub fn run() {
             app.manage(service.clone());
             app.manage(settings.clone());
             app.manage(notifications.clone());
+            app.manage(sub2api);
             app.manage(Arc::new(CodexResetClaimService::new()?));
 
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
@@ -487,6 +490,9 @@ pub fn run() {
             commands::provider::get_provider_api_key_state,
             commands::provider::save_provider_api_key,
             commands::provider::delete_provider_api_key,
+            commands::provider::get_sub2api_config_state,
+            commands::provider::save_sub2api_config,
+            commands::provider::delete_sub2api_config,
             commands::usage::refresh_usage,
             commands::usage::refresh_provider_usage,
             commands::usage::claim_codex_reset_credit,

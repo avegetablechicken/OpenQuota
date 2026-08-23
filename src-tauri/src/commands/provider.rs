@@ -9,7 +9,10 @@ use crate::{
     models::{ApiKeyMutationOutcome, ApiKeyStatus, ProviderApiKeyState, ProviderLink},
     notifications::finish_refresh,
     pacing::NotificationEvaluator,
-    providers::{ProviderRegistry, UsageProvider},
+    providers::{
+        sub2api::{Sub2ApiConfigInput, Sub2ApiConfigState, Sub2ApiProvider},
+        ProviderRegistry, UsageProvider,
+    },
     service::ProviderService,
     settings::SettingsService,
     tray_presentation,
@@ -283,6 +286,71 @@ pub async fn delete_provider_api_key(
         warning: (applied.status_uncertain || !settings_reconciled)
             .then(|| incomplete_mutation_warning("removed")),
     })
+}
+
+#[tauri::command]
+pub async fn get_sub2api_config_state(
+    provider: State<'_, Arc<Sub2ApiProvider>>,
+) -> Result<Sub2ApiConfigState, String> {
+    let provider = provider.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || provider.config_state())
+        .await
+        .map_err(|_| "The Sub2API connection could not be read.".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_sub2api_config(
+    app: AppHandle,
+    provider: State<'_, Arc<Sub2ApiProvider>>,
+    service: State<'_, Arc<ProviderService>>,
+    settings: State<'_, Arc<SettingsService>>,
+    notifications: State<'_, Arc<NotificationEvaluator>>,
+    config: Sub2ApiConfigInput,
+) -> Result<Sub2ApiConfigState, String> {
+    let credential_guard = settings.lock_credential_mutation().await;
+    settings.record_provider_credential_mutation();
+    let provider = provider.inner().clone();
+    let state = tauri::async_runtime::spawn_blocking(move || provider.save_config(config))
+        .await
+        .map_err(|_| "The Sub2API connection could not be saved.".to_owned())?
+        .map_err(|error| error.to_string())?;
+
+    let command_guard = settings.lock_command_mutation().await;
+    reconcile_provider_credential_state(&app, &service, &settings, "sub2api", true, true)?;
+    drop(command_guard);
+    drop(credential_guard);
+    service.refresh("sub2api", true).await;
+    let usage = service.state();
+    let _ = app.emit("usage-state", &usage);
+    finish_refresh(&app, &usage, &settings, &notifications);
+    crate::app_info!("auth", "Sub2API connection saved");
+    Ok(state)
+}
+
+#[tauri::command]
+pub async fn delete_sub2api_config(
+    app: AppHandle,
+    provider: State<'_, Arc<Sub2ApiProvider>>,
+    service: State<'_, Arc<ProviderService>>,
+    settings: State<'_, Arc<SettingsService>>,
+) -> Result<Sub2ApiConfigState, String> {
+    let credential_guard = settings.lock_credential_mutation().await;
+    settings.record_provider_credential_mutation();
+    let provider = provider.inner().clone();
+    let state = tauri::async_runtime::spawn_blocking(move || provider.delete_config())
+        .await
+        .map_err(|_| "The Sub2API connection could not be removed.".to_owned())?
+        .map_err(|error| error.to_string())?;
+
+    let command_guard = settings.lock_command_mutation().await;
+    reconcile_provider_credential_state(&app, &service, &settings, "sub2api", false, false)?;
+    drop(command_guard);
+    drop(credential_guard);
+    let usage = service.state();
+    let _ = app.emit("usage-state", &usage);
+    crate::app_info!("auth", "Sub2API connection removed");
+    Ok(state)
 }
 
 #[cfg(test)]

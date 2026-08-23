@@ -36,6 +36,7 @@ impl ProviderRegistry {
         let mut metric_indices = HashMap::new();
         let mut metric_owners = BTreeMap::<String, String>::new();
         let mut api_key_provider_ids = Vec::new();
+        let mut connection_config_provider_ids = Vec::new();
 
         for provider in providers {
             let mut definition = provider.definition();
@@ -60,6 +61,9 @@ impl ProviderRegistry {
             if provider.supports_api_key_configuration() {
                 api_key_provider_ids.push(definition.id.clone());
             }
+            if provider.supports_connection_configuration() {
+                connection_config_provider_ids.push(definition.id.clone());
+            }
             runtimes.insert(definition.id.clone(), provider);
             definitions.push(definition);
         }
@@ -75,6 +79,7 @@ impl ProviderRegistry {
             catalog: ProviderCatalog {
                 providers: definitions,
                 api_key_provider_ids,
+                connection_config_provider_ids,
             },
             definition_indices,
             metric_indices,

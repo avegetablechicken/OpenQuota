@@ -67,6 +67,8 @@ from this repository's official release page; on macOS, manual approval may be r
 - **[Z.ai](docs/providers/zai.md)** — GLM Coding Plan session, weekly, and web-search quotas (API key)
 - **[Kimi](docs/providers/kimi.md)** — Kimi Code session and weekly quotas (API key)
 - **[MiniMax](docs/providers/minimax.md)** — Token Plan session and weekly quotas (API key)
+- **[Sub2API](docs/providers/sub2api.md)** — quota for one Codex upstream account through a
+  self-hosted Sub2API administrator login
 
 Most providers use credentials already available on your computer. OpenRouter, Z.ai, Kimi, and
 MiniMax require API keys, which you can add in Customize; OpenQuota stores them securely in your

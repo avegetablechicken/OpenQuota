@@ -19,6 +19,7 @@ describe('native visual contract', () => {
     'grok',
     'opencode',
     'openrouter',
+    'sub2api',
     'zai',
   ])('packages the exact %s provider icon', (providerId) => {
     const { container } = render(ProviderIcon, { providerId });
@@ -65,6 +66,13 @@ describe('native visual contract', () => {
     const account = render(ProviderIcon, { providerId: 'claude@1234abcd' });
 
     expect(account.container.innerHTML).toBe(claude.container.innerHTML);
+  });
+
+  it('composes the Sub2API mark with its Codex upstream mark', () => {
+    const { container } = render(ProviderIcon, { providerId: 'sub2api' });
+    expect(container.querySelectorAll('path')).toHaveLength(2);
+    expect(container.querySelector('circle')).not.toBeNull();
+    expect(container.querySelector('path[stroke="#39D9E7"]')).not.toBeNull();
   });
 
   it('uses the shared hover dwell and grace timing for Usage Trend details', async () => {
