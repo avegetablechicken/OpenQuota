@@ -2857,6 +2857,7 @@ dependencies = [
  "cc",
  "chrono",
  "fontdue",
+ "ipnet",
  "notify-rust",
  "regex",
  "reqwest",
