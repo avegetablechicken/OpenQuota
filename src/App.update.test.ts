@@ -85,7 +85,16 @@ describe('OpenQuota update lifecycle', () => {
         settings: expect.objectContaining({ lastUpdateCheckAt: expect.any(String) }),
       }),
     );
-    await fireEvent.click(screen.getByRole('combobox', { name: 'Icon Style' }));
+    const iconStyle = screen.getByRole('combobox', { name: 'Icon Style' });
+    await fireEvent.click(iconStyle);
+    await fireEvent.click(screen.getByRole('option', { name: 'OpenQuota' }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        'save_app_settings',
+        expect.objectContaining({ settings: expect.objectContaining({ menuBarStyle: 'icon' }) }),
+      ),
+    );
+    await fireEvent.click(iconStyle);
     await fireEvent.click(screen.getByRole('option', { name: 'Bars' }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(

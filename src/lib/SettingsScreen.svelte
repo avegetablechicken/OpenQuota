@@ -187,6 +187,7 @@
           label="Icon Style"
           value={settings.menuBarStyle}
           options={[
+            { value: 'icon', label: 'OpenQuota' },
             { value: 'text', label: 'Text' },
             { value: 'bars', label: 'Bars' },
           ]}
