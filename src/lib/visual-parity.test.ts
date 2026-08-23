@@ -74,6 +74,14 @@ describe('native visual contract', () => {
     expect(container.querySelectorAll('path')).toHaveLength(2);
     expect(container.querySelector('circle')).not.toBeNull();
     expect(container.querySelector('path[stroke="#39D9E7"]')).not.toBeNull();
+    expect(container.querySelector('[data-icon-layer="sub2api"]')).toHaveAttribute(
+      'transform',
+      'scale(2.85)',
+    );
+    expect(container.querySelector('[data-icon-layer="upstream"]')).toHaveAttribute(
+      'transform',
+      'translate(44 44) scale(.56)',
+    );
   });
 
   it('can compose the Sub2API mark with its Claude upstream mark', () => {
