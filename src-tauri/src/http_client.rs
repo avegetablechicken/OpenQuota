@@ -158,48 +158,73 @@ mod platform {
     }
 
     struct SystemProxyResolver {
-        bypass: BypassRules,
-        mode: SystemProxyMode,
+        pac: Option<PacResolver>,
+        fallback: Option<StaticProxyConfig>,
     }
 
-    enum SystemProxyMode {
-        Pac(PacResolver),
-        Static {
-            http: Option<String>,
-            https: Option<String>,
-        },
+    struct StaticProxyConfig {
+        bypass: BypassRules,
+        http: Option<String>,
+        https: Option<String>,
     }
 
     impl SystemProxyResolver {
         fn from_settings() -> Option<Self> {
             let store = SCDynamicStoreBuilder::new("OpenQuota").build()?;
             let settings = store.get_proxies()?;
-            let bypass = BypassRules::from_system_settings(&settings);
-
-            if flag_setting(&settings, unsafe { kSCPropNetProxiesProxyAutoConfigEnable }) {
-                match system_pac_script(&settings)
+            let fallback = StaticProxyConfig::from_settings(&settings);
+            let pac = if flag_setting(&settings, unsafe { kSCPropNetProxiesProxyAutoConfigEnable })
+            {
+                let resolver = system_pac_script(&settings)
                     .ok()
-                    .and_then(|script| PacResolver::new(&script))
-                {
-                    Some(resolver) => {
-                        crate::app_info!("http", "macOS PAC proxy enabled");
-                        return Some(Self {
-                            bypass,
-                            mode: SystemProxyMode::Pac(resolver),
-                        });
-                    }
-                    None => crate::app_warn!("http", "macOS PAC proxy unavailable"),
+                    .and_then(|script| PacResolver::new(&script));
+                if resolver.is_some() {
+                    crate::app_info!("http", "macOS PAC proxy enabled");
+                } else {
+                    crate::app_warn!("http", "macOS PAC proxy unavailable");
+                }
+                resolver
+            } else {
+                None
+            };
+            if pac.is_none() && fallback.is_none() {
+                return None;
+            }
+            if pac.is_none() && fallback.is_some() {
+                crate::app_info!("http", "macOS static proxy enabled");
+            }
+            Some(Self { pac, fallback })
+        }
+
+        fn proxy_for_url(&self, url: &Url) -> Option<String> {
+            if let Some(pac) = &self.pac {
+                return self.apply_pac_decision(url, pac.decision_for_url(url));
+            }
+            self.fallback.as_ref()?.proxy_for_url(url)
+        }
+
+        fn apply_pac_decision(&self, url: &Url, decision: PacDecision) -> Option<String> {
+            match decision {
+                PacDecision::Proxy(proxy) => Some(proxy),
+                PacDecision::Direct => None,
+                PacDecision::Error => {
+                    crate::app_warn!("http", "macOS PAC evaluation failed; using fallback");
+                    self.fallback.as_ref()?.proxy_for_url(url)
                 }
             }
+        }
+    }
 
+    impl StaticProxyConfig {
+        fn from_settings(settings: &ProxySettings) -> Option<Self> {
             let http = static_proxy_setting(
-                &settings,
+                settings,
                 unsafe { kSCPropNetProxiesHTTPEnable },
                 unsafe { kSCPropNetProxiesHTTPProxy },
                 unsafe { kSCPropNetProxiesHTTPPort },
             );
             let https = static_proxy_setting(
-                &settings,
+                settings,
                 unsafe { kSCPropNetProxiesHTTPSEnable },
                 unsafe { kSCPropNetProxiesHTTPSProxy },
                 unsafe { kSCPropNetProxiesHTTPSPort },
@@ -207,10 +232,10 @@ mod platform {
             if http.is_none() && https.is_none() {
                 return None;
             }
-            crate::app_info!("http", "macOS static proxy enabled");
             Some(Self {
-                bypass,
-                mode: SystemProxyMode::Static { http, https },
+                bypass: BypassRules::from_system_settings(settings),
+                http,
+                https,
             })
         }
 
@@ -218,13 +243,10 @@ mod platform {
             if self.bypass.matches(url) {
                 return None;
             }
-            match &self.mode {
-                SystemProxyMode::Pac(resolver) => resolver.proxy_for_url(url),
-                SystemProxyMode::Static { http, https } => match url.scheme() {
-                    "http" => http.clone(),
-                    "https" => https.clone(),
-                    _ => None,
-                },
+            match url.scheme() {
+                "http" => self.http.clone(),
+                "https" => self.https.clone(),
+                _ => None,
             }
         }
     }
@@ -328,8 +350,17 @@ mod platform {
         All,
         Ip(IpAddr),
         Network(IpNet),
-        Host(String),
+        Host {
+            value: String,
+            include_subdomains: bool,
+        },
         Pattern(String),
+    }
+
+    #[derive(Clone, Copy)]
+    enum HostMatch {
+        Exact,
+        IncludeSubdomains,
     }
 
     impl BypassRules {
@@ -338,16 +369,25 @@ mod platform {
                 string_array_setting(settings, unsafe { kSCPropNetProxiesExceptionsList });
             let exclude_simple =
                 flag_setting(settings, unsafe { kSCPropNetProxiesExcludeSimpleHostnames });
-            Self::from_entries(entries.iter().map(String::as_str), exclude_simple)
+            Self::from_entries(
+                entries.iter().map(String::as_str),
+                exclude_simple,
+                HostMatch::Exact,
+            )
         }
 
         fn from_comma_list(value: &str, exclude_simple: bool) -> Self {
-            Self::from_entries(value.split(','), exclude_simple)
+            Self::from_entries(
+                value.split(','),
+                exclude_simple,
+                HostMatch::IncludeSubdomains,
+            )
         }
 
         fn from_entries<'a>(
             entries: impl IntoIterator<Item = &'a str>,
             exclude_simple: bool,
+            host_match: HostMatch,
         ) -> Self {
             let mut result = Self {
                 exclude_simple_hostnames: exclude_simple,
@@ -370,9 +410,10 @@ mod platform {
                     } else if raw.contains('*') || raw.contains('?') {
                         result.rules.push(BypassRule::Pattern(raw));
                     } else {
-                        result
-                            .rules
-                            .push(BypassRule::Host(raw.trim_start_matches('.').to_owned()));
+                        result.rules.push(BypassRule::Host {
+                            value: raw.trim_start_matches('.').to_owned(),
+                            include_subdomains: matches!(host_match, HostMatch::IncludeSubdomains),
+                        });
                     }
                 }
             }
@@ -395,11 +436,15 @@ mod platform {
                 BypassRule::All => true,
                 BypassRule::Ip(expected) => ip.as_ref() == Some(expected),
                 BypassRule::Network(network) => ip.is_some_and(|ip| network.contains(&ip)),
-                BypassRule::Host(expected) => {
-                    host == *expected
-                        || host
-                            .strip_suffix(expected)
-                            .is_some_and(|prefix| prefix.ends_with('.'))
+                BypassRule::Host {
+                    value,
+                    include_subdomains,
+                } => {
+                    host == *value
+                        || (*include_subdomains
+                            && host
+                                .strip_suffix(value)
+                                .is_some_and(|prefix| prefix.ends_with('.')))
                 }
                 BypassRule::Pattern(pattern) => wildcard_matches(pattern, &host),
             })
@@ -506,6 +551,13 @@ mod platform {
         Ok(script)
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum PacDecision {
+        Proxy(String),
+        Direct,
+        Error,
+    }
+
     struct PacResolver {
         engine: Mutex<()>,
     }
@@ -525,30 +577,42 @@ mod platform {
             })
         }
 
-        fn proxy_for_url(&self, url: &Url) -> Option<String> {
-            let host = url.host_str()?;
-            let url = CString::new(url.as_str()).ok()?;
-            let host = CString::new(host).ok()?;
-            let _guard = self.engine.lock().ok()?;
+        fn decision_for_url(&self, url: &Url) -> PacDecision {
+            let Some(host) = url.host_str() else {
+                return PacDecision::Error;
+            };
+            let Ok(url) = CString::new(url.as_str()) else {
+                return PacDecision::Error;
+            };
+            let Ok(host) = CString::new(host) else {
+                return PacDecision::Error;
+            };
+            let Ok(_guard) = self.engine.lock() else {
+                return PacDecision::Error;
+            };
             let result = unsafe { pacparser_find_proxy(url.as_ptr(), host.as_ptr()) };
             if result.is_null() {
-                return None;
+                return PacDecision::Error;
             }
-            let result = unsafe { CStr::from_ptr(result) }.to_str().ok()?;
-            proxy_url_from_pac(result)
+            let Ok(result) = unsafe { CStr::from_ptr(result) }.to_str() else {
+                return PacDecision::Error;
+            };
+            pac_decision_from_result(result)
         }
     }
 
-    fn proxy_url_from_pac(result: &str) -> Option<String> {
+    fn pac_decision_from_result(result: &str) -> PacDecision {
         for directive in result
             .split(';')
             .map(str::trim)
             .filter(|part| !part.is_empty())
         {
             let mut fields = directive.split_whitespace();
-            let kind = fields.next()?.to_ascii_uppercase();
+            let Some(kind) = fields.next().map(str::to_ascii_uppercase) else {
+                continue;
+            };
             if kind == "DIRECT" {
-                return None;
+                return PacDecision::Direct;
             }
             let Some(address) = fields.next() else {
                 continue;
@@ -565,17 +629,17 @@ mod platform {
             };
             let proxy = format!("{scheme}://{address}");
             if Url::parse(&proxy).is_ok() {
-                return Some(proxy);
+                return PacDecision::Proxy(proxy);
             }
         }
-        None
+        PacDecision::Error
     }
 
     #[cfg(test)]
     mod tests {
         use super::{
-            proxy_url_from_pac, BypassRules, EnvironmentProxyConfig, ProxyResolver,
-            SystemProxyMode, SystemProxyResolver,
+            pac_decision_from_result, BypassRules, EnvironmentProxyConfig, HostMatch, PacDecision,
+            ProxyResolver, StaticProxyConfig, SystemProxyResolver,
         };
         use reqwest::Url;
 
@@ -593,11 +657,12 @@ mod platform {
                     bypass: BypassRules::from_comma_list("direct.example", false),
                 },
                 system: Some(SystemProxyResolver {
-                    bypass: BypassRules::default(),
-                    mode: SystemProxyMode::Static {
+                    pac: None,
+                    fallback: Some(StaticProxyConfig {
+                        bypass: BypassRules::default(),
                         http: Some("http://system-http:8080/".into()),
                         https: Some("http://system-https:8443/".into()),
-                    },
+                    }),
                 }),
             };
 
@@ -622,11 +687,16 @@ mod platform {
                     bypass: BypassRules::default(),
                 },
                 system: Some(SystemProxyResolver {
-                    bypass: BypassRules::from_comma_list("bypass.example", false),
-                    mode: SystemProxyMode::Static {
+                    pac: None,
+                    fallback: Some(StaticProxyConfig {
+                        bypass: BypassRules::from_entries(
+                            ["bypass.example"],
+                            false,
+                            HostMatch::Exact,
+                        ),
                         http: Some("http://system-http:8080/".into()),
                         https: Some("http://system-https:8443/".into()),
-                    },
+                    }),
                 }),
             };
 
@@ -635,6 +705,34 @@ mod platform {
                 Some("http://environment:8080/".into())
             );
             assert_eq!(resolver.proxy_for_url(&url("https://bypass.example")), None);
+        }
+
+        #[test]
+        fn pac_direct_is_terminal_and_only_errors_use_static_fallback() {
+            let resolver = SystemProxyResolver {
+                pac: None,
+                fallback: Some(StaticProxyConfig {
+                    bypass: BypassRules::default(),
+                    http: Some("http://system-http:8080/".into()),
+                    https: Some("http://system-https:8443/".into()),
+                }),
+            };
+            let target = url("https://example.com");
+            assert_eq!(
+                resolver.apply_pac_decision(
+                    &target,
+                    PacDecision::Proxy("http://pac-proxy:8118/".into())
+                ),
+                Some("http://pac-proxy:8118/".into())
+            );
+            assert_eq!(
+                resolver.apply_pac_decision(&target, PacDecision::Direct),
+                None
+            );
+            assert_eq!(
+                resolver.apply_pac_decision(&target, PacDecision::Error),
+                Some("http://system-https:8443/".into())
+            );
         }
 
         #[test]
@@ -658,26 +756,44 @@ mod platform {
         }
 
         #[test]
+        fn system_plain_hosts_are_exact_and_wildcards_select_subdomains() {
+            let rules =
+                BypassRules::from_entries(["example.com", "*.internal"], false, HostMatch::Exact);
+            assert!(rules.matches(&url("https://example.com")));
+            assert!(!rules.matches(&url("https://www.example.com")));
+            assert!(rules.matches(&url("https://service.internal")));
+        }
+
+        #[test]
         fn translates_supported_pac_directives_in_order() {
             assert_eq!(
-                proxy_url_from_pac("PROXY 127.0.0.1:8118; DIRECT"),
-                Some("http://127.0.0.1:8118".into())
+                pac_decision_from_result("PROXY 127.0.0.1:8118; DIRECT"),
+                PacDecision::Proxy("http://127.0.0.1:8118".into())
             );
             assert_eq!(
-                proxy_url_from_pac("SOCKS5 proxy.example:1080; DIRECT"),
-                Some("socks5h://proxy.example:1080".into())
+                pac_decision_from_result("SOCKS5 proxy.example:1080; DIRECT"),
+                PacDecision::Proxy("socks5h://proxy.example:1080".into())
             );
-            assert_eq!(proxy_url_from_pac("DIRECT; PROXY ignored:80"), None);
             assert_eq!(
-                proxy_url_from_pac("QUIC unsupported:443; HTTPS proxy.example:8443"),
-                Some("https://proxy.example:8443".into())
+                pac_decision_from_result("DIRECT; PROXY ignored:80"),
+                PacDecision::Direct
+            );
+            assert_eq!(
+                pac_decision_from_result("QUIC unsupported:443; HTTPS proxy.example:8443"),
+                PacDecision::Proxy("https://proxy.example:8443".into())
             );
         }
 
         #[test]
         fn rejects_malformed_proxy_addresses() {
-            assert_eq!(proxy_url_from_pac("PROXY ; DIRECT"), None);
-            assert_eq!(proxy_url_from_pac("PROXY not a url; DIRECT"), None);
+            assert_eq!(
+                pac_decision_from_result("PROXY ; DIRECT"),
+                PacDecision::Direct
+            );
+            assert_eq!(
+                pac_decision_from_result("PROXY not a url"),
+                PacDecision::Error
+            );
         }
 
         #[test]
