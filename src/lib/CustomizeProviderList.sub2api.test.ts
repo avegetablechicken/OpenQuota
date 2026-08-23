@@ -33,7 +33,13 @@ const settings: AppSettings = {
       enabled: true,
       detected: true,
       expanded: false,
-      metrics: [],
+      metrics: [
+        { id: 'sub2api@2.session', enabled: true, section: 'alwaysVisible', pinned: true },
+        { id: 'sub2api@2.sonnet', enabled: false, section: 'onDemand', pinned: false },
+        { id: 'sub2api@2.spark', enabled: false, section: 'onDemand', pinned: false },
+        { id: 'sub2api@2.sparkWeekly', enabled: false, section: 'onDemand', pinned: false },
+        { id: 'sub2api@2.rateLimitResets', enabled: false, section: 'onDemand', pinned: false },
+      ],
     },
   ],
   showTotalSpend: false,
@@ -90,7 +96,7 @@ describe('CustomizeProviderList Sub2API labels', () => {
     expect(await screen.findByText('Sub2API · Claude')).toBeInTheDocument();
     expect(screen.queryByText(/Sub2API 2/)).not.toBeInTheDocument();
     expect(screen.queryByText('192.0.2.8:6060')).not.toBeInTheDocument();
-    expect(screen.getByText('0 metrics')).toBeInTheDocument();
+    expect(screen.getByText('2 metrics')).toBeInTheDocument();
     expect(mocks.invoke).toHaveBeenCalledWith('get_sub2api_config_state', {
       providerId: 'sub2api@2',
     });
@@ -108,6 +114,10 @@ describe('CustomizeProviderList Sub2API labels', () => {
     duplicateSettings.providers.push({
       ...duplicateSettings.providers[0],
       id: 'sub2api@3',
+      metrics: duplicateSettings.providers[0].metrics.map((metric) => ({
+        ...metric,
+        id: metric.id.replace('sub2api@2.', 'sub2api@3.'),
+      })),
     });
     duplicateSettings.knownProviderIds.push('sub2api@3');
     mocks.invoke.mockImplementation((_command, args: { providerId: string }) =>
@@ -136,6 +146,6 @@ describe('CustomizeProviderList Sub2API labels', () => {
     expect(await screen.findByText('192.0.2.8:6060')).toBeInTheDocument();
     expect(screen.getByText('claude.example.com')).toBeInTheDocument();
     expect(screen.getAllByText('Sub2API · Claude')).toHaveLength(2);
-    expect(screen.queryByText('0 metrics')).not.toBeInTheDocument();
+    expect(screen.queryByText('2 metrics')).not.toBeInTheDocument();
   });
 });
