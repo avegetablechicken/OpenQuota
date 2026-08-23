@@ -8,6 +8,7 @@
   import { ringSectorPath, spendRingArcs } from './spendRing';
   import { emptySpendMessage, projectSpend, type SpendProjection } from './totalSpend';
   import { providerFamily } from './providerIconPaths';
+  import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
   import type { AppSettings, UsageHistory } from './types';
 
   interface Props {
@@ -18,7 +19,9 @@
     onShare: (projection: SpendProjection) => boolean | Promise<boolean>;
   }
   let { providers, settings, catalog, onChange, onShare }: Props = $props();
-  const providerDisplayName = (id: string) => catalog.displayName(id, settings.providerNames);
+  const providerDisplayName = (id: string) =>
+    sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
+    catalog.displayName(id, settings.providerNames);
   const projection = $derived(
     projectSpend(providers, settings.totalSpendPeriod, settings.totalSpendMetric),
   );
