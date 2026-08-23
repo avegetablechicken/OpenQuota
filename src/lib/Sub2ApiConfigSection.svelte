@@ -79,7 +79,7 @@
         password,
         upstream,
       });
-      rememberSub2ApiUpstream(providerId, connectionState.upstream);
+      rememberSub2ApiUpstream(providerId, connectionState.upstream, connectionState.baseUrl);
       resetEditor(connectionState);
       open = false;
       await tick();
@@ -98,7 +98,7 @@
     error = null;
     try {
       connectionState = await clearSub2ApiConfig(providerId);
-      rememberSub2ApiUpstream(providerId, connectionState.upstream);
+      rememberSub2ApiUpstream(providerId, connectionState.upstream, connectionState.baseUrl);
       resetEditor(connectionState);
       await tick();
       clearButton?.focus();
@@ -171,7 +171,7 @@
     void getSub2ApiConfigState(providerId)
       .then((next) => {
         connectionState = next;
-        rememberSub2ApiUpstream(providerId, next.upstream);
+        rememberSub2ApiUpstream(providerId, next.upstream, next.baseUrl);
         resetEditor(next);
       })
       .catch((cause) => {
