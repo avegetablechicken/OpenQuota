@@ -1,9 +1,21 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { deleteSub2ApiConfig, getSub2ApiConfigState, saveSub2ApiConfig } from './backend';
+  import {
+    clearSub2ApiConfig,
+    deleteSub2ApiConfig,
+    getSub2ApiConfigState,
+    saveSub2ApiConfig,
+  } from './backend';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
   import type { Sub2ApiConfigState } from './types';
+
+  interface Props {
+    providerId: string;
+    onRemove?: () => void;
+  }
+
+  let { providerId, onRemove = () => {} }: Props = $props();
 
   let connectionState = $state<Sub2ApiConfigState>({
     configured: false,
@@ -16,11 +28,14 @@
   let password = $state('');
   let revealPassword = $state(false);
   let saving = $state(false);
-  let confirmingRemoval = $state(false);
+  let confirmingClear = $state(false);
+  let confirmingItemRemoval = $state(false);
   let error = $state<string | null>(null);
   let toggleButton = $state<HTMLButtonElement>();
-  let removeButton = $state<HTMLButtonElement>();
-  let cancelButton = $state<HTMLButtonElement>();
+  let clearButton = $state<HTMLButtonElement>();
+  let clearCancelButton = $state<HTMLButtonElement>();
+  let removeItemButton = $state<HTMLButtonElement>();
+  let removeItemCancelButton = $state<HTMLButtonElement>();
 
   const canSave = $derived(
     Boolean(
@@ -39,7 +54,7 @@
     email = next.email;
     password = '';
     revealPassword = false;
-    confirmingRemoval = false;
+    confirmingClear = false;
     error = null;
   }
 
@@ -53,7 +68,7 @@
     saving = true;
     error = null;
     try {
-      connectionState = await saveSub2ApiConfig({
+      connectionState = await saveSub2ApiConfig(providerId, {
         baseUrl: baseUrl.trim(),
         email: email.trim(),
         password,
@@ -70,45 +85,81 @@
     }
   }
 
-  async function remove() {
+  async function clearConnection() {
     if (saving) return;
     saving = true;
     error = null;
     try {
-      connectionState = await deleteSub2ApiConfig();
+      connectionState = await clearSub2ApiConfig(providerId);
       resetEditor(connectionState);
-      open = false;
       await tick();
-      toggleButton?.focus();
+      clearButton?.focus();
     } catch (cause) {
-      error = errorMessage(cause, 'The Sub2API connection could not be removed.');
+      error = errorMessage(cause, 'The Sub2API connection could not be cleared.');
     } finally {
       saving = false;
     }
   }
 
-  async function requestRemoval() {
-    confirmingRemoval = true;
+  async function removeItem() {
+    if (saving) return;
+    saving = true;
+    error = null;
+    try {
+      connectionState = await deleteSub2ApiConfig(providerId);
+      resetEditor(connectionState);
+      confirmingItemRemoval = false;
+      open = false;
+      onRemove();
+    } catch (cause) {
+      error = errorMessage(cause, 'The Sub2API item could not be removed.');
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function requestClear() {
+    confirmingClear = true;
     error = null;
     await tick();
-    cancelButton?.focus();
+    clearCancelButton?.focus();
   }
 
-  async function cancelRemoval() {
-    confirmingRemoval = false;
+  async function cancelClear() {
+    confirmingClear = false;
     await tick();
-    removeButton?.focus();
+    clearButton?.focus();
   }
 
-  function handleRemovalKeydown(event: KeyboardEvent) {
+  async function requestItemRemoval() {
+    confirmingItemRemoval = true;
+    error = null;
+    await tick();
+    removeItemCancelButton?.focus();
+  }
+
+  async function cancelItemRemoval() {
+    confirmingItemRemoval = false;
+    await tick();
+    removeItemButton?.focus();
+  }
+
+  function handleClearKeydown(event: KeyboardEvent) {
     if (event.key !== 'Escape' || saving) return;
     event.preventDefault();
     event.stopPropagation();
-    void cancelRemoval();
+    void cancelClear();
+  }
+
+  function handleItemRemovalKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || saving) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void cancelItemRemoval();
   }
 
   onMount(() => {
-    void getSub2ApiConfigState()
+    void getSub2ApiConfigState(providerId)
       .then((next) => {
         connectionState = next;
         resetEditor(next);
@@ -124,7 +175,7 @@
   <h2>Connection</h2>
   <div class="sub2api-config-card">
     <div class="sub2api-config-summary">
-      <ProviderIcon providerId="sub2api" size={20} />
+      <ProviderIcon {providerId} size={20} />
       <span>
         <b>Codex upstream</b>
         <small>{connectionState.configured ? connectionState.email : 'Not configured'}</small>
@@ -190,43 +241,44 @@
           >
           {#if connectionState.configured}
             <button
-              bind:this={removeButton}
-              class="remove"
+              bind:this={clearButton}
+              class="clear"
               type="button"
-              disabled={saving || confirmingRemoval}
-              aria-label="Remove Sub2API connection"
-              onclick={() => void requestRemoval()}
+              disabled={saving || confirmingClear}
+              aria-label="Clear Sub2API connection"
+              title="Clear Sub2API connection"
+              onclick={() => void requestClear()}
             >
               <Icon name="clear-filled" size={15} />
             </button>
           {/if}
         </div>
 
-        {#if confirmingRemoval}
+        {#if confirmingClear}
           <div
-            class="remove-confirm"
+            class="clear-confirm"
             role="group"
-            aria-labelledby="remove-sub2api-title"
-            aria-describedby="remove-sub2api-message"
+            aria-labelledby="clear-sub2api-title"
+            aria-describedby="clear-sub2api-message"
           >
-            <strong id="remove-sub2api-title">Remove Sub2API connection?</strong>
-            <span id="remove-sub2api-message"
-              >The saved login will be removed from secure storage.</span
+            <strong id="clear-sub2api-title">Clear Sub2API connection?</strong>
+            <span id="clear-sub2api-message"
+              >The Base URL and saved login will be removed. This Sub2API item will remain.</span
             >
             <div>
               <button
-                bind:this={cancelButton}
+                bind:this={clearCancelButton}
                 type="button"
                 disabled={saving}
-                onkeydown={handleRemovalKeydown}
-                onclick={() => void cancelRemoval()}>Cancel</button
+                onkeydown={handleClearKeydown}
+                onclick={() => void cancelClear()}>Cancel</button
               >
               <button
                 class="destructive"
                 type="button"
                 disabled={saving}
-                onkeydown={handleRemovalKeydown}
-                onclick={() => void remove()}>{saving ? 'Removing…' : 'Remove'}</button
+                onkeydown={handleClearKeydown}
+                onclick={() => void clearConnection()}>{saving ? 'Clearing…' : 'Clear'}</button
               >
             </div>
           </div>
@@ -237,6 +289,55 @@
       <div class="config-error summary-error" role="alert">{error}</div>
     {/if}
   </div>
+</section>
+
+<section class="sub2api-item-actions" aria-label="Sub2API Item">
+  <button
+    bind:this={removeItemButton}
+    class="remove-item-row"
+    type="button"
+    disabled={saving || confirmingItemRemoval}
+    onclick={() => void requestItemRemoval()}
+  >
+    <Icon name="clear-filled" size={17} />
+    <span>
+      <b>Delete Sub2API</b>
+      <small>Remove this provider and its connection</small>
+    </span>
+    <Icon name="chevron-right" size={13} strokeWidth={2.2} />
+  </button>
+
+  {#if confirmingItemRemoval}
+    <div
+      class="remove-item-confirm"
+      role="group"
+      aria-labelledby="remove-sub2api-item-title"
+      aria-describedby="remove-sub2api-item-message"
+    >
+      <strong id="remove-sub2api-item-title">Delete this Sub2API item?</strong>
+      <span id="remove-sub2api-item-message"
+        >{connectionState.configured
+          ? 'The provider and its saved login will be removed.'
+          : 'This empty configuration item will be removed.'}</span
+      >
+      <div>
+        <button
+          bind:this={removeItemCancelButton}
+          type="button"
+          disabled={saving}
+          onkeydown={handleItemRemovalKeydown}
+          onclick={() => void cancelItemRemoval()}>Cancel</button
+        >
+        <button
+          class="destructive"
+          type="button"
+          disabled={saving}
+          onkeydown={handleItemRemovalKeydown}
+          onclick={() => void removeItem()}>{saving ? 'Deleting…' : 'Delete'}</button
+        >
+      </div>
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -301,7 +402,8 @@
 
   .sub2api-config-summary > button,
   .sub2api-config-actions button,
-  .remove-confirm button {
+  .clear-confirm button,
+  .remove-item-confirm button {
     min-height: 26px;
     border: 0;
     border-radius: 6px;
@@ -360,8 +462,7 @@
     padding-right: 34px;
   }
 
-  .password-field button,
-  .sub2api-config-actions .remove {
+  .password-field button {
     display: grid;
     width: 28px;
     height: 28px;
@@ -390,12 +491,25 @@
     background: var(--meter-fill);
   }
 
+  .sub2api-config-actions .clear {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    place-items: center;
+    color: var(--secondary);
+    background: transparent;
+  }
+
   .sub2api-config-actions button:disabled,
-  .remove-confirm button:disabled {
+  .clear-confirm button:disabled,
+  .remove-item-confirm button:disabled,
+  .remove-item-row:disabled {
     opacity: 0.5;
   }
 
-  .remove-confirm {
+  .clear-confirm,
+  .remove-item-confirm {
     display: grid;
     gap: 7px;
     border-radius: 7px;
@@ -404,27 +518,71 @@
     font-size: 11px;
   }
 
-  .remove-confirm strong {
+  .clear-confirm strong,
+  .remove-item-confirm strong {
     font-size: 11px;
   }
 
-  .remove-confirm span {
+  .clear-confirm span,
+  .remove-item-confirm span {
     color: var(--secondary);
     line-height: 15px;
   }
 
-  .remove-confirm > div {
+  .clear-confirm > div,
+  .remove-item-confirm > div {
     display: flex;
     justify-content: flex-end;
     gap: 6px;
   }
 
-  .remove-confirm button {
+  .clear-confirm button,
+  .remove-item-confirm button {
     padding: 0 10px;
   }
 
-  .remove-confirm .destructive {
+  .clear-confirm .destructive,
+  .remove-item-confirm .destructive {
     color: var(--error);
+  }
+
+  .sub2api-item-actions {
+    margin-bottom: 14px;
+  }
+
+  .remove-item-row {
+    display: flex;
+    width: 100%;
+    min-height: 48px;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border: 0;
+    border-radius: 12px;
+    color: var(--error);
+    background: var(--card);
+    text-align: left;
+  }
+
+  .remove-item-row > span {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+  }
+
+  .remove-item-row b {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .remove-item-row small {
+    color: var(--secondary);
+    font-size: 10px;
+  }
+
+  .remove-item-confirm {
+    margin-top: 6px;
   }
 
   .config-error {

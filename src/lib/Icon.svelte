@@ -16,6 +16,7 @@
     | 'lock'
     | 'pin'
     | 'pin-filled'
+    | 'plus'
     | 'external-link'
     | 'eye'
     | 'eye-off'
@@ -106,6 +107,8 @@
     <circle cx="12" cy="12" r="9" /><path d="M12 11v6" /><path d="M12 7h.01" />
   {:else if name === 'power'}
     <path d="M12 2v10" /><path d="M7.1 5.4a8 8 0 1 0 9.8 0" />
+  {:else if name === 'plus'}
+    <path d="M12 5v14M5 12h14" />
   {:else if name === 'check'}
     <path d="m5 12 4 4L19 6" />
   {:else if name === 'clear-filled'}

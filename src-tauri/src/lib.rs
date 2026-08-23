@@ -51,7 +51,7 @@ use crate::{
         codex::CodexProvider, copilot::CopilotProvider, cursor::CursorProvider,
         detect_local_credentials, devin::DevinProvider, grok::GrokProvider, kimi::KimiProvider,
         minimax::MiniMaxProvider, opencode::OpenCodeProvider, openrouter::OpenRouterProvider,
-        sub2api::Sub2ApiProvider, zai::ZaiProvider, ProviderRegistry, UsageProvider,
+        sub2api::Sub2ApiProviders, zai::ZaiProvider, ProviderRegistry, UsageProvider,
     },
     storage::Storage,
     window::{
@@ -366,7 +366,10 @@ pub fn run() {
             app.manage(Arc::new(PanelResizeSession::new(storage.clone())));
             app_debug!("cache", "application database opened");
             let pricing = Arc::new(PricingStore::new(app_data_dir.join("pricing"))?);
-            let sub2api = Arc::new(Sub2ApiProvider::new());
+            let sub2api = Arc::new(Sub2ApiProviders::new(
+                app_data_dir.join("sub2api-connections"),
+                storage.clone(),
+            ));
             let mut providers = claude::runtimes(storage.clone(), pricing.clone())?;
             providers.extend(vec![
                 Arc::new(CodexProvider::new(storage.clone(), pricing.clone())?)
@@ -384,8 +387,8 @@ pub fn run() {
                 Arc::new(ZaiProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(KimiProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(MiniMaxProvider::new()?) as Arc<dyn UsageProvider>,
-                sub2api.clone() as Arc<dyn UsageProvider>,
             ]);
+            providers.extend(sub2api.runtimes());
             let registry = Arc::new(ProviderRegistry::new(providers)?);
             let (settings_service, credential_detection_plan) =
                 SettingsService::new_deferred(storage.clone(), registry.clone())?;
@@ -492,6 +495,7 @@ pub fn run() {
             commands::provider::delete_provider_api_key,
             commands::provider::get_sub2api_config_state,
             commands::provider::save_sub2api_config,
+            commands::provider::clear_sub2api_config,
             commands::provider::delete_sub2api_config,
             commands::usage::refresh_usage,
             commands::usage::refresh_provider_usage,
