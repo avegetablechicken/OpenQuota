@@ -195,6 +195,21 @@ impl Storage {
         Ok(())
     }
 
+    pub fn delete_snapshot(&self, provider_id: &str) -> Result<(), StorageError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM provider_snapshots WHERE provider_id = ?1",
+            [provider_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM daily_usage WHERE provider_id = ?1",
+            [provider_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn load_log_events(
         &self,
         provider_id: &str,

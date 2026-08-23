@@ -128,6 +128,23 @@ impl ProviderService {
         }
     }
 
+    pub fn clear_provider_data(
+        &self,
+        provider_id: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.storage.delete_snapshot(provider_id)?;
+        self.update_state(provider_id, |state| {
+            *state = ProviderViewState::default();
+        });
+        if let Ok(mut last) = self.last_live_refresh.lock() {
+            last.remove(provider_id);
+        }
+        if let Ok(mut failures) = self.last_failed_refresh.lock() {
+            failures.remove(provider_id);
+        }
+        Ok(())
+    }
+
     pub async fn refresh(self: &Arc<Self>, provider_id: &str, force: bool) -> ProviderViewState {
         if self.registry.runtime(provider_id).is_none() {
             crate::app_error!(
@@ -983,6 +1000,37 @@ mod tests {
         let old_service = ProviderService::new(registry, storage);
         let old = old_service.state();
         assert!(old.providers.get("cached").unwrap().stale);
+    }
+
+    #[test]
+    fn clearing_provider_data_is_scoped_to_one_provider() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+        storage.save_snapshot(&test_snapshot("sub2api")).unwrap();
+        storage.save_snapshot(&test_snapshot("sub2api@2")).unwrap();
+        let providers = ["sub2api", "sub2api@2"]
+            .into_iter()
+            .map(|id| {
+                Arc::new(SlowProvider {
+                    id,
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    active: Arc::new(AtomicUsize::new(0)),
+                    maximum: Arc::new(AtomicUsize::new(0)),
+                    delay: Duration::ZERO,
+                }) as Arc<dyn UsageProvider>
+            })
+            .collect();
+        let registry = Arc::new(ProviderRegistry::new(providers).unwrap());
+        let service = ProviderService::new(registry, storage.clone());
+
+        service.clear_provider_data("sub2api@2").unwrap();
+
+        let state = service.state();
+        assert!(state.providers["sub2api"].snapshot.is_some());
+        assert!(state.providers["sub2api@2"].snapshot.is_none());
+        assert_eq!(state.providers["sub2api@2"].source, SnapshotSource::None);
+        assert!(storage.load_snapshot("sub2api").unwrap().is_some());
+        assert!(storage.load_snapshot("sub2api@2").unwrap().is_none());
     }
 
     #[test]
