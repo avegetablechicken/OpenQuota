@@ -24,7 +24,7 @@ use crate::storage::Storage;
 use super::{
     codex::{client::UsageResponse, mapper::map_usage},
     credential_store::{delete_owned_password, read_owned_password, write_owned_password},
-    ProviderError, UsageProvider,
+    CacheIdentity, ProviderError, UsageProvider,
 };
 
 const PROVIDER_ID: &str = "sub2api";
@@ -693,6 +693,14 @@ impl UsageProvider for Sub2ApiProvider {
         self.configured.load(Ordering::SeqCst)
     }
 
+    fn cache_identity(&self) -> CacheIdentity<'_> {
+        if self.configured.load(Ordering::SeqCst) {
+            CacheIdentity::Unscoped
+        } else {
+            CacheIdentity::Resolved("sub2api-unconfigured")
+        }
+    }
+
     fn supports_connection_configuration(&self) -> bool {
         true
     }
@@ -856,6 +864,44 @@ mod tests {
             .provider("sub2api")
             .unwrap()
             .has_local_credentials());
+    }
+
+    #[test]
+    fn unconfigured_slots_never_load_old_quota_snapshots() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        storage
+            .save_snapshot(&ProviderSnapshot {
+                provider_id: "sub2api@2".into(),
+                plan: Some("Old plan".into()),
+                quotas: Vec::new(),
+                value_metrics: Vec::new(),
+                status_metrics: Vec::new(),
+                notices: Vec::new(),
+                usage: Default::default(),
+                warnings: Vec::new(),
+                refreshed_at: Utc::now(),
+            })
+            .unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api@2".into(),
+            "Sub2API 2".into(),
+            directory.path().join("sub2api@2.configured"),
+            false,
+        );
+
+        assert!(storage
+            .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
+            .unwrap()
+            .is_none());
+        provider.set_configured(true).unwrap();
+        assert_eq!(
+            storage
+                .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
+                .unwrap()
+                .and_then(|snapshot| snapshot.plan),
+            Some("Old plan".into())
+        );
     }
 
     #[test]

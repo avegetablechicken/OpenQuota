@@ -324,6 +324,9 @@ pub async fn save_sub2api_config(
 
     let command_guard = settings.lock_command_mutation().await;
     reconcile_provider_credential_state(&app, &service, &settings, &provider_id, true, true)?;
+    service
+        .clear_provider_data(&provider_id)
+        .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;
     drop(command_guard);
     drop(credential_guard);
     service.refresh(&provider_id, true).await;
@@ -354,10 +357,14 @@ pub async fn clear_sub2api_config(
 
     let command_guard = settings.lock_command_mutation().await;
     reconcile_provider_credential_state(&app, &service, &settings, &provider_id, false, true)?;
+    service
+        .clear_provider_data(&provider_id)
+        .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;
     drop(command_guard);
     drop(credential_guard);
     service.refresh(&provider_id, true).await;
     let usage = service.state();
+    tray_presentation::update(&app, &usage, &settings.get(), settings.registry());
     let _ = app.emit("usage-state", &usage);
     crate::app_info!("auth", "Sub2API connection cleared");
     Ok(state)
@@ -383,6 +390,9 @@ pub async fn delete_sub2api_config(
 
     let command_guard = settings.lock_command_mutation().await;
     let updated = settings.remove_dynamic_provider(&provider_id)?;
+    service
+        .clear_provider_data(&provider_id)
+        .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;
     tray_presentation::update(&app, &service.state(), &updated, settings.registry());
     let _ = app.emit("settings-state", settings_view_state(&app, &settings));
     drop(command_guard);
