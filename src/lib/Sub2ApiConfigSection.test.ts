@@ -18,6 +18,9 @@ describe('Sub2ApiConfigSection', () => {
           email: 'admin@example.com',
         });
       }
+      if (command === 'clear_sub2api_config') {
+        return Promise.resolve({ configured: false, baseUrl: '', email: '' });
+      }
       if (command === 'delete_sub2api_config') {
         return Promise.resolve({ configured: false, baseUrl: '', email: '' });
       }
@@ -28,7 +31,7 @@ describe('Sub2ApiConfigSection', () => {
   afterEach(cleanup);
 
   it('saves a Sub2API administrator login without retaining the password in the UI', async () => {
-    render(Sub2ApiConfigSection);
+    render(Sub2ApiConfigSection, { providerId: 'sub2api' });
     expect(await screen.findByRole('region', { name: 'Sub2API Connection' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await fireEvent.input(screen.getByLabelText('Sub2API Base URL'), {
@@ -44,6 +47,7 @@ describe('Sub2ApiConfigSection', () => {
 
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', {
+        providerId: 'sub2api',
         config: {
           baseUrl: 'https://sub2api.example.com',
           email: 'admin@example.com',
@@ -55,7 +59,7 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
   });
 
-  it('removes a saved connection only after confirmation', async () => {
+  it('clears saved connection fields without deleting the Sub2API item', async () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === 'get_sub2api_config_state') {
         return Promise.resolve({
@@ -64,21 +68,46 @@ describe('Sub2ApiConfigSection', () => {
           email: 'admin@example.com',
         });
       }
-      if (command === 'delete_sub2api_config') {
+      if (command === 'clear_sub2api_config') {
         return Promise.resolve({ configured: false, baseUrl: '', email: '' });
       }
       return Promise.reject(new Error(`unexpected command ${command}`));
     });
-    render(Sub2ApiConfigSection);
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('admin@example.com');
     await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Remove Sub2API connection' }));
-    expect(mocks.invoke).not.toHaveBeenCalledWith('delete_sub2api_config');
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear Sub2API connection' }));
     expect(
-      screen.getByRole('group', { name: 'Remove Sub2API connection?' }),
-    ).toHaveAccessibleDescription('The saved login will be removed from secure storage.');
-    await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('delete_sub2api_config'));
+      screen.getByRole('group', { name: 'Clear Sub2API connection?' }),
+    ).toHaveAccessibleDescription(
+      'The Base URL and saved login will be removed. This Sub2API item will remain.',
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('clear_sub2api_config', {
+        providerId: 'sub2api@2',
+      }),
+    );
+    expect(mocks.invoke).not.toHaveBeenCalledWith('delete_sub2api_config', expect.anything());
     expect(screen.getByText('Not configured')).toBeInTheDocument();
+  });
+
+  it('deletes an item from the separate bottom action row', async () => {
+    const onRemove = vi.fn();
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@3', onRemove });
+    await screen.findByRole('region', { name: 'Sub2API Connection' });
+    await fireEvent.click(screen.getByRole('button', { name: /^Delete Sub2API/ }));
+
+    expect(
+      screen.getByRole('group', { name: 'Delete this Sub2API item?' }),
+    ).toHaveAccessibleDescription('This empty configuration item will be removed.');
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('delete_sub2api_config', {
+        providerId: 'sub2api@3',
+      }),
+    );
+    expect(onRemove).toHaveBeenCalledOnce();
   });
 });

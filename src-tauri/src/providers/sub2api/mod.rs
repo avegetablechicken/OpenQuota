@@ -1,6 +1,11 @@
 use std::{
     collections::HashMap,
-    sync::Mutex,
+    fs,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -14,6 +19,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::models::{
     MetricDefinition, MetricSection, ProviderDefinition, ProviderSnapshot, UsageHistory,
 };
+use crate::storage::Storage;
 
 use super::{
     codex::{client::UsageResponse, mapper::map_usage},
@@ -22,20 +28,21 @@ use super::{
 };
 
 const PROVIDER_ID: &str = "sub2api";
+const PROVIDER_SLOTS: usize = 8;
 const CREDENTIAL_SERVICE: &str = "io.github.deviffyy.openquota.sub2api";
-const CREDENTIAL_ACCOUNT: &str = "connection";
 
-pub(crate) fn definition() -> ProviderDefinition {
+fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
+    let metric_id = |suffix: &str| format!("{provider_id}.{suffix}");
     ProviderDefinition {
-        id: PROVIDER_ID.into(),
-        display_name: "Sub2API".into(),
+        id: provider_id.into(),
+        display_name: display_name.into(),
         short_name: "S2".into(),
         fallback_enabled: false,
         local_usage_source_note: None,
         links: Vec::new(),
         metrics: vec![
             MetricDefinition::quota(
-                "sub2api.session",
+                &metric_id("session"),
                 "Session",
                 "session",
                 false,
@@ -45,7 +52,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "S",
             ),
             MetricDefinition::quota(
-                "sub2api.weekly",
+                &metric_id("weekly"),
                 "Weekly",
                 "weekly",
                 false,
@@ -55,7 +62,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "W",
             ),
             MetricDefinition::quota(
-                "sub2api.spark",
+                &metric_id("spark"),
                 "Spark",
                 "spark",
                 false,
@@ -65,7 +72,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "Sp",
             ),
             MetricDefinition::quota(
-                "sub2api.sparkWeekly",
+                &metric_id("sparkWeekly"),
                 "Spark Weekly",
                 "sparkWeekly",
                 false,
@@ -75,7 +82,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "SW",
             ),
             MetricDefinition::value(
-                "sub2api.rateLimitResets",
+                &metric_id("rateLimitResets"),
                 "Rate Limit Resets",
                 "sub2apiRateLimitResets",
                 true,
@@ -393,25 +400,40 @@ fn classify_status(status: StatusCode) -> Sub2ApiError {
 }
 
 pub struct Sub2ApiProvider {
+    provider_id: String,
+    display_name: String,
+    configured_marker: PathBuf,
+    configured: AtomicBool,
     session: Mutex<Option<CachedSession>>,
 }
 
 impl Sub2ApiProvider {
-    pub fn new() -> Self {
+    fn new(
+        provider_id: String,
+        display_name: String,
+        configured_marker: PathBuf,
+        configured: bool,
+    ) -> Self {
         Self {
+            provider_id,
+            display_name,
+            configured_marker,
+            configured: AtomicBool::new(configured),
             session: Mutex::new(None),
         }
     }
 
     pub fn config_state(&self) -> Result<Sub2ApiConfigState, ProviderError> {
-        Ok(load_config()?.map_or_else(Sub2ApiConfigState::default, |config| config.state()))
+        Ok(self
+            .load_config()?
+            .map_or_else(Sub2ApiConfigState::default, |config| config.state()))
     }
 
     pub fn save_config(
         &self,
         input: Sub2ApiConfigInput,
     ) -> Result<Sub2ApiConfigState, ProviderError> {
-        let previous = load_config()?;
+        let previous = self.load_config()?;
         let password = if input.password.trim().is_empty() {
             previous
                 .as_ref()
@@ -429,22 +451,27 @@ impl Sub2ApiProvider {
             return Err(Sub2ApiError::InvalidConfig.into());
         }
 
-        let session = self.connect(&config)?;
-        Sub2ApiClient::new(&config.base_url)?.quota(session.token.as_str(), session.account.id)?;
+        let session = self.validate_config(&config)?;
         let bytes = Zeroizing::new(
             serde_json::to_vec(&config).map_err(|_| Sub2ApiError::CredentialStorage)?,
         );
-        write_owned_password(CREDENTIAL_SERVICE, CREDENTIAL_ACCOUNT, bytes.as_slice())
-            .map_err(|_| Sub2ApiError::CredentialStorage)?;
+        write_owned_password(
+            CREDENTIAL_SERVICE,
+            self.credential_account(),
+            bytes.as_slice(),
+        )
+        .map_err(|_| Sub2ApiError::CredentialStorage)?;
+        self.set_configured(true)?;
         if let Ok(mut cached) = self.session.lock() {
-            *cached = Some(session);
+            *cached = session;
         }
         Ok(config.state())
     }
 
     pub fn delete_config(&self) -> Result<Sub2ApiConfigState, ProviderError> {
-        delete_owned_password(CREDENTIAL_SERVICE, CREDENTIAL_ACCOUNT)
+        delete_owned_password(CREDENTIAL_SERVICE, self.credential_account())
             .map_err(|_| Sub2ApiError::CredentialStorage)?;
+        self.set_configured(false)?;
         if let Ok(mut cached) = self.session.lock() {
             *cached = None;
         }
@@ -462,6 +489,27 @@ impl Sub2ApiProvider {
             account,
             account_count,
         })
+    }
+
+    fn validate_config(
+        &self,
+        config: &StoredConfig,
+    ) -> Result<Option<CachedSession>, Sub2ApiError> {
+        let client = Sub2ApiClient::new(&config.base_url)?;
+        let login = client.login(&config.email, &config.password)?;
+        let (account, account_count) = match client.first_codex_account(login.value.as_str()) {
+            Ok(account) => account,
+            Err(Sub2ApiError::NoCodexAccount) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        client.quota(login.value.as_str(), account.id)?;
+        Ok(Some(CachedSession {
+            scope: session_scope(config),
+            token: login.value,
+            expires_at: token_expiry(login.expires_in),
+            account,
+            account_count,
+        }))
     }
 
     fn session(&self, config: &StoredConfig) -> Result<CachedSession, Sub2ApiError> {
@@ -519,7 +567,7 @@ impl Sub2ApiProvider {
             .into_iter()
             .collect();
         Ok(ProviderSnapshot {
-            provider_id: PROVIDER_ID.into(),
+            provider_id: self.provider_id.clone(),
             plan: mapped.plan,
             quotas: mapped.quotas,
             value_metrics: mapped.value_metrics,
@@ -530,21 +578,119 @@ impl Sub2ApiProvider {
             refreshed_at: Utc::now(),
         })
     }
+
+    fn credential_account(&self) -> &str {
+        if self.provider_id == PROVIDER_ID {
+            "connection"
+        } else {
+            &self.provider_id
+        }
+    }
+
+    fn set_configured(&self, configured: bool) -> Result<(), Sub2ApiError> {
+        if configured {
+            let parent = self
+                .configured_marker
+                .parent()
+                .ok_or(Sub2ApiError::CredentialStorage)?;
+            fs::create_dir_all(parent).map_err(|_| Sub2ApiError::CredentialStorage)?;
+            fs::write(&self.configured_marker, b"configured")
+                .map_err(|_| Sub2ApiError::CredentialStorage)?;
+        } else {
+            match fs::remove_file(&self.configured_marker) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(Sub2ApiError::CredentialStorage),
+            }
+        }
+        self.configured.store(configured, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn load_config(&self) -> Result<Option<StoredConfig>, Sub2ApiError> {
+        let Some(bytes) = read_owned_password(CREDENTIAL_SERVICE, self.credential_account())
+            .map_err(|_| Sub2ApiError::CredentialStorage)?
+        else {
+            return Ok(None);
+        };
+        let bytes = Zeroizing::new(bytes);
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| Sub2ApiError::CredentialStorage)
+    }
 }
 
-impl Default for Sub2ApiProvider {
-    fn default() -> Self {
-        Self::new()
+pub struct Sub2ApiProviders {
+    providers: HashMap<String, Arc<Sub2ApiProvider>>,
+}
+
+impl Sub2ApiProviders {
+    pub fn new(marker_directory: PathBuf, storage: Arc<Storage>) -> Self {
+        let migration_marker = marker_directory.join(".initialized");
+        let migrate_snapshots = !migration_marker.is_file();
+        let providers = (0..PROVIDER_SLOTS)
+            .map(|index| {
+                let number = index + 1;
+                let provider_id = if index == 0 {
+                    PROVIDER_ID.to_owned()
+                } else {
+                    format!("{PROVIDER_ID}@{number}")
+                };
+                let display_name = if index == 0 {
+                    "Sub2API".to_owned()
+                } else {
+                    format!("Sub2API {number}")
+                };
+                let configured_marker = marker_directory.join(format!("{provider_id}.configured"));
+                let configured = configured_marker.is_file()
+                    || (migrate_snapshots
+                        && storage
+                            .load_snapshot_for_identity(
+                                &provider_id,
+                                crate::providers::CacheIdentity::Unscoped,
+                            )
+                            .is_ok_and(|snapshot| snapshot.is_some()));
+                if configured && !configured_marker.is_file() {
+                    let _ = fs::create_dir_all(&marker_directory);
+                    let _ = fs::write(&configured_marker, b"configured");
+                }
+                let provider = Arc::new(Sub2ApiProvider::new(
+                    provider_id.clone(),
+                    display_name,
+                    configured_marker,
+                    configured,
+                ));
+                (provider_id, provider)
+            })
+            .collect();
+        if migrate_snapshots {
+            let _ = fs::create_dir_all(&marker_directory);
+            let _ = fs::write(migration_marker, b"initialized");
+        }
+        Self { providers }
+    }
+
+    pub fn runtimes(&self) -> Vec<Arc<dyn UsageProvider>> {
+        let mut providers = self.providers.values().cloned().collect::<Vec<_>>();
+        providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+        providers
+            .into_iter()
+            .map(|provider| provider as Arc<dyn UsageProvider>)
+            .collect()
+    }
+
+    pub fn provider(&self, provider_id: &str) -> Option<Arc<Sub2ApiProvider>> {
+        self.providers.get(provider_id).cloned()
     }
 }
 
 impl UsageProvider for Sub2ApiProvider {
     fn definition(&self) -> ProviderDefinition {
-        definition()
+        definition_for(&self.provider_id, &self.display_name)
     }
 
     fn has_local_credentials(&self) -> bool {
-        load_config().is_ok_and(|config| config.is_some())
+        self.configured.load(Ordering::SeqCst)
     }
 
     fn supports_connection_configuration(&self) -> bool {
@@ -552,21 +698,9 @@ impl UsageProvider for Sub2ApiProvider {
     }
 
     fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
-        let config = load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
+        let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
         self.refresh_snapshot(&config).map_err(ProviderError::from)
     }
-}
-
-fn load_config() -> Result<Option<StoredConfig>, Sub2ApiError> {
-    let Some(bytes) = read_owned_password(CREDENTIAL_SERVICE, CREDENTIAL_ACCOUNT)
-        .map_err(|_| Sub2ApiError::CredentialStorage)?
-    else {
-        return Ok(None);
-    };
-    let bytes = Zeroizing::new(bytes);
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| Sub2ApiError::CredentialStorage)
 }
 
 fn normalized_base_url_text(value: &str) -> Result<String, Sub2ApiError> {
@@ -597,16 +731,24 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::mpsc,
+        sync::{mpsc, Arc},
         thread,
         time::Duration,
     };
 
     use chrono::{TimeZone, Utc};
     use reqwest::StatusCode;
+    use tempfile::tempdir;
 
-    use super::{definition, normalize_base_url, Sub2ApiClient, Sub2ApiError};
-    use crate::providers::codex::{client::UsageResponse, mapper::map_usage};
+    use super::{
+        definition_for, normalize_base_url, StoredConfig, Sub2ApiClient, Sub2ApiError,
+        Sub2ApiProvider, Sub2ApiProviders,
+    };
+    use crate::providers::{
+        codex::{client::UsageResponse, mapper::map_usage},
+        UsageProvider,
+    };
+    use crate::{models::ProviderSnapshot, storage::Storage};
 
     const QUOTA_DATA: &str = r#"{
       "user_id":"user-redacted",
@@ -664,11 +806,80 @@ mod tests {
 
     #[test]
     fn definition_exposes_one_fixed_sub2api_provider() {
-        let definition = definition();
+        let definition = definition_for("sub2api", "Sub2API");
         assert_eq!(definition.id, "sub2api");
         assert_eq!(definition.display_name, "Sub2API");
         assert_eq!(definition.metrics[0].id, "sub2api.session");
         assert!(!definition.fallback_enabled);
+    }
+
+    #[test]
+    fn provider_slots_have_independent_ids_metrics_and_credentials() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+        let providers = Sub2ApiProviders::new(directory.path().join("markers"), storage);
+        let first = providers.provider("sub2api").unwrap();
+        let second = providers.provider("sub2api@2").unwrap();
+
+        assert_eq!(first.definition().metrics[0].id, "sub2api.session");
+        assert_eq!(second.definition().display_name, "Sub2API 2");
+        assert_eq!(second.definition().metrics[0].id, "sub2api@2.session");
+        assert_eq!(first.credential_account(), "connection");
+        assert_eq!(second.credential_account(), "sub2api@2");
+    }
+
+    #[test]
+    fn existing_snapshots_migrate_once_without_resurrecting_deleted_markers() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+        storage
+            .save_snapshot(&ProviderSnapshot {
+                provider_id: "sub2api".into(),
+                plan: None,
+                quotas: Vec::new(),
+                value_metrics: Vec::new(),
+                status_metrics: Vec::new(),
+                notices: Vec::new(),
+                usage: Default::default(),
+                warnings: Vec::new(),
+                refreshed_at: Utc::now(),
+            })
+            .unwrap();
+        let markers = directory.path().join("markers");
+        let first = Sub2ApiProviders::new(markers.clone(), storage.clone());
+        assert!(first.provider("sub2api").unwrap().has_local_credentials());
+        assert!(markers.join("sub2api.configured").is_file());
+
+        std::fs::remove_file(markers.join("sub2api.configured")).unwrap();
+        let restarted = Sub2ApiProviders::new(markers, storage);
+        assert!(!restarted
+            .provider("sub2api")
+            .unwrap()
+            .has_local_credentials());
+    }
+
+    #[test]
+    fn valid_admin_login_can_be_saved_without_an_active_codex_account() {
+        let responses = vec![
+            r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
+            r#"{"code":0,"message":"success","data":{"items":[],"total":0,"page":1,"page_size":1,"pages":0}}"#.into(),
+        ];
+        let (base_url, _requests, worker) = serve_sequence(responses);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api@2".into(),
+            "Sub2API 2".into(),
+            directory.path().join("sub2api@2.configured"),
+            false,
+        );
+        let config = StoredConfig {
+            base_url,
+            email: "admin@example.com".into(),
+            password: "secret-password".into(),
+        };
+
+        assert!(provider.validate_config(&config).unwrap().is_none());
+        worker.join().unwrap();
     }
 
     #[test]

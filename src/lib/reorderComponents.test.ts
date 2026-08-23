@@ -1,9 +1,10 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { providerCatalogIndex } from '../test/appFixtures';
+import { providerCatalog, providerCatalogIndex } from '../test/appFixtures';
 import CustomizeProviderDetail from './CustomizeProviderDetail.svelte';
 import CustomizeProviderList from './CustomizeProviderList.svelte';
-import type { AppSettings } from './types';
+import { ProviderCatalogIndex } from './metrics';
+import type { AppSettings, ProviderCatalog } from './types';
 
 afterEach(cleanup);
 
@@ -253,6 +254,136 @@ describe('pointer reorder integrations', () => {
     expect(
       onChange.mock.calls[0][0].providers.map((provider: { id: string }) => provider.id),
     ).toEqual(['claude', 'codex', 'antigravity']);
+  });
+
+  it('adds the first configurable provider from a dedicated plus row', async () => {
+    const onChange = vi.fn();
+    const onOpen = vi.fn();
+    const sub2apiCatalog: ProviderCatalog = {
+      ...structuredClone(providerCatalog),
+      connectionConfigProviderIds: ['sub2api'],
+      providers: [
+        ...structuredClone(providerCatalog.providers),
+        {
+          id: 'sub2api',
+          displayName: 'Sub2API',
+          shortName: 'S2',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [
+            {
+              id: 'sub2api.weekly',
+              label: 'Weekly',
+              source: { kind: 'quota', sourceId: 'weekly', sessionWindow: false },
+              pinnable: true,
+              defaultEnabled: true,
+              defaultSection: 'alwaysVisible',
+              defaultPinned: false,
+              tray: { shortLabel: 'W', suffix: null },
+            },
+          ],
+        },
+      ],
+    };
+    const sub2apiSettings = structuredClone(settings);
+    sub2apiSettings.providers.push({
+      id: 'sub2api',
+      enabled: false,
+      detected: false,
+      expanded: false,
+      metrics: [
+        {
+          id: 'sub2api.weekly',
+          enabled: true,
+          section: 'alwaysVisible',
+          pinned: false,
+        },
+      ],
+    });
+
+    render(CustomizeProviderList, {
+      settings: sub2apiSettings,
+      catalog: new ProviderCatalogIndex(sub2apiCatalog),
+      onOpen,
+      onChange,
+      onReorderStart: vi.fn(),
+      onReorderEnd: vi.fn(),
+      onSettings: vi.fn(),
+      reducedMotion: false,
+    });
+
+    expect(screen.queryByRole('checkbox', { name: 'Enable sub2api' })).not.toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add Sub2API' }));
+
+    const changed = onChange.mock.calls[0][0] as AppSettings;
+    expect(changed.providers.find((provider) => provider.id === 'sub2api')?.enabled).toBe(true);
+    expect(onOpen).toHaveBeenCalledWith('sub2api');
+  });
+
+  it('creates the next Sub2API provider after the first is configured', async () => {
+    const onChange = vi.fn();
+    const onOpen = vi.fn();
+    const sub2apiCatalog: ProviderCatalog = {
+      ...structuredClone(providerCatalog),
+      connectionConfigProviderIds: ['sub2api', 'sub2api@2'],
+      providers: [
+        ...structuredClone(providerCatalog.providers),
+        {
+          id: 'sub2api',
+          displayName: 'Sub2API',
+          shortName: 'S2',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'sub2api@2',
+          displayName: 'Sub2API 2',
+          shortName: 'S2',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    };
+    const configured = structuredClone(settings);
+    configured.providers.push({
+      id: 'sub2api',
+      enabled: true,
+      detected: true,
+      expanded: false,
+      metrics: [],
+    });
+    configured.providers.push({
+      id: 'sub2api@2',
+      enabled: false,
+      detected: false,
+      expanded: false,
+      metrics: [],
+    });
+
+    render(CustomizeProviderList, {
+      settings: configured,
+      catalog: new ProviderCatalogIndex(sub2apiCatalog),
+      onOpen,
+      onChange,
+      onReorderStart: vi.fn(),
+      onReorderEnd: vi.fn(),
+      onSettings: vi.fn(),
+      reducedMotion: false,
+    });
+
+    expect(screen.getByRole('checkbox', { name: 'Enable sub2api' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add Sub2API' })).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Add Sub2API' }));
+
+    const changed = onChange.mock.calls[0][0] as AppSettings;
+    expect(changed.providers.find((provider) => provider.id === 'sub2api@2')?.enabled).toBe(true);
+    expect(onOpen).toHaveBeenCalledWith('sub2api@2');
   });
 
   it('moves a metric across Customize sections through the same pointer engine', async () => {

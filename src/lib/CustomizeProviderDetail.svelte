@@ -20,6 +20,7 @@
     onNameChange: (settings: AppSettings) => void;
     onReorderStart: () => void;
     onReorderEnd: (moved: boolean, cancelled?: boolean) => void;
+    onProviderRemoved?: () => void;
     reducedMotion: boolean;
   }
   let {
@@ -31,6 +32,7 @@
     onNameChange,
     onReorderStart,
     onReorderEnd,
+    onProviderRemoved = () => {},
     reducedMotion,
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
@@ -217,7 +219,7 @@
       </div>
     {/each}
     {#if catalog.supportsConnectionConfiguration(provider.id)}
-      <Sub2ApiConfigSection />
+      <Sub2ApiConfigSection providerId={provider.id} onRemove={onProviderRemoved} />
     {:else}
       <ProviderApiKeySection
         providerId={provider.id}

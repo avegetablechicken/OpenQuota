@@ -611,6 +611,32 @@ impl SettingsService {
         Ok(next)
     }
 
+    pub fn remove_dynamic_provider(&self, provider_id: &str) -> Result<AppSettings, String> {
+        let mut current = self
+            .settings
+            .write()
+            .map_err(|_| "OpenQuota settings are temporarily unavailable.".to_owned())?;
+        let enabled_before = enabled_provider_set(&current);
+        let mut next = current.clone();
+        let provider = next
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+            .ok_or_else(|| "Provider settings are unavailable.".to_owned())?;
+        provider.enabled = false;
+        provider.detected = false;
+        provider.expanded = false;
+        self.storage
+            .save_settings(&next)
+            .map_err(|_| "OpenQuota settings could not be saved.".to_owned())?;
+        current.clone_from(&next);
+        if enabled_provider_set(&next) != enabled_before {
+            self.enablement_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        self.settings_revision.fetch_add(1, Ordering::SeqCst);
+        Ok(next)
+    }
+
     pub fn default_settings(&self, detected: &HashSet<String>) -> AppSettings {
         default_settings(&self.registry, detected)
     }
@@ -2242,6 +2268,26 @@ mod tests {
             .unwrap();
         assert!(!openrouter.detected);
         assert!(openrouter.enabled);
+    }
+
+    #[test]
+    fn dynamic_provider_removal_disables_and_clears_detection() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+        let service = SettingsService::new_for_test(storage, catalog(), &HashSet::new()).unwrap();
+        service
+            .reconcile_provider_credential_state("openrouter", true, true)
+            .unwrap();
+
+        let removed = service.remove_dynamic_provider("openrouter").unwrap();
+        let provider = removed
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openrouter")
+            .unwrap();
+        assert!(!provider.enabled);
+        assert!(!provider.detected);
+        assert!(!provider.expanded);
     }
 
     #[test]

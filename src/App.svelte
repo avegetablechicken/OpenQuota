@@ -921,6 +921,7 @@
                 onNameChange={saveSettings}
                 onReorderStart={beginCustomizationGesture}
                 onReorderEnd={endCustomizationGesture}
+                onProviderRemoved={() => navigate('customize')}
                 {reducedMotion}
               />
             {/if}

@@ -59,6 +59,11 @@ export class ProviderCatalogIndex {
     return this.#connectionConfigProviderIds.has(id);
   }
 
+  connectionConfigurationLabel(id: string) {
+    const family = id.split('@', 1)[0];
+    return this.provider(family)?.displayName ?? this.provider(id)?.displayName ?? id;
+  }
+
   localUsageSourceNote(id: string) {
     const provider = this.provider(id);
     return (

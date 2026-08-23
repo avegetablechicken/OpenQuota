@@ -601,6 +601,7 @@ pub enum DensityPreference {
 #[serde(rename_all = "camelCase")]
 pub enum MenuBarStyle {
     Text,
+    #[serde(alias = "icon")]
     Bars,
 }
 
@@ -777,9 +778,9 @@ pub struct SettingsViewState {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeyMutationOutcome, ApiKeyStatus, AppSettings, LogLevel, ProviderApiKeyState,
-        ProviderErrorKind, ProviderLink, ProviderSnapshot, ProviderViewState, UsagePeriod,
-        WindowMode,
+        ApiKeyMutationOutcome, ApiKeyStatus, AppSettings, LogLevel, MenuBarStyle,
+        ProviderApiKeyState, ProviderErrorKind, ProviderLink, ProviderSnapshot, ProviderViewState,
+        UsagePeriod, WindowMode,
     };
 
     #[test]
@@ -816,6 +817,14 @@ mod tests {
         value["windowMode"] = serde_json::json!("detached");
         let settings: AppSettings = serde_json::from_value(value).unwrap();
         assert_eq!(settings.window_mode, WindowMode::Popup);
+    }
+
+    #[test]
+    fn legacy_icon_menu_bar_style_maps_to_bars() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value["menuBarStyle"] = serde_json::json!("icon");
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.menu_bar_style, MenuBarStyle::Bars);
     }
 
     #[test]

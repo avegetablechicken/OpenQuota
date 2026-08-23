@@ -79,7 +79,8 @@ const runtimeOrder = [
   'ClaudeProvider',
   ...[...runtimeBlock.matchAll(/Arc::new\((\w+Provider)::new\b/g)].map(([, provider]) => provider),
 ];
-if (/sub2api\.clone\(\)/.test(runtimeBlock)) runtimeOrder.push('Sub2ApiProvider');
+if (/providers\.extend\(sub2api\.runtimes\(\)\)/.test(compositionRoot))
+  runtimeOrder.push('Sub2ApiProvider');
 const expectedRuntimeOrder = [
   'ClaudeProvider',
   'CodexProvider',

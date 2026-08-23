@@ -28,11 +28,36 @@
     reducedMotion,
   }: Props = $props();
   const providerDisplayName = (id: string) => catalog.displayName(id, settings.providerNames);
+  const visibleProviders = $derived(
+    settings.providers.filter(
+      (provider) =>
+        catalog.provider(provider.id) &&
+        (!catalog.supportsConnectionConfiguration(provider.id) ||
+          provider.enabled ||
+          provider.detected),
+    ),
+  );
+  const addableProvider = $derived(
+    settings.providers.find(
+      (provider) =>
+        catalog.provider(provider.id) &&
+        catalog.supportsConnectionConfiguration(provider.id) &&
+        !provider.enabled &&
+        !provider.detected,
+    ),
+  );
+  const addableProviderName = $derived(
+    addableProvider ? catalog.connectionConfigurationLabel(addableProvider.id) : '',
+  );
   function updateProvider(provider: ProviderLayout) {
     onChange({
       ...settings,
       providers: settings.providers.map((item) => (item.id === provider.id ? provider : item)),
     });
+  }
+  function addProvider(provider: ProviderLayout) {
+    updateProvider({ ...provider, enabled: true });
+    onOpen(provider.id);
   }
   function reorder(draggedId: string, targetId: string) {
     if (draggedId === targetId) return;
@@ -51,7 +76,7 @@
 
 <section class="screen customize-screen" aria-label="Customize">
   <div class="customize-list" role="list">
-    {#each settings.providers.filter( (provider) => catalog.provider(provider.id) ) as provider (provider.id)}
+    {#each visibleProviders as provider (provider.id)}
       <div
         role="listitem"
         class:inactive={!provider.enabled}
@@ -107,6 +132,19 @@
         >
       </div>
     {/each}
+    {#if addableProvider}
+      <div class="provider-add-shell" role="listitem">
+        <button
+          class="provider-add-row"
+          type="button"
+          aria-label={`Add ${addableProviderName}`}
+          onclick={() => addProvider(addableProvider)}
+        >
+          <span class="provider-add-icon"><Icon name="plus" size={17} strokeWidth={2} /></span>
+          <span>{addableProviderName}</span>
+        </button>
+      </div>
+    {/if}
   </div>
   <button class="screen-cross-link" type="button" aria-label="Settings" onclick={onSettings}>
     <Icon name="gear" size={17} />
@@ -132,6 +170,40 @@
 
     .provider-list-row.inactive {
       opacity: 0.55;
+    }
+
+    .provider-add-shell {
+      border-top: 1px solid var(--separator);
+    }
+
+    .provider-add-row {
+      display: flex;
+      width: 100%;
+      min-height: 42px;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border: 0;
+      color: var(--secondary);
+      background: transparent;
+      font-size: 14px;
+      font-weight: 600;
+      text-align: left;
+    }
+
+    .provider-add-row:hover {
+      color: var(--text);
+      background: var(--button-hover);
+    }
+
+    .provider-add-icon {
+      display: grid;
+      width: 18px;
+      height: 18px;
+      place-items: center;
+      border-radius: 50%;
+      color: var(--tray);
+      background: var(--meter-fill);
     }
 
     .reorder-grip {

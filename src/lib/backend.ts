@@ -55,16 +55,20 @@ export function deleteProviderApiKey(providerId: string) {
   return invoke<ApiKeyMutationOutcome>('delete_provider_api_key', { providerId });
 }
 
-export function getSub2ApiConfigState() {
-  return invoke<Sub2ApiConfigState>('get_sub2api_config_state');
+export function getSub2ApiConfigState(providerId: string) {
+  return invoke<Sub2ApiConfigState>('get_sub2api_config_state', { providerId });
 }
 
-export function saveSub2ApiConfig(config: Sub2ApiConfigInput) {
-  return invoke<Sub2ApiConfigState>('save_sub2api_config', { config });
+export function saveSub2ApiConfig(providerId: string, config: Sub2ApiConfigInput) {
+  return invoke<Sub2ApiConfigState>('save_sub2api_config', { providerId, config });
 }
 
-export function deleteSub2ApiConfig() {
-  return invoke<Sub2ApiConfigState>('delete_sub2api_config');
+export function clearSub2ApiConfig(providerId: string) {
+  return invoke<Sub2ApiConfigState>('clear_sub2api_config', { providerId });
+}
+
+export function deleteSub2ApiConfig(providerId: string) {
+  return invoke<Sub2ApiConfigState>('delete_sub2api_config', { providerId });
 }
 
 export function getAppSettings() {
