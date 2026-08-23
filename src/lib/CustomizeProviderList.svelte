@@ -8,7 +8,6 @@
   import ProviderIcon from './ProviderIcon.svelte';
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
-  import { providerFamily } from './providerIconPaths';
   import {
     rememberSub2ApiUpstream,
     sub2ApiDisplayName,
@@ -51,7 +50,12 @@
   );
   const repeatedSub2ApiUpstreams = $derived.by(() => {
     const upstreams = visibleProviders.flatMap((provider) => {
-      if (providerFamily(provider.id) !== 'sub2api' || !$sub2ApiEndpoints[provider.id]) return [];
+      if (
+        !catalog.supportsConnectionConfiguration(provider.id) ||
+        !$sub2ApiEndpoints[provider.id]
+      ) {
+        return [];
+      }
       const upstream = $sub2ApiUpstreams[provider.id];
       return upstream ? [upstream] : [];
     });
@@ -101,7 +105,9 @@
   }
   onMount(() => {
     for (const provider of visibleProviders) {
-      if (providerFamily(provider.id) !== 'sub2api' || $sub2ApiEndpoints[provider.id]) continue;
+      if (!catalog.supportsConnectionConfiguration(provider.id) || $sub2ApiEndpoints[provider.id]) {
+        continue;
+      }
       void getSub2ApiConfigState(provider.id)
         .then((state) => {
           if (state.configured) {
