@@ -48,7 +48,7 @@ impl GrokClient {
         refresh_url: &str,
         timeout: Duration,
     ) -> Result<Self, GrokError> {
-        let client = Client::builder()
+        let client = crate::http_client::blocking_client_builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(timeout)
             .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))

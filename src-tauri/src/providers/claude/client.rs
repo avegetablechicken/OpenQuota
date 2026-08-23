@@ -27,7 +27,7 @@ impl ClaudeClient {
 
     fn with_timeout(timeout: std::time::Duration) -> Result<Self, ClaudeError> {
         Ok(Self {
-            client: Client::builder()
+            client: crate::http_client::blocking_client_builder()
                 .timeout(timeout)
                 .build()
                 .map_err(|_| ClaudeError::ConnectionFailed)?,
