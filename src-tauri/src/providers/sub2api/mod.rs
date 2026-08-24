@@ -1036,17 +1036,14 @@ fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistor
         .history
         .iter()
         .find(|day| day.date == today.to_string())
-        .map(stats_day_period)
-        .unwrap_or_else(empty_stats_period);
-    let yesterday_period = yesterday
-        .and_then(|date| {
-            stats
-                .history
-                .iter()
-                .find(|day| day.date == date.to_string())
-        })
-        .map(stats_day_period)
-        .unwrap_or_else(empty_stats_period);
+        .and_then(stats_day_period);
+    let yesterday_period = yesterday.and_then(|date| {
+        stats
+            .history
+            .iter()
+            .find(|day| day.date == date.to_string())
+            .and_then(stats_day_period)
+    });
     let daily = stats
         .history
         .iter()
@@ -1067,7 +1064,7 @@ fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistor
         .map(AccountStatsDay::measured_cost)
         .collect::<Option<Vec<_>>>();
     let model_breakdown = stats_model_breakdown(stats.models, source_note);
-    let last_30_days = UsagePeriod {
+    let last_30_days = (!stats.history.is_empty()).then(|| UsagePeriod {
         tokens: total_tokens,
         estimated_cost_usd: costs
             .as_ref()
@@ -1076,38 +1073,27 @@ fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistor
         estimate_complete: costs.is_some(),
         model_breakdown,
         unknown_models: Vec::new(),
-    };
+    });
 
     UsageHistory {
         scope: UsageScope::Account,
-        today: Some(today_period),
-        yesterday: Some(yesterday_period),
-        last_30_days: Some(last_30_days),
+        today: today_period,
+        yesterday: yesterday_period,
+        last_30_days,
         daily,
         unknown_models: Vec::new(),
     }
 }
 
-fn stats_day_period(day: &AccountStatsDay) -> UsagePeriod {
-    UsagePeriod {
+fn stats_day_period(day: &AccountStatsDay) -> Option<UsagePeriod> {
+    (day.tokens > 0 || day.measured_cost().is_some_and(|cost| cost > 0.0)).then(|| UsagePeriod {
         tokens: day.tokens,
         estimated_cost_usd: day.measured_cost(),
         cost_estimated: false,
         estimate_complete: day.measured_cost().is_some(),
         model_breakdown: None,
         unknown_models: Vec::new(),
-    }
-}
-
-fn empty_stats_period() -> UsagePeriod {
-    UsagePeriod {
-        tokens: 0,
-        estimated_cost_usd: Some(0.0),
-        cost_estimated: false,
-        estimate_complete: true,
-        model_breakdown: None,
-        unknown_models: Vec::new(),
-    }
+    })
 }
 
 fn stats_model_breakdown(
@@ -1183,8 +1169,8 @@ mod tests {
 
     use super::{
         definition_for, map_stats, metric_template, normalize_base_url,
-        should_apply_metric_template, AccountStats, StoredConfig, Sub2ApiClient, Sub2ApiError,
-        Sub2ApiProvider, Sub2ApiProviders,
+        should_apply_metric_template, AccountStats, AccountStatsDay, StoredConfig, Sub2ApiClient,
+        Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
     };
     use crate::providers::{
         codex::{client::UsageResponse, mapper::map_usage},
@@ -1653,23 +1639,30 @@ mod tests {
     }
 
     #[test]
-    fn successful_empty_stats_map_to_measured_zero_periods() {
-        let history = map_stats(
+    fn successful_empty_and_zero_stats_stay_unbacked() {
+        let cases = [
             AccountStats {
                 history: Vec::new(),
                 models: Vec::new(),
             },
-            Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
-        );
+            AccountStats {
+                history: vec![AccountStatsDay {
+                    date: "2026-08-24".into(),
+                    tokens: 0,
+                    cost: Some(0.0),
+                    actual_cost: Some(0.0),
+                }],
+                models: Vec::new(),
+            },
+        ];
 
-        for period in [history.today, history.yesterday, history.last_30_days] {
-            let period = period.unwrap();
-            assert_eq!(period.tokens, 0);
-            assert_eq!(period.estimated_cost_usd, Some(0.0));
-            assert!(!period.cost_estimated);
-            assert!(period.estimate_complete);
+        for stats in cases {
+            let history = map_stats(stats, Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap());
+            assert!(history.today.is_none());
+            assert!(history.yesterday.is_none());
+            assert!(history.last_30_days.is_none());
+            assert!(history.daily.is_empty());
         }
-        assert!(history.daily.is_empty());
     }
 
     #[test]
