@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::models::{
     MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind, ProviderLink,
-    ProviderSnapshot, UsageHistory, ValueMetric,
+    ProviderSnapshot, UsageHistories, ValueMetric,
 };
 
 use self::{
@@ -194,7 +194,7 @@ impl CopilotProvider {
                     value_metrics: mapped.value_metrics,
                     status_metrics: Vec::new(),
                     notices: Vec::new(),
-                    usage: UsageHistory::default(),
+                    usage_histories: UsageHistories::default(),
                     warnings: Vec::new(),
                     refreshed_at: Utc::now(),
                 }))

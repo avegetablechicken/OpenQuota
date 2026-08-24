@@ -78,14 +78,19 @@ export interface DailyUsage {
 }
 
 export type UsageScope = 'localDevice' | 'account';
+export type UsageViewMode = 'all' | UsageScope;
 
 export interface UsageHistory {
-  scope: UsageScope;
   today: UsagePeriod | null;
   yesterday: UsagePeriod | null;
   last30Days: UsagePeriod | null;
   daily: DailyUsage[];
   unknownModels: string[];
+}
+
+export interface UsageHistories {
+  localDevice?: UsageHistory;
+  account?: UsageHistory;
 }
 
 export interface ProviderSnapshot {
@@ -95,7 +100,7 @@ export interface ProviderSnapshot {
   valueMetrics: ValueMetric[];
   statusMetrics: StatusMetric[];
   notices: ProviderNotice[];
-  usage: UsageHistory;
+  usageHistories: UsageHistories;
   warnings: string[];
   refreshedAt: string;
 }

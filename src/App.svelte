@@ -422,7 +422,10 @@
     }
     showConfirmation('Copied to clipboard');
   }
-  async function shareProvider(providerId: string) {
+  async function shareProvider(
+    providerId: string,
+    viewMode: import('./lib/types').UsageViewMode = 'all',
+  ) {
     const current = settingsState;
     if (!current) return;
     const card = document.querySelector<HTMLElement>(`[data-provider-id="${providerId}"]`);
@@ -432,7 +435,14 @@
     if (!provider || !layout) return;
     const snapshot = [providerDisplayName(providerId), card.innerText.trim()].join('\n');
     try {
-      const rows = buildProviderShareRows(catalog, provider, layout, current.settings, now);
+      const rows = buildProviderShareRows(
+        catalog,
+        provider,
+        layout,
+        current.settings,
+        now,
+        viewMode,
+      );
       const canvas = renderProviderShareCard(catalog, {
         providerId,
         providerNames: current.settings.providerNames,
@@ -444,14 +454,14 @@
       settingsError = 'Provider screenshot could not be copied.';
     }
   }
-  async function shareTotalSpend(projection: SpendProjection) {
+  async function shareTotalSpend(projections: SpendProjection[]) {
     const current = settingsState;
     if (!current) return false;
     const card = document.querySelector<HTMLElement>('[data-total-spend]');
     if (!card) return false;
     try {
       const canvas = renderTotalSpendShareCard(catalog, {
-        projection,
+        projections,
         providerNames: current.settings.providerNames,
         metric: current.settings.totalSpendMetric,
         period: current.settings.totalSpendPeriod,

@@ -147,7 +147,7 @@ pub fn scan_or_cached_usage<E>(
                 .load_snapshot_for_identity(provider_id, identity)
                 .ok()
                 .flatten()
-                .map(|snapshot| snapshot.usage)
+                .and_then(|snapshot| snapshot.usage_histories.local_device)
                 .unwrap_or_default()
         }
     }
@@ -252,7 +252,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage,
+            usage_histories: crate::models::UsageHistories::local_device(usage),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         }

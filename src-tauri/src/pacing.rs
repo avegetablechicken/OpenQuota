@@ -372,7 +372,6 @@ mod tests {
     use crate::models::{
         AppSettings, MetricDefinition, MetricLayout, MetricSection, MetricSource,
         NotificationPreferences, ProviderDefinition, ProviderLayout, ProviderSnapshot, QuotaWindow,
-        UsageHistory,
     };
     use crate::providers::ProviderRegistry;
 
@@ -706,7 +705,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };
@@ -799,7 +798,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: now,
         };

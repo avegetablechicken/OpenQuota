@@ -588,7 +588,16 @@ fn malformed_auth_does_not_blank_valid_database_usage() {
         now(),
     );
     let snapshot = provider.refresh().unwrap();
-    assert_eq!(snapshot.usage.today.unwrap().estimated_cost_usd, Some(1.0));
+    assert_eq!(
+        snapshot
+            .usage_histories
+            .local_device
+            .unwrap()
+            .today
+            .unwrap()
+            .estimated_cost_usd,
+        Some(1.0)
+    );
     assert_eq!(snapshot.warnings.len(), 1);
     assert!(!snapshot.warnings[0].contains("secret"));
 }
@@ -650,7 +659,11 @@ fn account_usage_endpoint_populates_quotas_without_local_history() {
     assert_eq!(snapshot.plan.as_deref(), Some("Go"));
     assert_eq!(snapshot.quotas[0].used_percent, 31.0);
     assert_eq!(snapshot.quotas[1].used_percent, 100.0);
-    assert!(snapshot.usage.today.is_none());
+    assert!(snapshot
+        .usage_histories
+        .local_device
+        .as_ref()
+        .is_some_and(|history| history.today.is_none()));
 }
 
 #[test]
@@ -686,7 +699,7 @@ fn unavailable_account_quota_keeps_local_history_and_explains_the_error() {
 
     assert!(snapshot.plan.is_none());
     assert!(snapshot.quotas.is_empty());
-    assert!(snapshot.usage.today.is_some());
+    assert!(snapshot.usage_histories.local_device.is_some());
     assert!(snapshot
         .warnings
         .iter()

@@ -3,6 +3,8 @@ import type {
   ProviderCatalog,
   ProviderDefinition,
   ProviderSnapshot,
+  UsageHistory,
+  UsageScope,
 } from './types';
 
 export class ProviderCatalogIndex {
@@ -72,12 +74,19 @@ export class ProviderCatalogIndex {
   }
 }
 
-export function usageSourceNote(catalog: ProviderCatalogIndex, snapshot: ProviderSnapshot) {
+export function usageSourceNote(
+  catalog: ProviderCatalogIndex,
+  snapshot: ProviderSnapshot,
+  history: UsageHistory,
+  scope: UsageScope,
+) {
   return (
-    snapshot.usage.last30Days?.modelBreakdown?.sourceNote ??
-    snapshot.usage.today?.modelBreakdown?.sourceNote ??
-    snapshot.usage.yesterday?.modelBreakdown?.sourceNote ??
-    catalog.localUsageSourceNote(snapshot.providerId)
+    history.last30Days?.modelBreakdown?.sourceNote ??
+    history.today?.modelBreakdown?.sourceNote ??
+    history.yesterday?.modelBreakdown?.sourceNote ??
+    (scope === 'localDevice'
+      ? catalog.localUsageSourceNote(snapshot.providerId)
+      : `From your ${catalog.displayName(snapshot.providerId)} account usage history`)
   );
 }
 

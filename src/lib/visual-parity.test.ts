@@ -105,6 +105,7 @@ describe('native visual contract', () => {
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     render(UsageTrend, {
+      label: 'Usage Trend',
       daily: [{ date, tokens: 42_000, estimatedCostUsd: 0.21, estimateComplete: true }],
       sourceNote: 'From your Codex logs (estimated)',
     });
@@ -129,6 +130,7 @@ describe('native visual contract', () => {
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     const { container } = render(UsageTrend, {
+      label: 'Usage Trend',
       daily: [{ date, tokens: 42_000, estimatedCostUsd: 0.21, estimateComplete: true }],
       sourceNote: 'From your Codex logs (estimated)',
     });

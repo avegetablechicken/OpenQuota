@@ -2184,7 +2184,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: Default::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: chrono::Utc::now(),
         };

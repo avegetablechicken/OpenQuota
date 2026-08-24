@@ -1,8 +1,8 @@
-import type { AppSettings, UsageHistory, UsagePeriod, UsageScope } from './types';
+import type { AppSettings, UsageHistories, UsageHistory, UsagePeriod, UsageScope } from './types';
 
 export interface SpendProvider {
   id: string;
-  usage: UsageHistory;
+  usageHistories: UsageHistories;
 }
 
 export interface SpendSlice {
@@ -25,8 +25,9 @@ export const SPEND_SCOPE_LABELS: Record<UsageScope, string> = {
 };
 
 export function availableSpendScopes(providers: SpendProvider[]): UsageScope[] {
-  const available = new Set(providers.map((provider) => provider.usage.scope));
-  return (['localDevice', 'account'] as const).filter((scope) => available.has(scope));
+  return (['localDevice', 'account'] as const).filter((scope) =>
+    providers.some((provider) => provider.usageHistories[scope]),
+  );
 }
 
 export function selectedPeriod(
@@ -54,9 +55,10 @@ export function projectSpend(
   scope: UsageScope,
 ): SpendProjection {
   const slices = providers
-    .filter((provider) => provider.usage.scope === scope)
     .flatMap((provider) => {
-      const period = selectedPeriod(provider.usage, periodSelection);
+      const history = provider.usageHistories[scope];
+      if (!history) return [];
+      const period = selectedPeriod(history, periodSelection);
       if (!period) return [];
       const value = valueFor(period, metric);
       return value === null ? [] : [{ id: provider.id, value, period }];

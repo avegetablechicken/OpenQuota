@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::models::{
     ApiKeyStatus, MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind,
-    ProviderLink, ProviderSnapshot, UsageHistory,
+    ProviderLink, ProviderSnapshot, UsageHistories,
 };
 
 use self::{
@@ -125,7 +125,7 @@ impl MiniMaxProvider {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: UsageHistories::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         })

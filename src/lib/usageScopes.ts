@@ -1,0 +1,30 @@
+import type { UsageHistories, UsageHistory, UsageScope, UsageViewMode } from './types';
+
+export const USAGE_SCOPE_LABELS: Record<UsageScope, string> = {
+  localDevice: 'Device',
+  account: 'Accounts',
+};
+
+export interface ScopedUsageHistory {
+  scope: UsageScope;
+  history: UsageHistory;
+}
+
+export function availableUsageScopes(histories: UsageHistories): UsageScope[] {
+  return (['localDevice', 'account'] as const).filter((scope) => Boolean(histories[scope]));
+}
+
+export function usageHistoriesForMode(
+  histories: UsageHistories,
+  mode: UsageViewMode,
+): ScopedUsageHistory[] {
+  return availableUsageScopes(histories)
+    .filter((scope) => mode === 'all' || mode === scope)
+    .map((scope) => ({ scope, history: histories[scope]! }));
+}
+
+export function shouldShowProviderForMode(histories: UsageHistories, mode: UsageViewMode): boolean {
+  if (mode === 'all') return true;
+  const hasAnyHistory = availableUsageScopes(histories).length > 0;
+  return !hasAnyHistory || Boolean(histories[mode]);
+}

@@ -124,13 +124,89 @@ describe('OpenQuota dashboard', () => {
     );
     expect(screen.getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Total Spend' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Device Usage Trend' })).toBeInTheDocument();
     expect(container.querySelector('.spend-ring__label')).toHaveAttribute(
       'data-tooltip',
       '$3.84 · Estimated locally, so it may be off',
     );
     expect(screen.getByText(`OpenQuota ${import.meta.env.APP_VERSION}`)).toBeInTheDocument();
     expect(container.querySelector('.floating-chrome')).not.toBeInTheDocument();
+  });
+
+  it('hides a local-only provider in the Accounts view and restores it in Device', async () => {
+    render(App);
+    expect(await screen.findByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    expect(screen.queryByRole('group', { name: 'Codex provider' })).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Device' }));
+    expect(screen.getByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
+  });
+
+  it('filters only history metrics while keeping provider quotas visible', async () => {
+    const dualScopeState = structuredClone(codexState);
+    dualScopeState.snapshot!.usageHistories.account = {
+      ...structuredClone(dualScopeState.snapshot!.usageHistories.localDevice!),
+      today: {
+        tokens: 900_000,
+        estimatedCostUsd: 1.5,
+        costEstimated: false,
+        estimateComplete: true,
+      },
+    };
+    const expandedSettings: SettingsViewState = {
+      ...settingsState,
+      settings: {
+        ...settingsState.settings,
+        providers: settingsState.settings.providers.map((provider) =>
+          provider.id === 'codex' ? { ...provider, expanded: true } : provider,
+        ),
+      },
+    };
+    mockInvoke((command: string) => {
+      if (command === 'get_usage_state')
+        return Promise.resolve({ providers: { codex: dualScopeState } });
+      if (command === 'get_app_settings') return Promise.resolve(expandedSettings);
+      if (command === 'check_for_updates')
+        return Promise.resolve({
+          available: false,
+          currentVersion: '0.1.0',
+          version: null,
+          body: null,
+          installable: true,
+          releaseUrl: 'https://github.com/deviffyy/OpenQuota/releases/latest',
+        });
+      return Promise.resolve();
+    });
+
+    render(App);
+    const provider = await screen.findByRole('group', { name: 'Codex provider' });
+    expect(screen.getByRole('region', { name: 'Local Device Spend' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Accounts Spend' })).toBeInTheDocument();
+    expect(
+      within(provider).getByRole('region', { name: 'Device Usage Trend' }),
+    ).toBeInTheDocument();
+    expect(
+      within(provider).getByRole('region', { name: 'Accounts Usage Trend' }),
+    ).toBeInTheDocument();
+    expect(within(provider).getByText('Device Today')).toBeInTheDocument();
+    expect(within(provider).getByText('Accounts Today')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    expect(within(provider).getByRole('progressbar', { name: 'Session used' })).toBeInTheDocument();
+    expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
+    expect(
+      within(provider).queryByRole('region', { name: 'Device Usage Trend' }),
+    ).not.toBeInTheDocument();
+    expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
+    expect(within(provider).queryByText('Device Today')).not.toBeInTheDocument();
+    expect(within(provider).getByText('Today')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Device' }));
+    expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
+    expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
+    expect(within(provider).getByText('Today')).toBeInTheDocument();
   });
 
   it('toggles floating window mode from the footer pin when a tray is available', async () => {
@@ -331,7 +407,7 @@ describe('OpenQuota dashboard', () => {
     expect(screen.getAllByRole('progressbar')).toHaveLength(6);
     expect(
       within(screen.getByRole('region', { name: 'Total Spend' })).getByRole('img', {
-        name: 'Local-device history from Claude and Codex. Account-wide usage is excluded.',
+        name: 'Local-device history from Claude and Codex. No account-wide history available.',
       }),
     ).toBeInTheDocument();
   });
@@ -514,13 +590,16 @@ describe('OpenQuota dashboard', () => {
               ...codexState,
               snapshot: {
                 ...codexState.snapshot!,
-                usage: {
-                  ...codexState.snapshot!.usage,
-                  today: {
-                    tokens: 2_100_000,
-                    estimatedCostUsd: null,
-                    costEstimated: true,
-                    estimateComplete: false,
+                usageHistories: {
+                  ...codexState.snapshot!.usageHistories,
+                  localDevice: {
+                    ...codexState.snapshot!.usageHistories.localDevice!,
+                    today: {
+                      tokens: 2_100_000,
+                      estimatedCostUsd: null,
+                      costEstimated: true,
+                      estimateComplete: false,
+                    },
                   },
                 },
               },
@@ -537,7 +616,11 @@ describe('OpenQuota dashboard', () => {
     });
     render(App);
     const totalSpend = await screen.findByRole('region', { name: 'Total Spend' });
-    expect(within(totalSpend).getByText('No cost data for this period')).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('region', { name: 'Local Device Spend' })).getByText(
+        'No cost data for this period',
+      ),
+    ).toBeInTheDocument();
     await fireEvent.click(within(totalSpend).getByRole('combobox', { name: 'Total Spend Metric' }));
     await fireEvent.click(screen.getByRole('option', { name: 'Tokens' }));
     expect(within(totalSpend).getByText('Codex')).toBeInTheDocument();

@@ -129,7 +129,16 @@ fn weekly_status_plan_and_local_history_form_one_snapshot() {
     assert_eq!(snapshot.quotas[0].used_percent, 99.0);
     assert_eq!(snapshot.status_metrics[0].text, "Disabled");
     assert_eq!(snapshot.status_metrics[0].tone, StatusTone::Neutral);
-    assert_eq!(snapshot.usage.today.unwrap().tokens, 2_000_000);
+    assert_eq!(
+        snapshot
+            .usage_histories
+            .local_device
+            .unwrap()
+            .today
+            .unwrap()
+            .tokens,
+        2_000_000
+    );
     assert!(snapshot.warnings.is_empty());
     server.finish();
 }
@@ -342,7 +351,7 @@ fn local_scan_failure_keeps_cached_history_and_live_limits() {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: cached_usage.clone(),
+            usage_histories: crate::models::UsageHistories::local_device(cached_usage.clone()),
             warnings: Vec::new(),
             refreshed_at: now(),
         })
@@ -350,7 +359,7 @@ fn local_scan_failure_keeps_cached_history_and_live_limits() {
 
     let snapshot = provider.refresh_inner().unwrap();
 
-    assert_eq!(snapshot.usage, cached_usage);
+    assert_eq!(snapshot.usage_histories.local_device, Some(cached_usage));
     assert_eq!(snapshot.quotas[0].used_percent, 99.0);
     assert_eq!(snapshot.warnings.len(), 1);
     assert!(snapshot.warnings[0].contains("Grok"));

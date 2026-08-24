@@ -7,7 +7,6 @@
   import { TOTAL_SPEND_GEOMETRY } from './shareCard';
   import { ringSectorPath, spendRingArcs } from './spendRing';
   import {
-    availableSpendScopes,
     emptySpendMessage,
     projectSpend,
     SPEND_SCOPE_LABELS,
@@ -15,41 +14,35 @@
   } from './totalSpend';
   import { providerFamily } from './providerIconPaths';
   import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
-  import type { AppSettings, UsageHistory, UsageScope } from './types';
+  import type { AppSettings, UsageHistories, UsageViewMode } from './types';
 
   interface Props {
-    providers: Array<{ id: string; usage: UsageHistory }>;
+    providers: Array<{ id: string; usageHistories: UsageHistories }>;
     settings: AppSettings;
     catalog: ProviderCatalogIndex;
+    viewMode: UsageViewMode;
+    onViewModeChange: (mode: UsageViewMode) => void;
     onChange: (settings: AppSettings) => void;
-    onShare: (projection: SpendProjection) => boolean | Promise<boolean>;
+    onShare: (projections: SpendProjection[]) => boolean | Promise<boolean>;
   }
-  let { providers, settings, catalog, onChange, onShare }: Props = $props();
+  let { providers, settings, catalog, viewMode, onViewModeChange, onChange, onShare }: Props =
+    $props();
   const providerDisplayName = (id: string) =>
     sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
     catalog.displayName(id, settings.providerNames);
-  let preferredScope = $state<UsageScope>('localDevice');
-  const availableScopes = $derived(availableSpendScopes(providers));
-  const selectedScope = $derived(
-    availableScopes.includes(preferredScope)
-      ? preferredScope
-      : (availableScopes[0] ?? 'localDevice'),
+  const renderedScopes = $derived(
+    viewMode === 'all' ? (['localDevice', 'account'] as const) : [viewMode],
   );
-  const scopedProviders = $derived(
-    providers.filter((provider) => provider.usage.scope === selectedScope),
-  );
-  const projection = $derived(
-    projectSpend(providers, settings.totalSpendPeriod, settings.totalSpendMetric, selectedScope),
-  );
-  const providerNames = $derived(
-    scopedProviders.map((provider) => providerDisplayName(provider.id)),
+  const projections = $derived(
+    renderedScopes.map((scope) =>
+      projectSpend(providers, settings.totalSpendPeriod, settings.totalSpendMetric, scope),
+    ),
   );
   const inclusionNote = $derived(
-    selectedScope === 'localDevice'
-      ? `Local-device history from ${joinNames(providerNames)}. Account-wide usage is excluded.`
-      : `Account-wide history from ${joinNames(providerNames)}. Local-device usage is excluded.`,
+    viewMode === 'all'
+      ? `${scopeNote('localDevice')} ${scopeNote('account')}`
+      : scopeNote(viewMode),
   );
-  const ringSegments = $derived(spendRingArcs(projection.slices));
   const periodIndex = $derived(
     settings.totalSpendPeriod === 'today' ? 0 : settings.totalSpendPeriod === 'yesterday' ? 1 : 2,
   );
@@ -68,7 +61,8 @@
     if (value === null) return { primary: '—', unit: '' };
     return totalSpendRingCenter(value, settings.totalSpendMetric);
   }
-  function centerTooltip(value: number | null) {
+  function centerTooltip(projection: SpendProjection) {
+    const value = projection.centerValue;
     if (value === null) return undefined;
     const exact = formatSpendValue(value, settings.totalSpendMetric, 'full');
     if (projection.costEstimated && settings.totalSpendMetric !== 'tokens') {
@@ -85,11 +79,24 @@
     onChange({ ...settings, ...patch });
   }
   function joinNames(names: string[]) {
-    if (names.length < 2) return names[0] ?? 'enabled providers';
+    if (names.length < 2) return names[0] ?? '';
     return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
   }
+  function scopeNote(scope: SpendProjection['scope']) {
+    const names = providers
+      .filter((provider) => provider.usageHistories[scope])
+      .map((provider) => providerDisplayName(provider.id));
+    if (names.length === 0) {
+      return scope === 'localDevice'
+        ? 'No local-device history available.'
+        : 'No account-wide history available.';
+    }
+    return scope === 'localDevice'
+      ? `Local-device history from ${joinNames(names)}.`
+      : `Account-wide history from ${joinNames(names)}.`;
+  }
   async function share() {
-    if (!(await onShare(projection))) return;
+    if (!(await onShare(projections))) return;
     shareCopied = true;
     if (shareTimer) clearTimeout(shareTimer);
     shareTimer = setTimeout(() => (shareCopied = false), 1400);
@@ -123,26 +130,16 @@
       >
     </div>
     <div class="total-card__actions">
-      {#if availableScopes.length > 1}
-        <div class="spend-scope-switcher" role="group" aria-label="Usage Scope">
+      <div class="spend-scope-switcher" role="group" aria-label="Usage Scope">
+        {#each [['all', 'All'], ['localDevice', 'Device'], ['account', 'Accounts']] as option (option[0])}
           <button
-            class:active={selectedScope === 'localDevice'}
+            class:active={viewMode === option[0]}
             type="button"
-            aria-pressed={selectedScope === 'localDevice'}
-            data-tooltip="Usage recorded on this device"
-            onclick={() => (preferredScope = 'localDevice')}>Device</button
+            aria-pressed={viewMode === option[0]}
+            onclick={() => onViewModeChange(option[0] as UsageViewMode)}>{option[1]}</button
           >
-          <button
-            class:active={selectedScope === 'account'}
-            type="button"
-            aria-pressed={selectedScope === 'account'}
-            data-tooltip="Usage reported for configured accounts"
-            onclick={() => (preferredScope = 'account')}>Accounts</button
-          >
-        </div>
-      {:else}
-        <span class="total-card__scope-label">{SPEND_SCOPE_LABELS[selectedScope]}</span>
-      {/if}
+        {/each}
+      </div>
       <button
         class="icon-button icon-button--plain total-card__share"
         type="button"
@@ -169,43 +166,55 @@
         >
       {/each}
     </div>
-    {#if projection.centerValue === null}
-      <div class="total-card__empty">
-        <span>{emptySpendMessage(settings.totalSpendMetric)}</span>
-      </div>
-    {:else}
-      <div class="total-card__body">
-        <div class="spend-ring">
-          <svg
-            viewBox={`0 0 ${TOTAL_SPEND_GEOMETRY.ringDiameter} ${TOTAL_SPEND_GEOMETRY.ringDiameter}`}
-            shape-rendering="geometricPrecision"
-            aria-hidden="true"
-          >
-            {#each ringSegments as segment (segment.id)}
-              <path
-                class="spend-ring__segment"
-                d={ringSectorPath(segment, TOTAL_SPEND_GEOMETRY)}
-                style={`--segment-color: var(--provider-${providerFamily(segment.id)}, var(--provider))`}
-              />
-            {/each}
-          </svg>
-          <div class="spend-ring__label" data-tooltip={centerTooltip(projection.centerValue)}>
-            <strong>{ringCenter(projection.centerValue).primary}</strong><span
-              >{ringCenter(projection.centerValue).unit}</span
-            >
-          </div>
-        </div>
-        <div class="spend-legend">
-          {#each projection.slices as provider (provider.id)}
-            <span
-              ><i
-                style={`background: var(--provider-${providerFamily(provider.id)}, var(--provider))`}
-              ></i>{providerDisplayName(provider.id)}</span
-            ><strong>{display(provider.value)}</strong>
-          {/each}
-        </div>
-      </div>
-    {/if}
+    <div class:total-card__scopes--all={viewMode === 'all'}>
+      {#each projections as projection (projection.scope)}
+        <section
+          class="total-card__scope"
+          aria-label={`${SPEND_SCOPE_LABELS[projection.scope]} Spend`}
+        >
+          {#if viewMode === 'all'}
+            <h2>{SPEND_SCOPE_LABELS[projection.scope]}</h2>
+          {/if}
+          {#if projection.centerValue === null}
+            <div class="total-card__empty">
+              <span>{emptySpendMessage(settings.totalSpendMetric)}</span>
+            </div>
+          {:else}
+            <div class="total-card__body">
+              <div class="spend-ring">
+                <svg
+                  viewBox={`0 0 ${TOTAL_SPEND_GEOMETRY.ringDiameter} ${TOTAL_SPEND_GEOMETRY.ringDiameter}`}
+                  shape-rendering="geometricPrecision"
+                  aria-hidden="true"
+                >
+                  {#each spendRingArcs(projection.slices) as segment (segment.id)}
+                    <path
+                      class="spend-ring__segment"
+                      d={ringSectorPath(segment, TOTAL_SPEND_GEOMETRY)}
+                      style={`--segment-color: var(--provider-${providerFamily(segment.id)}, var(--provider))`}
+                    />
+                  {/each}
+                </svg>
+                <div class="spend-ring__label" data-tooltip={centerTooltip(projection)}>
+                  <strong>{ringCenter(projection.centerValue).primary}</strong><span
+                    >{ringCenter(projection.centerValue).unit}</span
+                  >
+                </div>
+              </div>
+              <div class="spend-legend">
+                {#each projection.slices as provider (provider.id)}
+                  <span
+                    ><i
+                      style={`background: var(--provider-${providerFamily(provider.id)}, var(--provider))`}
+                    ></i>{providerDisplayName(provider.id)}</span
+                  ><strong>{display(provider.value)}</strong>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </section>
+      {/each}
+    </div>
   </div>
 </section>
 
@@ -268,6 +277,23 @@
     .total-card__body {
       justify-content: flex-start;
       padding-top: 10px;
+    }
+
+    .total-card__scopes--all {
+      display: grid;
+      gap: 8px;
+    }
+
+    .total-card__scopes--all .total-card__scope + .total-card__scope {
+      padding-top: 8px;
+      border-top: 1px solid var(--separator);
+    }
+
+    .total-card__scope h2 {
+      margin: 8px 0 0;
+      color: var(--secondary);
+      font-size: 10px;
+      font-weight: 600;
     }
 
     .spend-ring {
@@ -394,10 +420,10 @@
 
     .spend-scope-switcher {
       display: grid;
-      width: 112px;
+      width: 144px;
       height: 22px;
-      flex: 0 0 112px;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      flex: 0 0 144px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 1px;
       padding: 2px;
       border-radius: 6px;

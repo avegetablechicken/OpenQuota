@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::{
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderLink, ProviderSnapshot,
-        UsageHistory, UsagePeriodSelection, UsageScope,
+        UsageHistories, UsageHistory, UsagePeriodSelection,
     },
     pricing::PricingStore,
 };
@@ -212,12 +212,7 @@ impl CursorProvider {
                 plan_name.as_deref(),
                 "Cursor request-based usage data unavailable. Try again later.",
             ) {
-                return Ok(snapshot(
-                    mapped,
-                    UsageHistory::empty(UsageScope::Account),
-                    Vec::new(),
-                    now,
-                ));
+                return Ok(snapshot(mapped, UsageHistory::default(), Vec::new(), now));
             }
         }
 
@@ -415,7 +410,7 @@ impl CursorProvider {
             .and_then(|date| date.and_hms_opt(0, 0, 0))
             .and_then(|date| Local.from_local_datetime(&date).earliest())
         else {
-            return UsageHistory::empty(UsageScope::Account);
+            return UsageHistory::default();
         };
         let Some(response) = self
             .client
@@ -428,10 +423,10 @@ impl CursorProvider {
             .flatten()
             .filter(|response| response.status.is_success())
         else {
-            return UsageHistory::empty(UsageScope::Account);
+            return UsageHistory::default();
         };
         let Ok(csv) = std::str::from_utf8(&response.body) else {
-            return UsageHistory::empty(UsageScope::Account);
+            return UsageHistory::default();
         };
         let pricing = self.pricing.current();
         let rows = parse_usage_csv(csv, &pricing);
@@ -452,7 +447,7 @@ fn snapshot(
         value_metrics: mapped.value_metrics,
         status_metrics: Vec::new(),
         notices: Vec::new(),
-        usage,
+        usage_histories: UsageHistories::account(usage),
         warnings,
         refreshed_at,
     }
@@ -535,7 +530,7 @@ mod tests {
         client::{CursorClient, Endpoints},
         definition, CursorProvider,
     };
-    use crate::{models::UsageScope, pricing::PricingStore};
+    use crate::pricing::PricingStore;
 
     fn jwt(subject: &str) -> String {
         let payload = URL_SAFE_NO_PAD
@@ -742,8 +737,18 @@ mod tests {
         assert_eq!(snapshot.plan.as_deref(), Some("Pro Plan"));
         assert_eq!(snapshot.quotas.len(), 3);
         assert_eq!(snapshot.value_metrics[0].id, "credits");
-        assert_eq!(snapshot.usage.today.as_ref().unwrap().tokens, 100);
-        assert_eq!(snapshot.usage.scope, UsageScope::Account);
+        assert_eq!(
+            snapshot
+                .usage_histories
+                .account
+                .as_ref()
+                .unwrap()
+                .today
+                .as_ref()
+                .unwrap()
+                .tokens,
+            100
+        );
         assert!(snapshot.warnings.is_empty());
         let saved: String = Connection::open(database)
             .unwrap()
@@ -838,8 +843,18 @@ mod tests {
         );
         assert_eq!(snapshot.quotas[0].used_value, Some(37.0));
         assert_eq!(snapshot.quotas[0].limit_value, Some(750.0));
-        assert_eq!(snapshot.usage.today.as_ref().unwrap().tokens, 100);
-        assert_eq!(snapshot.usage.scope, UsageScope::Account);
+        assert_eq!(
+            snapshot
+                .usage_histories
+                .account
+                .as_ref()
+                .unwrap()
+                .today
+                .as_ref()
+                .unwrap()
+                .tokens,
+            100
+        );
         let requests = requests.lock().unwrap();
         assert!(requests.iter().any(|path| path == "/summary"));
         assert!(requests

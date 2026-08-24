@@ -53,11 +53,12 @@ impl Storage {
              );
              CREATE TABLE IF NOT EXISTS daily_usage (
                provider_id TEXT NOT NULL,
+               scope TEXT NOT NULL,
                date TEXT NOT NULL,
                tokens INTEGER NOT NULL,
                estimated_cost_usd REAL,
                estimate_complete INTEGER NOT NULL,
-               PRIMARY KEY(provider_id, date)
+               PRIMARY KEY(provider_id, scope, date)
              );
              CREATE TABLE IF NOT EXISTS log_file_cache (
                provider_id TEXT NOT NULL,
@@ -101,6 +102,22 @@ impl Storage {
                    modified_nanos INTEGER NOT NULL,
                    events_json TEXT NOT NULL,
                    PRIMARY KEY(provider_id, path)
+                 );",
+            )?;
+        }
+        if !Self::has_column(&connection, "daily_usage", "scope")? {
+            // The provider snapshot remains the source of truth. Rebuild this derived index so
+            // local-device and account rows can coexist without colliding on the same date.
+            connection.execute_batch(
+                "DROP TABLE daily_usage;
+                 CREATE TABLE daily_usage (
+                   provider_id TEXT NOT NULL,
+                   scope TEXT NOT NULL,
+                   date TEXT NOT NULL,
+                   tokens INTEGER NOT NULL,
+                   estimated_cost_usd REAL,
+                   estimate_complete INTEGER NOT NULL,
+                   PRIMARY KEY(provider_id, scope, date)
                  );",
             )?;
         }
@@ -188,8 +205,16 @@ impl Storage {
             "DELETE FROM daily_usage WHERE provider_id = ?1",
             [&snapshot.provider_id],
         )?;
-        for day in &snapshot.usage.daily {
-            Self::insert_day(&transaction, &snapshot.provider_id, day)?;
+        for (scope, history) in [
+            (
+                "localDevice",
+                snapshot.usage_histories.local_device.as_ref(),
+            ),
+            ("account", snapshot.usage_histories.account.as_ref()),
+        ] {
+            for day in history.into_iter().flat_map(|history| &history.daily) {
+                Self::insert_day(&transaction, &snapshot.provider_id, scope, day)?;
+            }
         }
         transaction.commit()?;
         Ok(())
@@ -472,14 +497,16 @@ impl Storage {
     fn insert_day(
         transaction: &rusqlite::Transaction<'_>,
         provider_id: &str,
+        scope: &str,
         day: &DailyUsage,
     ) -> Result<(), rusqlite::Error> {
         transaction.execute(
             "INSERT INTO daily_usage(
-               provider_id, date, tokens, estimated_cost_usd, estimate_complete
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+               provider_id, scope, date, tokens, estimated_cost_usd, estimate_complete
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 provider_id,
+                scope,
                 day.date,
                 day.tokens as i64,
                 day.estimated_cost_usd,
@@ -532,7 +559,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory {
+            usage_histories: crate::models::UsageHistories::local_device(UsageHistory {
                 today: Some(UsagePeriod {
                     tokens: 42,
                     estimated_cost_usd: Some(0.12),
@@ -556,7 +583,7 @@ mod tests {
                     estimate_complete: true,
                 }],
                 ..UsageHistory::default()
-            },
+            }),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };
@@ -581,7 +608,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };
@@ -726,7 +753,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };
@@ -766,6 +793,31 @@ mod tests {
 
         storage.clear_panel_height().unwrap();
         assert_eq!(storage.load_panel_height().unwrap(), None);
+    }
+
+    #[test]
+    fn legacy_daily_usage_index_is_rebuilt_with_a_scope_column() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("openquota.db");
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE daily_usage (
+                   provider_id TEXT NOT NULL,
+                   date TEXT NOT NULL,
+                   tokens INTEGER NOT NULL,
+                   estimated_cost_usd REAL,
+                   estimate_complete INTEGER NOT NULL,
+                   PRIMARY KEY(provider_id, date)
+                 );",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let storage = Storage::open(&path).unwrap();
+        let connection = storage.connection().unwrap();
+
+        assert!(Storage::has_column(&connection, "daily_usage", "scope").unwrap());
     }
 
     #[test]
