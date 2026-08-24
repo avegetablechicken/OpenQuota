@@ -178,14 +178,38 @@ pub struct DailyUsage {
     pub estimate_complete: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UsageScope {
+    #[default]
+    LocalDevice,
+    Account,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageHistory {
+    #[serde(default)]
+    pub scope: UsageScope,
     pub today: Option<UsagePeriod>,
     pub yesterday: Option<UsagePeriod>,
     pub last_30_days: Option<UsagePeriod>,
     pub daily: Vec<DailyUsage>,
     pub unknown_models: Vec<String>,
+}
+
+impl UsageHistory {
+    pub fn empty(scope: UsageScope) -> Self {
+        Self {
+            scope,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_scope(mut self, scope: UsageScope) -> Self {
+        self.scope = scope;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -782,7 +806,7 @@ mod tests {
     use super::{
         ApiKeyMutationOutcome, ApiKeyStatus, AppSettings, LogLevel, MenuBarStyle,
         ProviderApiKeyState, ProviderErrorKind, ProviderLink, ProviderSnapshot, ProviderViewState,
-        UsagePeriod, WindowMode,
+        UsageHistory, UsagePeriod, UsageScope, WindowMode,
     };
 
     #[test]
@@ -892,6 +916,16 @@ mod tests {
         )
         .unwrap();
         assert!(period.cost_estimated);
+    }
+
+    #[test]
+    fn cached_usage_histories_default_to_the_local_device_scope() {
+        let history: UsageHistory = serde_json::from_str(
+            r#"{"today":null,"yesterday":null,"last30Days":null,"daily":[],"unknownModels":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(history.scope, UsageScope::LocalDevice);
     }
 
     #[test]

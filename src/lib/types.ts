@@ -77,7 +77,10 @@ export interface DailyUsage {
   estimateComplete: boolean;
 }
 
+export type UsageScope = 'localDevice' | 'account';
+
 export interface UsageHistory {
+  scope: UsageScope;
   today: UsagePeriod | null;
   yesterday: UsagePeriod | null;
   last30Days: UsagePeriod | null;

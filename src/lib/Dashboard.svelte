@@ -84,6 +84,7 @@
     catalog.displayName(id, settings.providerNames);
   const providerSupportsSpend = (id: string) => catalog.supportsSpend(id);
   const emptyUsage: UsageHistory = {
+    scope: 'localDevice',
     today: null,
     yesterday: null,
     last30Days: null,
@@ -140,10 +141,10 @@
   const providerUsage = $derived(
     enabledProviders
       .filter((provider) => providerSupportsSpend(provider.id))
-      .map((provider) => ({
-        id: provider.id,
-        usage: viewState.providers[provider.id]?.snapshot?.usage ?? emptyUsage,
-      })),
+      .flatMap((provider) => {
+        const usage = viewState.providers[provider.id]?.snapshot?.usage;
+        return usage ? [{ id: provider.id, usage }] : [];
+      }),
   );
 
   function updateProvider(next: ProviderLayout, customization = true) {

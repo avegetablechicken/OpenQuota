@@ -13,7 +13,7 @@ import {
   providerIconViewBox,
 } from './providerIconPaths';
 import { fillRingSector, spendRingArcs } from './spendRing';
-import type { SpendProjection } from './totalSpend';
+import { SPEND_SCOPE_LABELS, type SpendProjection } from './totalSpend';
 import type {
   AppSettings,
   DailyUsage,
@@ -39,6 +39,8 @@ export const TOTAL_SPEND_GEOMETRY = {
   outerPadding: 10,
   cardPaddingX: 14,
   cardPaddingY: 12,
+  scopeLabelHeight: 15,
+  scopeLabelGap: 4,
   switcherHeight: 27,
   bodyGap: 12,
   ringDiameter: 104,
@@ -214,6 +216,8 @@ export function providerShareCardHeight(rows: ShareRow[]) {
 export function totalSpendShareCardHeight() {
   const cardHeight =
     TOTAL_SPEND_GEOMETRY.cardPaddingY +
+    TOTAL_SPEND_GEOMETRY.scopeLabelHeight +
+    TOTAL_SPEND_GEOMETRY.scopeLabelGap +
     TOTAL_SPEND_GEOMETRY.switcherHeight +
     TOTAL_SPEND_GEOMETRY.bodyGap +
     TOTAL_SPEND_GEOMETRY.ringDiameter +
@@ -289,7 +293,16 @@ export function renderTotalSpendShareCard(
     CARD_RADIUS,
     palette.surface,
   );
-  const switcherTop = cardTop + TOTAL_SPEND_GEOMETRY.cardPaddingY;
+  const scopeTop = cardTop + TOTAL_SPEND_GEOMETRY.cardPaddingY;
+  context.fillStyle = palette.secondary;
+  context.font = '600 10px system-ui';
+  context.fillText(
+    SPEND_SCOPE_LABELS[options.projection.scope],
+    TOTAL_SPEND_OUTER_PADDING + TOTAL_SPEND_GEOMETRY.cardPaddingX,
+    scopeTop + 11,
+  );
+  const switcherTop =
+    scopeTop + TOTAL_SPEND_GEOMETRY.scopeLabelHeight + TOTAL_SPEND_GEOMETRY.scopeLabelGap;
   drawPeriodSwitcher(
     context,
     palette,

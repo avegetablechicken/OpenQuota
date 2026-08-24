@@ -6,10 +6,16 @@
   import type { ProviderCatalogIndex } from './metrics';
   import { TOTAL_SPEND_GEOMETRY } from './shareCard';
   import { ringSectorPath, spendRingArcs } from './spendRing';
-  import { emptySpendMessage, projectSpend, type SpendProjection } from './totalSpend';
+  import {
+    availableSpendScopes,
+    emptySpendMessage,
+    projectSpend,
+    SPEND_SCOPE_LABELS,
+    type SpendProjection,
+  } from './totalSpend';
   import { providerFamily } from './providerIconPaths';
   import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
-  import type { AppSettings, UsageHistory } from './types';
+  import type { AppSettings, UsageHistory, UsageScope } from './types';
 
   interface Props {
     providers: Array<{ id: string; usage: UsageHistory }>;
@@ -22,10 +28,27 @@
   const providerDisplayName = (id: string) =>
     sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
     catalog.displayName(id, settings.providerNames);
-  const projection = $derived(
-    projectSpend(providers, settings.totalSpendPeriod, settings.totalSpendMetric),
+  let preferredScope = $state<UsageScope>('localDevice');
+  const availableScopes = $derived(availableSpendScopes(providers));
+  const selectedScope = $derived(
+    availableScopes.includes(preferredScope)
+      ? preferredScope
+      : (availableScopes[0] ?? 'localDevice'),
   );
-  const providerNames = $derived(providers.map((provider) => providerDisplayName(provider.id)));
+  const scopedProviders = $derived(
+    providers.filter((provider) => provider.usage.scope === selectedScope),
+  );
+  const projection = $derived(
+    projectSpend(providers, settings.totalSpendPeriod, settings.totalSpendMetric, selectedScope),
+  );
+  const providerNames = $derived(
+    scopedProviders.map((provider) => providerDisplayName(provider.id)),
+  );
+  const inclusionNote = $derived(
+    selectedScope === 'localDevice'
+      ? `Local-device history from ${joinNames(providerNames)}. Account-wide usage is excluded.`
+      : `Account-wide history from ${joinNames(providerNames)}. Local-device usage is excluded.`,
+  );
   const ringSegments = $derived(spendRingArcs(projection.slices));
   const periodIndex = $derived(
     settings.totalSpendPeriod === 'today' ? 0 : settings.totalSpendPeriod === 'yesterday' ? 1 : 2,
@@ -61,6 +84,10 @@
   function patch(patch: Partial<AppSettings>) {
     onChange({ ...settings, ...patch });
   }
+  function joinNames(names: string[]) {
+    if (names.length < 2) return names[0] ?? 'enabled providers';
+    return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+  }
   async function share() {
     if (!(await onShare(projection))) return;
     shareCopied = true;
@@ -90,19 +117,41 @@
       />
       <span
         class="icon-button icon-button--plain total-card__info"
-        data-tooltip={`Only includes ${providerNames.join(' and ')}.`}
-        aria-label={`Only includes ${providerNames.join(' and ')}`}
+        data-tooltip={inclusionNote}
+        aria-label={inclusionNote}
         role="img"><Icon name="about" size={13} strokeWidth={1.9} /></span
       >
     </div>
-    <button
-      class="icon-button icon-button--plain total-card__share"
-      type="button"
-      aria-label={`Share ${metricTitle()} Screenshot`}
-      data-tooltip="Share Screenshot"
-      onclick={share}
-      ><Icon name={shareCopied ? 'check' : 'share'} size={14} strokeWidth={1.8} /></button
-    >
+    <div class="total-card__actions">
+      {#if availableScopes.length > 1}
+        <div class="spend-scope-switcher" role="group" aria-label="Usage Scope">
+          <button
+            class:active={selectedScope === 'localDevice'}
+            type="button"
+            aria-pressed={selectedScope === 'localDevice'}
+            data-tooltip="Usage recorded on this device"
+            onclick={() => (preferredScope = 'localDevice')}>Device</button
+          >
+          <button
+            class:active={selectedScope === 'account'}
+            type="button"
+            aria-pressed={selectedScope === 'account'}
+            data-tooltip="Usage reported for configured accounts"
+            onclick={() => (preferredScope = 'account')}>Accounts</button
+          >
+        </div>
+      {:else}
+        <span class="total-card__scope-label">{SPEND_SCOPE_LABELS[selectedScope]}</span>
+      {/if}
+      <button
+        class="icon-button icon-button--plain total-card__share"
+        type="button"
+        aria-label={`Share ${metricTitle()} Screenshot`}
+        data-tooltip="Share Screenshot"
+        onclick={share}
+        ><Icon name={shareCopied ? 'check' : 'share'} size={14} strokeWidth={1.8} /></button
+      >
+    </div>
   </div>
   <div class="total-card">
     <div class="period-switcher" aria-label="Total Spend period">
@@ -334,6 +383,63 @@
       min-width: 0;
       align-items: center;
       gap: 4px;
+    }
+
+    .total-card__actions {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .spend-scope-switcher {
+      display: grid;
+      width: 112px;
+      height: 22px;
+      flex: 0 0 112px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      padding: 2px;
+      border-radius: 6px;
+      background: var(--meter-track);
+    }
+
+    .spend-scope-switcher button {
+      min-width: 0;
+      padding: 0 4px;
+      overflow: hidden;
+      border: 0;
+      border-radius: 4px;
+      color: var(--secondary);
+      background: transparent;
+      font-size: 9px;
+      font-weight: 500;
+      line-height: 18px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .spend-scope-switcher button.active {
+      color: var(--text);
+      background: var(--tray);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+      font-weight: 600;
+    }
+
+    .spend-scope-switcher button:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--meter-fill) 55%, transparent);
+      outline-offset: 1px;
+    }
+
+    .total-card__scope-label {
+      max-width: 84px;
+      overflow: hidden;
+      color: var(--secondary);
+      font-size: 9px;
+      line-height: 20px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .select-menu--title {

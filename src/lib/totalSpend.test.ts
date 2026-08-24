@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { projectSpend } from './totalSpend';
+import { availableSpendScopes, projectSpend } from './totalSpend';
 import type { UsageHistory } from './types';
 
 const empty: UsageHistory = {
+  scope: 'localDevice',
   today: null,
   yesterday: null,
   last30Days: null,
@@ -29,8 +30,8 @@ describe('Total Spend projection', () => {
       { id: 'antigravity', usage: empty },
     ];
 
-    expect(projectSpend(providers, 'today', 'cost').slices).toEqual([]);
-    expect(projectSpend(providers, 'today', 'tokens')).toMatchObject({
+    expect(projectSpend(providers, 'today', 'cost', 'localDevice').slices).toEqual([]);
+    expect(projectSpend(providers, 'today', 'tokens', 'localDevice')).toMatchObject({
       centerValue: 164_800_000,
       slices: [{ id: 'codex', value: 164_800_000 }],
     });
@@ -58,7 +59,7 @@ describe('Total Spend projection', () => {
       },
     ];
 
-    expect(projectSpend(providers, 'today', 'cost')).toMatchObject({
+    expect(projectSpend(providers, 'today', 'cost', 'localDevice')).toMatchObject({
       centerValue: 4,
       slices: [{ id: 'claude', value: 4 }],
     });
@@ -86,7 +87,9 @@ describe('Total Spend projection', () => {
       },
     ];
 
-    expect(projectSpend(providers, 'today', 'costPerMillion').centerValue).toBe(17.5);
+    expect(projectSpend(providers, 'today', 'costPerMillion', 'localDevice').centerValue).toBe(
+      17.5,
+    );
   });
 
   it('tracks local estimation independently from pricing coverage', () => {
@@ -102,13 +105,51 @@ describe('Total Spend projection', () => {
       },
     ];
 
-    expect(projectSpend(providers, 'today', 'cost')).toMatchObject({
+    expect(projectSpend(providers, 'today', 'cost', 'localDevice')).toMatchObject({
       costEstimated: true,
       estimateComplete: false,
     });
-    expect(projectSpend(providers, 'today', 'tokens')).toMatchObject({
+    expect(projectSpend(providers, 'today', 'tokens', 'localDevice')).toMatchObject({
       costEstimated: false,
       estimateComplete: false,
+    });
+  });
+
+  it('never combines local-device and account histories', () => {
+    const providers = [
+      {
+        id: 'codex',
+        usage: usage({
+          tokens: 1_000,
+          estimatedCostUsd: 2,
+          costEstimated: true,
+          estimateComplete: true,
+        }),
+      },
+      {
+        id: 'cursor',
+        usage: {
+          ...usage({
+            tokens: 4_000,
+            estimatedCostUsd: 8,
+            costEstimated: false,
+            estimateComplete: true,
+          }),
+          scope: 'account' as const,
+        },
+      },
+    ];
+
+    expect(availableSpendScopes(providers)).toEqual(['localDevice', 'account']);
+    expect(projectSpend(providers, 'today', 'cost', 'localDevice')).toMatchObject({
+      scope: 'localDevice',
+      centerValue: 2,
+      slices: [{ id: 'codex', value: 2 }],
+    });
+    expect(projectSpend(providers, 'today', 'cost', 'account')).toMatchObject({
+      scope: 'account',
+      centerValue: 8,
+      slices: [{ id: 'cursor', value: 8 }],
     });
   });
 });
