@@ -19,6 +19,7 @@ use super::ClaudeError;
 use crate::providers::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp},
+    model_scope::is_model_obviously_foreign_to_card,
     pi_usage,
 };
 
@@ -453,6 +454,13 @@ fn aggregate_into(
         .checked_sub_days(Days::new(30))
         .unwrap_or(NaiveDate::MIN);
     for event in events {
+        if event
+            .model
+            .as_deref()
+            .is_some_and(|model| is_model_obviously_foreign_to_card("claude", model))
+        {
+            continue;
+        }
         let date = event.timestamp.with_timezone(&Local).date_naive();
         if date < since {
             continue;
@@ -801,6 +809,18 @@ mod tests {
         assert_eq!(today.tokens, 520);
         assert_eq!(today.estimated_cost_usd, Some(1.75));
         assert!(today.estimate_complete);
+        assert!(today.unknown_models.is_empty());
+    }
+
+    #[test]
+    fn foreign_local_models_are_excluded_from_claude_history() {
+        let content = r#"{"timestamp":"2026-07-15T08:00:00Z","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100,"output_tokens":10}}}
+{"timestamp":"2026-07-15T09:00:00Z","message":{"model":"qwen3.8:27b - mlx","usage":{"input_tokens":500,"output_tokens":20}}}"#;
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
+        let today = history.today.unwrap();
+
+        assert_eq!(today.tokens, 110);
         assert!(today.unknown_models.is_empty());
     }
 
