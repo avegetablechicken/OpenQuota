@@ -31,6 +31,14 @@
     --provider-grok: #8e8e93;
     --provider-opencode: #6e6e73;
     --provider-openrouter: #6467f2;
+    --provider-sub2api: #0ea5b7;
+    --provider-sub2api-2: #d55b79;
+    --provider-sub2api-3: #d18b00;
+    --provider-sub2api-4: #6d6ae8;
+    --provider-sub2api-5: #389b5e;
+    --provider-sub2api-6: #c96832;
+    --provider-sub2api-7: #4d7fc6;
+    --provider-sub2api-8: #a85fa8;
     --provider-zai: #2d2d2d;
     --separator: color-mix(in srgb, var(--text) 9%, transparent);
     --button-hover: color-mix(in srgb, var(--text) 8%, transparent);

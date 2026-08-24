@@ -28,6 +28,8 @@ const visuals: Record<string, { source: string; color: string | null }> = {
   zai: { source: zai, color: null },
 };
 
+const SUB2API_SPEND_COLOR_SLOTS = 8;
+
 export function providerFamily(providerId: string) {
   return providerId.split('@', 1)[0];
 }
@@ -40,6 +42,16 @@ export function providerIconPath(providerId: string) {
 
 export function providerIconColor(providerId: string) {
   return visuals[providerFamily(providerId)]?.color ?? null;
+}
+
+export function providerSpendColorVariable(providerId: string) {
+  const family = providerFamily(providerId);
+  if (family !== 'sub2api') return `--provider-${family}`;
+  const match = providerId.match(/^sub2api(?:@(\d+))?$/);
+  const ordinal = match?.[1] ? Number(match[1]) : 1;
+  if (!Number.isSafeInteger(ordinal) || ordinal < 1) return '--provider-sub2api';
+  const slot = ((ordinal - 1) % SUB2API_SPEND_COLOR_SLOTS) + 1;
+  return slot === 1 ? '--provider-sub2api' : `--provider-sub2api-${slot}`;
 }
 
 export function providerIconViewBox(providerId: string) {

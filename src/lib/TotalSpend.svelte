@@ -12,7 +12,7 @@
     SPEND_SCOPE_LABELS,
     type SpendProjection,
   } from './totalSpend';
-  import { providerFamily } from './providerIconPaths';
+  import { providerSpendColorVariable } from './providerIconPaths';
   import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
   import type { AppSettings, UsageHistories, UsageViewMode } from './types';
 
@@ -56,6 +56,9 @@
   function display(value: number | null) {
     if (value === null) return '—';
     return formatSpendValue(value, settings.totalSpendMetric);
+  }
+  function providerSpendColor(providerId: string) {
+    return `var(${providerSpendColorVariable(providerId)}, var(--provider))`;
   }
   function ringCenter(value: number | null) {
     if (value === null) return { primary: '—', unit: '' };
@@ -191,7 +194,7 @@
                     <path
                       class="spend-ring__segment"
                       d={ringSectorPath(segment, TOTAL_SPEND_GEOMETRY)}
-                      style={`--segment-color: var(--provider-${providerFamily(segment.id)}, var(--provider))`}
+                      style={`--segment-color: ${providerSpendColor(segment.id)}`}
                     />
                   {/each}
                 </svg>
@@ -204,8 +207,7 @@
               <div class="spend-legend">
                 {#each projection.slices as provider (provider.id)}
                   <span
-                    ><i
-                      style={`background: var(--provider-${providerFamily(provider.id)}, var(--provider))`}
+                    ><i style={`background: ${providerSpendColor(provider.id)}`}
                     ></i>{providerDisplayName(provider.id)}</span
                   ><strong>{display(provider.value)}</strong>
                 {/each}

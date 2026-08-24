@@ -120,6 +120,44 @@ describe('TotalSpend Sub2API labels', () => {
     expect(screen.queryByText('Sub2API 2')).not.toBeInTheDocument();
   });
 
+  it('keeps independent Sub2API accounts visually distinct in Accounts and All', async () => {
+    rememberSub2ApiUpstream('sub2api', 'codex');
+    rememberSub2ApiUpstream('sub2api@2', 'claude');
+    const props = {
+      providers: [
+        { id: 'sub2api', usageHistories: scopedUsage(100) },
+        { id: 'sub2api@2', usageHistories: scopedUsage(200) },
+      ],
+      settings,
+      catalog: new ProviderCatalogIndex(catalog),
+      viewMode: 'account' as const,
+      onViewModeChange: vi.fn(),
+      onChange: vi.fn(),
+      onShare: vi.fn(),
+    };
+    const view = render(TotalSpend, props);
+
+    const legendColors = () =>
+      ['Sub2API · Codex', 'Sub2API · Claude'].map((name) =>
+        screen.getByText(name).querySelector('i')?.getAttribute('style'),
+      );
+    const ringColors = () =>
+      Array.from(
+        screen
+          .getByRole('region', { name: 'Accounts Spend' })
+          .querySelectorAll('.spend-ring__segment'),
+        (segment) => segment.getAttribute('style'),
+      );
+
+    expect(new Set(legendColors()).size).toBe(2);
+    expect(new Set(ringColors()).size).toBe(2);
+
+    await view.rerender({ ...props, viewMode: 'all' });
+
+    expect(new Set(legendColors()).size).toBe(2);
+    expect(new Set(ringColors()).size).toBe(2);
+  });
+
   it('switches scopes without combining local and account usage', async () => {
     rememberSub2ApiUpstream('sub2api', 'codex');
 

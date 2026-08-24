@@ -7,10 +7,10 @@ import {
 } from './metricFormat';
 import { formatLimit, formatReset, projectPace } from './pacing';
 import {
-  providerFamily,
   providerIconColor,
   providerIconPath,
   providerIconViewBox,
+  providerSpendColorVariable,
 } from './providerIconPaths';
 import { fillRingSector, spendRingArcs } from './spendRing';
 import { SPEND_SCOPE_LABELS, type SpendProjection } from './totalSpend';
@@ -450,7 +450,7 @@ function canvasPalette(): SharePalette {
     fill: value('--meter-fill'),
     warning: value('--meter-warning'),
     critical: value('--meter-critical'),
-    provider: (id: string) => value(`--provider-${providerFamily(id)}`) || value('--provider'),
+    provider: (id: string) => value(providerSpendColorVariable(id)) || value('--provider'),
   };
 }
 

@@ -29,9 +29,23 @@ describe('native UI language contract', () => {
   });
 
   it('keeps spend providers visually distinct in both appearances', () => {
-    for (const provider of ['claude', 'codex', 'cursor', 'grok', 'opencode', 'openrouter']) {
+    for (const provider of [
+      'claude',
+      'codex',
+      'cursor',
+      'grok',
+      'opencode',
+      'openrouter',
+      'sub2api',
+    ]) {
       expect(tokensCss).toContain(`--provider-${provider}:`);
     }
+    const sub2ApiColors = Array.from(
+      tokensCss.matchAll(/--provider-sub2api(?:-\d+)?:\s*(#[\da-f]+);/gi),
+      (match) => match[1].toLowerCase(),
+    );
+    expect(sub2ApiColors).toHaveLength(8);
+    expect(new Set(sub2ApiColors).size).toBe(8);
     expect(tokensCss).toMatch(
       /@media \(prefers-color-scheme: dark\)[\s\S]*--provider-cursor: #f5f5f7;[\s\S]*--provider-opencode: #aeaeb2;/,
     );
