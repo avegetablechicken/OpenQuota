@@ -20,7 +20,7 @@ use super::{
     model_scope::model_belongs_to_card,
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 1;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct PiUsageEvent {
@@ -173,9 +173,6 @@ fn parse_line(line: &str) -> Option<PiUsageEvent> {
         .map(str::trim)
         .unwrap_or_default()
         .to_owned();
-    if !model_belongs_to_card(card_id, &model) {
-        return None;
-    }
     let usage = message.get("usage")?.as_object()?;
     let cache_write = unsigned_number(usage.get("cacheWrite")).unwrap_or_default();
     let cache_write_1h = unsigned_number(usage.get("cacheWrite1h")).unwrap_or_default();
@@ -231,10 +228,7 @@ fn aggregate_into(
 ) -> bool {
     let mut contributed = false;
     for event in events {
-        if event.card_id != card_id
-            || event.timestamp > now
-            || !model_belongs_to_card(card_id, &event.model)
-        {
+        if event.card_id != card_id || event.timestamp > now {
             continue;
         }
         let date = event.timestamp.with_timezone(&Local).date_naive();
@@ -247,6 +241,19 @@ fn aggregate_into(
         } else {
             model
         };
+        if !model_belongs_to_card(card_id, model) {
+            let carried_cost = event.carried_cost.filter(|cost| *cost > 0.0);
+            let estimated_cost =
+                pricing.estimated_cost_dollars(model, event.tokens.pricing_tokens(), true);
+            accumulator.add_other(
+                date,
+                event.reported_total_tokens,
+                carried_cost.or(estimated_cost),
+                carried_cost.is_none(),
+            );
+            contributed = true;
+            continue;
+        }
         if let Some(cost) = event.carried_cost.filter(|cost| *cost > 0.0) {
             accumulator.add_exact(date, event.reported_total_tokens, cost, display_model);
             contributed = true;
@@ -397,7 +404,7 @@ mod tests {
     #[test]
     fn parser_rejects_unmapped_and_non_assistant_messages() {
         assert!(parse_line(&line("one", "nvidia-nim", "model", "1")).is_none());
-        assert!(parse_line(&line("mlx", "openai-codex", "qwen3.8:27b - mlx", "0")).is_none());
+        assert!(parse_line(&line("mlx", "openai-codex", "qwen3.8:27b - mlx", "0")).is_some());
         let user = r#"{"type":"message","timestamp":"2026-07-12T10:00:00Z","message":{"role":"user","provider":"anthropic","usage":{}}}"#;
         assert!(parse_line(user).is_none());
     }
@@ -421,7 +428,7 @@ mod tests {
         };
         let mut accumulator = DailyUsageAccumulator::default();
 
-        assert!(!aggregate_into(
+        assert!(aggregate_into(
             vec![event],
             "codex",
             chrono::NaiveDate::MIN,
@@ -429,7 +436,11 @@ mod tests {
             &pricing(),
             &mut accumulator,
         ));
-        assert!(accumulator.build(now(), "From pi").today.is_none());
+        let history = accumulator.build(now(), "From pi");
+        assert!(history.today.is_none());
+        let other = history.other_usage.unwrap().today.unwrap();
+        assert_eq!(other.tokens, 150);
+        assert_eq!(other.priced_tokens, 0);
     }
 
     #[test]

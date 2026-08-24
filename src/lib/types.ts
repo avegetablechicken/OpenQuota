@@ -77,6 +77,20 @@ export interface DailyUsage {
   estimateComplete: boolean;
 }
 
+export interface OtherUsagePeriod {
+  tokens: number;
+  pricedTokens: number;
+  estimatedCostUsd: number | null;
+  costEstimated: boolean;
+  estimateComplete: boolean;
+}
+
+export interface OtherUsageHistory {
+  today: OtherUsagePeriod | null;
+  yesterday: OtherUsagePeriod | null;
+  last30Days: OtherUsagePeriod | null;
+}
+
 export type UsageScope = 'localDevice' | 'account';
 export type UsageViewMode = 'all' | UsageScope;
 
@@ -86,6 +100,7 @@ export interface UsageHistory {
   last30Days: UsagePeriod | null;
   daily: DailyUsage[];
   unknownModels: string[];
+  otherUsage?: OtherUsageHistory | null;
 }
 
 export interface UsageHistories {

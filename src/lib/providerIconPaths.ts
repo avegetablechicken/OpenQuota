@@ -29,6 +29,8 @@ const visuals: Record<string, { source: string; color: string | null }> = {
 };
 
 const SUB2API_SPEND_COLOR_SLOTS = 8;
+export const OTHERS_SPEND_ID = 'others';
+export const UNPRICED_OTHERS_SPEND_ID = 'others-unpriced';
 
 export function providerFamily(providerId: string) {
   return providerId.split('@', 1)[0];
@@ -45,6 +47,8 @@ export function providerIconColor(providerId: string) {
 }
 
 export function providerSpendColorVariable(providerId: string) {
+  if (providerId === OTHERS_SPEND_ID) return '--provider-others';
+  if (providerId === UNPRICED_OTHERS_SPEND_ID) return '--provider-others-unpriced';
   const family = providerFamily(providerId);
   if (family !== 'sub2api') return `--provider-${family}`;
   const match = providerId.match(/^sub2api(?:@(\d+))?$/);

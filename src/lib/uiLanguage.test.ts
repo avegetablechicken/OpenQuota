@@ -37,6 +37,8 @@ describe('native UI language contract', () => {
       'opencode',
       'openrouter',
       'sub2api',
+      'others',
+      'others-unpriced',
     ]) {
       expect(tokensCss).toContain(`--provider-${provider}:`);
     }

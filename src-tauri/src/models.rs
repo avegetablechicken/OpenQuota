@@ -178,6 +178,25 @@ pub struct DailyUsage {
     pub estimate_complete: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherUsagePeriod {
+    pub tokens: u64,
+    #[serde(default)]
+    pub priced_tokens: u64,
+    pub estimated_cost_usd: Option<f64>,
+    pub cost_estimated: bool,
+    pub estimate_complete: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherUsageHistory {
+    pub today: Option<OtherUsagePeriod>,
+    pub yesterday: Option<OtherUsagePeriod>,
+    pub last_30_days: Option<OtherUsagePeriod>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum UsageScope {
@@ -194,6 +213,8 @@ pub struct UsageHistory {
     pub last_30_days: Option<UsagePeriod>,
     pub daily: Vec<DailyUsage>,
     pub unknown_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_usage: Option<OtherUsageHistory>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -241,6 +262,7 @@ impl LegacyUsageHistory {
             last_30_days: self.last_30_days,
             daily: self.daily,
             unknown_models: self.unknown_models,
+            other_usage: None,
         };
         match self.scope {
             UsageScope::LocalDevice => UsageHistories::local_device(history),

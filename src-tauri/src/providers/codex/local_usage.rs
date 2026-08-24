@@ -497,9 +497,6 @@ fn aggregate_into(
     let mut seen = HashSet::new();
 
     for event in events {
-        if !model_belongs_to_card("codex", &event.model) {
-            continue;
-        }
         let key = (
             event.timestamp,
             event.model.clone(),
@@ -514,6 +511,10 @@ fn aggregate_into(
         }
         let date = event.timestamp.with_timezone(&Local).date_naive();
         if date < since {
+            continue;
+        }
+        if !model_belongs_to_card("codex", &event.model) {
+            accumulator.add_other(date, event.total, estimate_cost(&event, pricing), true);
             continue;
         }
         if let Some(cost) = estimate_cost(&event, pricing) {
@@ -669,6 +670,20 @@ mod tests {
         ] {
             assert!(model_belongs_to_card("codex", model), "{model}");
         }
+    }
+
+    #[test]
+    fn filtered_models_are_kept_in_other_usage_without_entering_codex_totals() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"deepseek-v4-flash","info":{"last_token_usage":{"input_tokens":500,"output_tokens":20,"total_tokens":520}}}}"#;
+        let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
+
+        assert_eq!(history.today.as_ref().unwrap().tokens, 110);
+        let other = history.other_usage.unwrap().today.unwrap();
+        assert_eq!(other.tokens, 520);
+        assert_eq!(other.priced_tokens, 520);
+        assert!(other.estimated_cost_usd.is_some());
     }
 
     #[test]

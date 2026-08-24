@@ -12,7 +12,11 @@
     SPEND_SCOPE_LABELS,
     type SpendProjection,
   } from './totalSpend';
-  import { providerSpendColorVariable } from './providerIconPaths';
+  import {
+    OTHERS_SPEND_ID,
+    UNPRICED_OTHERS_SPEND_ID,
+    providerSpendColorVariable,
+  } from './providerIconPaths';
   import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
   import type { AppSettings, UsageHistories, UsageViewMode } from './types';
 
@@ -27,9 +31,14 @@
   }
   let { providers, settings, catalog, viewMode, onViewModeChange, onChange, onShare }: Props =
     $props();
-  const providerDisplayName = (id: string) =>
-    sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
-    catalog.displayName(id, settings.providerNames);
+  const providerDisplayName = (id: string) => {
+    if (id === OTHERS_SPEND_ID) return 'Others';
+    if (id === UNPRICED_OTHERS_SPEND_ID) return 'Others (unpriced)';
+    return (
+      sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
+      catalog.displayName(id, settings.providerNames)
+    );
+  };
   const renderedScopes = $derived(
     viewMode === 'all' ? (['localDevice', 'account'] as const) : [viewMode],
   );
@@ -176,9 +185,8 @@
       {#each projections as projection (projection.scope)}
         <section
           class="total-card__scope"
-          class:total-card__scope--empty-history={
-            projection.centerValue === null && !hasScopeHistory(projection.scope)
-          }
+          class:total-card__scope--empty-history={projection.centerValue === null &&
+            !hasScopeHistory(projection.scope)}
           aria-label={`${SPEND_SCOPE_LABELS[projection.scope]} Spend`}
         >
           {#if viewMode === 'all'}
@@ -215,7 +223,11 @@
                   <span
                     ><i style={`background: ${providerSpendColor(provider.id)}`}
                     ></i>{providerDisplayName(provider.id)}</span
-                  ><strong>{display(provider.value)}</strong>
+                  ><strong
+                    class:spend-legend__value--hidden={provider.showValue === false}
+                    aria-hidden={provider.showValue === false ? 'true' : undefined}
+                    >{display(provider.value)}</strong
+                  >
                 {/each}
               </div>
             </div>
@@ -581,6 +593,10 @@
       color: var(--secondary);
       font-weight: 500;
       text-align: right;
+    }
+
+    .spend-legend__value--hidden {
+      visibility: hidden;
     }
 
     .total-card__empty {

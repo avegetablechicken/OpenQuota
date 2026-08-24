@@ -25,6 +25,8 @@
     --provider: #10a37f;
     --provider-codex: #10a37f;
     --provider-claude: #de7356;
+    --provider-others: #8a7f3d;
+    --provider-others-unpriced: #b3aa69;
     --provider-antigravity: #4285f4;
     --provider-copilot: #a855f7;
     --provider-cursor: #13120a;
@@ -65,6 +67,8 @@
     --meter-warning: #ffd54a;
     --meter-critical: #ff6961;
     --provider: #19c39a;
+    --provider-others: #b8ad62;
+    --provider-others-unpriced: #d0c98d;
     --provider-cursor: #f5f5f7;
     --provider-grok: #98989d;
     --provider-opencode: #aeaeb2;
@@ -116,6 +120,8 @@
   --meter-warning: #ffd54a;
   --meter-critical: #ff6961;
   --provider: #19c39a;
+  --provider-others: #b8ad62;
+  --provider-others-unpriced: #d0c98d;
   --provider-cursor: #f5f5f7;
   --provider-grok: #98989d;
   --provider-opencode: #aeaeb2;

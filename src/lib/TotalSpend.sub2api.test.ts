@@ -216,4 +216,41 @@ describe('TotalSpend Sub2API labels', () => {
       }),
     ).toBeInTheDocument();
   });
+
+  it('hides the pseudo cost for unpriced Others while keeping its legend category', () => {
+    render(TotalSpend, {
+      providers: [
+        {
+          id: 'codex',
+          usageHistories: {
+            localDevice: {
+              ...usage(100),
+              otherUsage: {
+                today: {
+                  tokens: 1_000,
+                  pricedTokens: 400,
+                  estimatedCostUsd: 2,
+                  costEstimated: true,
+                  estimateComplete: false,
+                },
+                yesterday: null,
+                last30Days: null,
+              },
+            },
+          },
+        },
+      ],
+      settings: { ...settings, totalSpendMetric: 'cost', totalSpendPeriod: 'today' },
+      catalog: new ProviderCatalogIndex(catalog),
+      viewMode: 'localDevice',
+      onViewModeChange: vi.fn(),
+      onChange: vi.fn(),
+      onShare: vi.fn(),
+    });
+
+    const label = screen.getByText('Others (unpriced)');
+    expect(
+      label.closest('.spend-legend')?.querySelector('.spend-legend__value--hidden'),
+    ).toBeTruthy();
+  });
 });

@@ -6,16 +6,18 @@ use std::{
 use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
 use crate::models::{
-    DailyUsage, ModelUsageBreakdown, ModelUsageEntry, ModelUsageVariant, UsageHistory, UsagePeriod,
+    DailyUsage, ModelUsageBreakdown, ModelUsageEntry, ModelUsageVariant, OtherUsageHistory,
+    OtherUsagePeriod, UsageHistory, UsagePeriod,
 };
 
-/// Provider-neutral accumulator for priced local-log usage. Claude and Codex keep their own parsing
-/// and cost rules, then feed only priced events into this type. Unknown models are tracked beside the
-/// priced series and never inflate token or dollar totals.
+/// Provider-neutral accumulator for local-log usage. Claude, Codex, and pi keep their own parsing
+/// and cost rules, then feed native events into the main series and intentionally excluded events
+/// into the separate Others bucket.
 #[derive(Default)]
 pub struct DailyUsageAccumulator {
     days: BTreeMap<NaiveDate, DayAccumulator>,
     unknown_models_by_day: BTreeMap<NaiveDate, HashSet<String>>,
+    other_days: BTreeMap<NaiveDate, OtherDayAccumulator>,
 }
 
 #[derive(Default)]
@@ -24,6 +26,28 @@ struct DayAccumulator {
     cost: f64,
     cost_estimated: bool,
     models: HashMap<String, ModelAccumulator>,
+}
+
+struct OtherDayAccumulator {
+    tokens: u64,
+    priced_tokens: u64,
+    cost: f64,
+    has_cost: bool,
+    cost_estimated: bool,
+    estimate_complete: bool,
+}
+
+impl Default for OtherDayAccumulator {
+    fn default() -> Self {
+        Self {
+            tokens: 0,
+            priced_tokens: 0,
+            cost: 0.0,
+            has_cost: false,
+            cost_estimated: false,
+            estimate_complete: true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -152,11 +176,36 @@ impl DailyUsageAccumulator {
         }
     }
 
+    /// Adds usage from a model intentionally excluded from the provider's normal history.
+    /// It remains available to the local-device spend chart as one aggregated Others slice.
+    pub fn add_other(
+        &mut self,
+        date: NaiveDate,
+        tokens: u64,
+        cost: Option<f64>,
+        cost_estimated: bool,
+    ) {
+        if tokens == 0 && cost.is_none_or(|value| value <= 0.0) {
+            return;
+        }
+        let day = self.other_days.entry(date).or_default();
+        day.tokens = day.tokens.saturating_add(tokens);
+        if let Some(cost) = cost.filter(|value| value.is_finite() && *value >= 0.0) {
+            day.priced_tokens = day.priced_tokens.saturating_add(tokens);
+            day.cost += cost;
+            day.has_cost = true;
+            day.cost_estimated |= cost_estimated;
+        } else if tokens > 0 {
+            day.estimate_complete = false;
+        }
+    }
+
     /// Builds the three spend periods. Idle or unknown-only periods stay unbacked (`None`), while
     /// the trend receives only active days and fills calendar gaps in the UI layer.
     pub fn build(self, now: DateTime<Utc>, source_note: &str) -> UsageHistory {
         let today = now.with_timezone(&Local).date_naive();
         let yesterday = today.checked_sub_days(Days::new(1));
+        let other_usage = self.other_usage(now);
         let daily = self
             .days
             .iter()
@@ -204,7 +253,49 @@ impl DailyUsageAccumulator {
             last_30_days,
             daily,
             unknown_models,
+            other_usage,
         }
+    }
+
+    fn other_usage(&self, now: DateTime<Utc>) -> Option<OtherUsageHistory> {
+        if self.other_days.is_empty() {
+            return None;
+        }
+        let today = now.with_timezone(&Local).date_naive();
+        let yesterday = today.checked_sub_days(Days::new(1));
+        let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
+        let active_days = self
+            .other_days
+            .keys()
+            .filter(|date| **date >= since && **date <= today)
+            .copied()
+            .collect::<Vec<_>>();
+        Some(OtherUsageHistory {
+            today: self.other_period_for_days(&[today]),
+            yesterday: yesterday.and_then(|date| self.other_period_for_days(&[date])),
+            last_30_days: self.other_period_for_days(&active_days),
+        })
+    }
+
+    fn other_period_for_days(&self, dates: &[NaiveDate]) -> Option<OtherUsagePeriod> {
+        let mut total = OtherDayAccumulator::default();
+        for date in dates {
+            if let Some(day) = self.other_days.get(date) {
+                total.tokens = total.tokens.saturating_add(day.tokens);
+                total.priced_tokens = total.priced_tokens.saturating_add(day.priced_tokens);
+                total.cost += day.cost;
+                total.has_cost |= day.has_cost;
+                total.cost_estimated |= day.cost_estimated;
+                total.estimate_complete &= day.estimate_complete;
+            }
+        }
+        (total.tokens > 0 || total.has_cost).then(|| OtherUsagePeriod {
+            tokens: total.tokens,
+            priced_tokens: total.priced_tokens,
+            estimated_cost_usd: total.has_cost.then_some(total.cost),
+            cost_estimated: total.cost_estimated,
+            estimate_complete: total.estimate_complete,
+        })
     }
 
     fn period_for_days(&self, dates: &[NaiveDate], source_note: &str) -> Option<UsagePeriod> {
