@@ -3,7 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::models::{MetricSection, MetricSource, ProviderCatalog, ProviderDefinition};
+use crate::models::{
+    AppSettings, MetricSection, MetricSource, ProviderCatalog, ProviderDefinition,
+};
 
 use super::{CacheIdentity, UsageProvider};
 
@@ -98,6 +100,19 @@ impl ProviderRegistry {
         self.definition_indices
             .get(id)
             .and_then(|index| self.catalog.providers.get(*index))
+    }
+
+    pub fn display_name(&self, id: &str, settings: &AppSettings) -> Option<String> {
+        let custom_name = settings
+            .provider_names
+            .get(id)
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty());
+        custom_name.map(str::to_owned).or_else(|| {
+            self.runtimes
+                .get(id)
+                .map(|provider| provider.display_name())
+        })
     }
 
     pub fn cache_identity(&self, id: &str) -> CacheIdentity<'_> {
@@ -378,6 +393,21 @@ mod tests {
         assert!(registry.runtime("second").is_some());
         assert!(registry.definition("first").is_some());
         assert!(registry.metric("first.session").is_some());
+    }
+
+    #[test]
+    fn display_name_prefers_custom_names_over_runtime_names() {
+        let registry = ProviderRegistry::new(vec![runtime(definition("first"))]).unwrap();
+        let mut settings = crate::models::AppSettings::default();
+        settings
+            .provider_names
+            .insert("first".into(), " Work ".into());
+
+        assert_eq!(
+            registry.display_name("first", &settings).as_deref(),
+            Some("Work")
+        );
+        assert_eq!(registry.display_name("missing", &settings), None);
     }
 
     #[test]

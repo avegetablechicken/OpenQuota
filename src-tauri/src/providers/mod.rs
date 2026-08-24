@@ -118,6 +118,10 @@ pub trait UsageProvider: Send + Sync {
     fn has_local_credentials(&self) -> bool;
     fn refresh(&self) -> Result<ProviderSnapshot, ProviderError>;
 
+    fn display_name(&self) -> String {
+        self.definition().display_name
+    }
+
     fn refresh_for_service(&self) -> Result<ProviderRefresh, ProviderError> {
         let snapshot = self.refresh()?;
         Ok(ProviderRefresh {

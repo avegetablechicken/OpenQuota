@@ -10,7 +10,7 @@
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
   import { canRenameProvider } from './providerNames';
-  import { sub2ApiMetricSupported, sub2ApiUpstreams } from './sub2ApiUpstreams';
+  import { sub2ApiDisplayName, sub2ApiMetricSupported, sub2ApiUpstreams } from './sub2ApiUpstreams';
 
   interface Props {
     settings: AppSettings;
@@ -37,7 +37,9 @@
     reducedMotion,
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
-  const providerDisplayName = (id: string) => catalog.displayName(id, settings.providerNames);
+  const providerDisplayName = (id: string) =>
+    sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
+    catalog.displayName(id, settings.providerNames);
   let message = $state('');
   let messageKind = $state<'success' | 'denied'>('success');
   let messageTimer: ReturnType<typeof setTimeout> | undefined;

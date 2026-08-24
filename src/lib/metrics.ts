@@ -66,10 +66,11 @@ export class ProviderCatalogIndex {
     return this.provider(family)?.displayName ?? this.provider(id)?.displayName ?? id;
   }
 
-  localUsageSourceNote(id: string) {
+  localUsageSourceNote(id: string, displayName?: string) {
     const provider = this.provider(id);
     return (
-      provider?.localUsageSourceNote ?? `From your ${provider?.displayName ?? id} usage history`
+      provider?.localUsageSourceNote ??
+      `From your ${displayName ?? provider?.displayName ?? id} usage history`
     );
   }
 }
@@ -79,14 +80,16 @@ export function usageSourceNote(
   snapshot: ProviderSnapshot,
   history: UsageHistory,
   scope: UsageScope,
+  providerName?: string,
 ) {
+  const displayName = providerName ?? catalog.displayName(snapshot.providerId);
   return (
     history.last30Days?.modelBreakdown?.sourceNote ??
     history.today?.modelBreakdown?.sourceNote ??
     history.yesterday?.modelBreakdown?.sourceNote ??
     (scope === 'localDevice'
-      ? catalog.localUsageSourceNote(snapshot.providerId)
-      : `From your ${catalog.displayName(snapshot.providerId)} account usage history`)
+      ? catalog.localUsageSourceNote(snapshot.providerId, displayName)
+      : `From your ${displayName} account usage history`)
   );
 }
 

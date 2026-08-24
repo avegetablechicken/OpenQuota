@@ -2,6 +2,7 @@
   import { usageSourceNote, type ProviderCatalogIndex } from './metrics';
   import QuotaMetric from './QuotaMetric.svelte';
   import StatusMetric from './StatusMetric.svelte';
+  import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
   import UsageMetric from './UsageMetric.svelte';
   import UsageTrend from './UsageTrend.svelte';
   import ValueMetric from './ValueMetric.svelte';
@@ -26,6 +27,10 @@
   }
   let { layout, snapshot, settings, now, catalog, viewMode, onSettingsChange }: Props = $props();
   const definition = $derived(catalog.metric(layout.id));
+  const providerDisplayName = $derived(
+    sub2ApiDisplayName(snapshot.providerId, $sub2ApiUpstreams[snapshot.providerId]) ??
+      catalog.displayName(snapshot.providerId, settings.providerNames),
+  );
   const quota = $derived.by(() => {
     const source = definition?.source;
     if (source?.kind !== 'quota' && source?.kind !== 'quotaOrValue') return undefined;
@@ -105,7 +110,13 @@
     <UsageTrend
       label={usageLabel(definition.label, scoped.scope)}
       daily={scoped.history.daily}
-      sourceNote={usageSourceNote(catalog, snapshot, scoped.history, scoped.scope)}
+      sourceNote={usageSourceNote(
+        catalog,
+        snapshot,
+        scoped.history,
+        scoped.scope,
+        providerDisplayName,
+      )}
     />
   {/each}
 {:else if definition?.source.kind === 'status'}

@@ -57,6 +57,44 @@ describe('provider catalog index', () => {
     );
   });
 
+  it('uses the resolved provider name for fallback usage notes', () => {
+    const catalog = new ProviderCatalogIndex({
+      providers: [
+        {
+          id: 'sub2api@2',
+          displayName: 'Sub2API 2',
+          shortName: 'S2',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+    const snapshot = {
+      ...codexState.snapshot!,
+      providerId: 'sub2api@2',
+      usageHistories: {
+        localDevice: {
+          ...codexState.snapshot!.usageHistories.localDevice!,
+          today: null,
+          yesterday: null,
+          last30Days: null,
+        },
+      },
+    };
+
+    expect(
+      usageSourceNote(
+        catalog,
+        snapshot,
+        snapshot.usageHistories.localDevice!,
+        'localDevice',
+        'Sub2API · Claude',
+      ),
+    ).toBe('From your Sub2API · Claude usage history');
+  });
+
   it('rejects duplicate provider and metric ids at the frontend boundary', () => {
     const provider = structuredClone(providerCatalog.providers[1]);
     expect(

@@ -221,6 +221,9 @@ fn resolved_groups(
                 .providers
                 .get(&provider.id)
                 .and_then(|state| state.snapshot.as_ref())?;
+            let provider_name = registry
+                .display_name(&definition.id, settings)
+                .unwrap_or_else(|| settings.provider_display_name(definition).to_owned());
             let metrics = provider
                 .metrics
                 .iter()
@@ -229,11 +232,7 @@ fn resolved_groups(
                     let metric_definition = registry.metric(&metric.id)?;
                     let mut resolved =
                         tray_metric(metric_definition, snapshot, settings.usage_display)?;
-                    resolved.detail = format!(
-                        "{} {}",
-                        settings.provider_display_name(definition),
-                        resolved.detail
-                    );
+                    resolved.detail = format!("{} {}", provider_name, resolved.detail);
                     Some(resolved)
                 })
                 .collect::<Vec<_>>();
@@ -433,15 +432,17 @@ fn mark_icon() -> Image<'static> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     use chrono::Utc;
 
     use crate::{
         models::{
-            MetricDefinition, MetricSection, MetricValue, MetricValueKind, ProviderSnapshot,
-            ProviderViewState, QuotaWindow, SnapshotSource, StatusMetric, StatusTone, ValueMetric,
+            MetricDefinition, MetricSection, MetricValue, MetricValueKind, ProviderDefinition,
+            ProviderSnapshot, ProviderViewState, QuotaWindow, SnapshotSource, StatusMetric,
+            StatusTone, ValueMetric,
         },
-        providers::{codex, cursor, ProviderRegistry},
+        providers::{codex, cursor, ProviderError, ProviderRegistry, UsageProvider},
         settings::default_settings,
     };
 
@@ -450,6 +451,29 @@ mod tests {
         text_groups, MacMenuBarIcon, MacMenuBarPresentation, TrayGauge, TrayGroup, TrayMetric,
     };
     use crate::service::UsageViewState;
+
+    struct NamedProvider {
+        definition: ProviderDefinition,
+        name: String,
+    }
+
+    impl UsageProvider for NamedProvider {
+        fn definition(&self) -> ProviderDefinition {
+            self.definition.clone()
+        }
+
+        fn has_local_credentials(&self) -> bool {
+            true
+        }
+
+        fn display_name(&self) -> String {
+            self.name.clone()
+        }
+
+        fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
+            unreachable!()
+        }
+    }
 
     #[test]
     fn bundled_tray_mark_decodes_at_the_expected_size() {
@@ -703,6 +727,56 @@ mod tests {
         assert_eq!(used_groups[0].metrics[0].value, "25%");
         assert_eq!(bar_fractions(&groups), vec![0.75, 0.4]);
         assert_eq!(bar_fractions(&used_groups), vec![0.25, 0.6]);
+    }
+
+    #[test]
+    fn tray_details_use_the_runtime_provider_name() {
+        let snapshot = ProviderSnapshot {
+            provider_id: "codex".into(),
+            plan: None,
+            quotas: vec![QuotaWindow {
+                id: "session".into(),
+                label: "Session".into(),
+                used_percent: 25.0,
+                resets_at: None,
+                period_seconds: 18_000,
+                format: crate::models::QuotaFormat::Percent,
+                used_value: None,
+                limit_value: None,
+                unit: None,
+                estimated: false,
+                source_note: None,
+            }],
+            value_metrics: Vec::new(),
+            status_metrics: Vec::new(),
+            notices: Vec::new(),
+            usage_histories: Default::default(),
+            warnings: Vec::new(),
+            refreshed_at: Utc::now(),
+        };
+        let registry = ProviderRegistry::new(vec![Arc::new(NamedProvider {
+            definition: codex::definition(),
+            name: "Actual Codex".into(),
+        })])
+        .unwrap();
+        let settings = default_settings(&registry, &HashSet::from(["codex".to_owned()]));
+        let state = UsageViewState {
+            providers: [(
+                "codex".into(),
+                ProviderViewState {
+                    snapshot: Some(snapshot),
+                    source: SnapshotSource::Live,
+                    ..ProviderViewState::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            last_full_refresh_at: None,
+        };
+
+        let groups = resolved_groups(&state, &settings, &registry);
+
+        assert_eq!(groups[0].metrics[0].detail, "Actual Codex Session 75% left");
     }
 
     #[test]

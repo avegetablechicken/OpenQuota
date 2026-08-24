@@ -240,6 +240,10 @@ impl Sub2ApiUpstream {
     }
 }
 
+fn display_name_for_upstream(upstream: Sub2ApiUpstream) -> String {
+    format!("Sub2API · {upstream}")
+}
+
 impl std::fmt::Display for Sub2ApiUpstream {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.label())
@@ -977,6 +981,14 @@ impl UsageProvider for Sub2ApiProvider {
         self.configured.load(Ordering::SeqCst)
     }
 
+    fn display_name(&self) -> String {
+        self.load_config()
+            .ok()
+            .flatten()
+            .map(|config| display_name_for_upstream(config.upstream))
+            .unwrap_or_else(|| self.display_name.clone())
+    }
+
     fn cache_identity(&self) -> CacheIdentity<'_> {
         if self.configured.load(Ordering::SeqCst) {
             CacheIdentity::Unscoped
@@ -1081,6 +1093,7 @@ fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistor
         last_30_days,
         daily,
         unknown_models: Vec::new(),
+        other_usage: None,
     }
 }
 
@@ -1167,7 +1180,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        definition_for, map_stats, metric_template, normalize_base_url,
+        definition_for, display_name_for_upstream, map_stats, metric_template, normalize_base_url,
         should_apply_metric_template, AccountStats, AccountStatsDay, StoredConfig, Sub2ApiClient,
         Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
     };
@@ -1269,6 +1282,18 @@ mod tests {
             .iter()
             .any(|metric| metric.id == "sub2api.last30"));
         assert!(!definition.fallback_enabled);
+    }
+
+    #[test]
+    fn configured_upstreams_have_stable_public_display_names() {
+        assert_eq!(
+            display_name_for_upstream(super::Sub2ApiUpstream::Codex),
+            "Sub2API · Codex"
+        );
+        assert_eq!(
+            display_name_for_upstream(super::Sub2ApiUpstream::Claude),
+            "Sub2API · Claude"
+        );
     }
 
     #[test]
@@ -1734,4 +1759,3 @@ mod tests {
         assert!(!error.to_string().contains("secret"));
     }
 }
-        other_usage: None,
