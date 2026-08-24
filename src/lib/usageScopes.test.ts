@@ -11,9 +11,10 @@ const history: UsageHistory = {
 };
 
 describe('usage scope provider visibility', () => {
-  it('keeps providers with no history because their quota data is scope-independent', () => {
-    expect(shouldShowProviderForMode({}, 'localDevice')).toBe(true);
-    expect(shouldShowProviderForMode({}, 'account')).toBe(true);
+  it('shows providers with no history only in All', () => {
+    expect(shouldShowProviderForMode({}, 'localDevice')).toBe(false);
+    expect(shouldShowProviderForMode({}, 'account')).toBe(false);
+    expect(shouldShowProviderForMode({}, 'all')).toBe(true);
   });
 
   it('shows only the matching history provider in scoped views', () => {

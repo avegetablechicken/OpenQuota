@@ -25,6 +25,5 @@ export function usageHistoriesForMode(
 
 export function shouldShowProviderForMode(histories: UsageHistories, mode: UsageViewMode): boolean {
   if (mode === 'all') return true;
-  const hasAnyHistory = availableUsageScopes(histories).length > 0;
-  return !hasAnyHistory || Boolean(histories[mode]);
+  return Boolean(histories[mode]);
 }
