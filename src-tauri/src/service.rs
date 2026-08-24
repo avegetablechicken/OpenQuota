@@ -710,7 +710,7 @@ mod tests {
         models::{
             MetricDefinition, MetricSection, MetricSource, ProviderDefinition, ProviderErrorKind,
             ProviderSnapshot, ProviderViewState, QuotaFormat, QuotaWindow, SnapshotSource,
-            StatusMetric, StatusTone, UsageHistory,
+            StatusMetric, StatusTone,
         },
         policy::{FAILURE_RETRY_BACKOFF, STALE_AFTER},
         providers::{
@@ -913,7 +913,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         }
@@ -956,7 +956,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };

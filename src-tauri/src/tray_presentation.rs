@@ -322,10 +322,15 @@ fn tray_metric(
 }
 
 fn usage_period(snapshot: &ProviderSnapshot, period: UsagePeriodSelection) -> Option<&UsagePeriod> {
+    let history = snapshot
+        .usage_histories
+        .local_device
+        .as_ref()
+        .or(snapshot.usage_histories.account.as_ref())?;
     match period {
-        UsagePeriodSelection::Today => snapshot.usage.today.as_ref(),
-        UsagePeriodSelection::Yesterday => snapshot.usage.yesterday.as_ref(),
-        UsagePeriodSelection::Last30Days => snapshot.usage.last_30_days.as_ref(),
+        UsagePeriodSelection::Today => history.today.as_ref(),
+        UsagePeriodSelection::Yesterday => history.yesterday.as_ref(),
+        UsagePeriodSelection::Last30Days => history.last_30_days.as_ref(),
     }
 }
 
@@ -434,8 +439,7 @@ mod tests {
     use crate::{
         models::{
             MetricDefinition, MetricSection, MetricValue, MetricValueKind, ProviderSnapshot,
-            ProviderViewState, QuotaWindow, SnapshotSource, StatusMetric, StatusTone, UsageHistory,
-            ValueMetric,
+            ProviderViewState, QuotaWindow, SnapshotSource, StatusMetric, StatusTone, ValueMetric,
         },
         providers::{codex, cursor, ProviderRegistry},
         settings::default_settings,
@@ -642,7 +646,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };
@@ -722,7 +726,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };
@@ -832,7 +836,7 @@ mod tests {
             }],
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };
@@ -863,7 +867,7 @@ mod tests {
                 subtitle: None,
             }],
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };

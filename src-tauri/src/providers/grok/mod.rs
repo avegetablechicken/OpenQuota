@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::{
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind, ProviderLink,
-        ProviderSnapshot, UsagePeriodSelection,
+        ProviderSnapshot, UsageHistories, UsagePeriodSelection,
     },
     pricing::PricingStore,
     providers::log_usage::scan_or_cached_usage,
@@ -220,7 +220,7 @@ impl GrokProvider {
             value_metrics: Vec::new(),
             status_metrics: mapped.status_metrics,
             notices: Vec::new(),
-            usage,
+            usage_histories: UsageHistories::local_device(usage),
             warnings,
             refreshed_at: now,
         })

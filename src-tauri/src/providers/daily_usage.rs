@@ -7,7 +7,6 @@ use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
 use crate::models::{
     DailyUsage, ModelUsageBreakdown, ModelUsageEntry, ModelUsageVariant, UsageHistory, UsagePeriod,
-    UsageScope,
 };
 
 /// Provider-neutral accumulator for priced local-log usage. Claude and Codex keep their own parsing
@@ -200,7 +199,6 @@ impl DailyUsageAccumulator {
             });
 
         UsageHistory {
-            scope: UsageScope::LocalDevice,
             today: today_period,
             yesterday: yesterday_period,
             last_30_days,

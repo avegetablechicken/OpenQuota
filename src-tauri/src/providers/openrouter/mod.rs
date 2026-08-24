@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::{
     models::{
         ApiKeyStatus, MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind,
-        ProviderLink, ProviderSnapshot, UsageHistory,
+        ProviderLink, ProviderSnapshot, UsageHistories,
     },
     providers::api_key::ApiKeyStore,
 };
@@ -192,7 +192,7 @@ impl OpenRouterProvider {
                 value_metrics: values,
                 status_metrics: Vec::new(),
                 notices: Vec::new(),
-                usage: UsageHistory::default(),
+                usage_histories: UsageHistories::default(),
                 warnings: Vec::new(),
                 refreshed_at: Utc::now(),
             });

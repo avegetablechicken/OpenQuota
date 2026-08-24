@@ -650,7 +650,16 @@ fn malformed_auth_does_not_blank_valid_database_usage() {
         now(),
     );
     let snapshot = provider.refresh().unwrap();
-    assert_eq!(snapshot.usage.today.unwrap().estimated_cost_usd, Some(1.0));
+    assert_eq!(
+        snapshot
+            .usage_histories
+            .local_device
+            .unwrap()
+            .today
+            .unwrap()
+            .estimated_cost_usd,
+        Some(1.0)
+    );
     assert_eq!(snapshot.warnings.len(), 1);
     assert!(!snapshot.warnings[0].contains("secret"));
 }

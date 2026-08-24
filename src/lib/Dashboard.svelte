@@ -14,6 +14,7 @@
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
   import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
+  import { shouldShowProviderForMode, usageHistoriesForMode } from './usageScopes';
   import type {
     AppSettings,
     MetricLayout,
@@ -21,7 +22,7 @@
     ProviderSnapshot,
     UpdateProgress,
     UpdateFailure,
-    UsageHistory,
+    UsageViewMode,
     UsageViewState,
     UpdateStatus,
   } from './types';
@@ -39,8 +40,8 @@
     onCustomize: () => void;
     onOpenProviderCustomize: (providerId: string) => void;
     onRenameProvider: (providerId: string) => void;
-    onShare: (providerId: string) => void;
-    onShareTotal: (projection: SpendProjection) => boolean | Promise<boolean>;
+    onShare: (providerId: string, viewMode: UsageViewMode) => void;
+    onShareTotal: (projections: SpendProjection[]) => boolean | Promise<boolean>;
     onRefresh: (providerId: string) => void | Promise<void>;
     onOpenProviderLink: (providerId: string, linkIndex: number) => void;
     onContentMorph: () => void;
@@ -83,14 +84,6 @@
     sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
     catalog.displayName(id, settings.providerNames);
   const providerSupportsSpend = (id: string) => catalog.supportsSpend(id);
-  const emptyUsage: UsageHistory = {
-    scope: 'localDevice',
-    today: null,
-    yesterday: null,
-    last30Days: null,
-    daily: [],
-    unknownModels: [],
-  };
   function emptyProviderSnapshot(providerId: string): ProviderSnapshot {
     return {
       providerId,
@@ -99,7 +92,7 @@
       valueMetrics: [],
       statusMetrics: [],
       notices: [],
-      usage: emptyUsage,
+      usageHistories: {},
       warnings: [],
       refreshedAt: '1970-01-01T00:00:00.000Z',
     };
@@ -117,33 +110,46 @@
     null,
   );
   let demandMorphing = $state(false);
+  let usageViewMode = $state<UsageViewMode>('all');
   let demandMorphTimer: ReturnType<typeof setTimeout> | undefined;
   const enabledProviders = $derived(
     settings.providers.filter((provider) => provider.enabled && catalog.provider(provider.id)),
   );
   const dashboardProviders = $derived(
-    enabledProviders.map((provider) => {
-      const state = viewState.providers[provider.id];
-      return {
-        provider,
-        state,
-        snapshot: state?.snapshot ?? emptyProviderSnapshot(provider.id),
-        alwaysMetrics: provider.metrics.filter(
-          (metric) => metric.enabled && metric.section === 'alwaysVisible',
-        ),
-        demandMetrics: provider.metrics.filter(
-          (metric) => metric.enabled && metric.section === 'onDemand',
-        ),
-        links: catalog.provider(provider.id)?.links ?? [],
-      };
-    }),
+    enabledProviders
+      .map((provider) => {
+        const state = viewState.providers[provider.id];
+        const snapshot = state?.snapshot ?? emptyProviderSnapshot(provider.id);
+        return { provider, state, snapshot };
+      })
+      .filter(({ snapshot }) => shouldShowProviderForMode(snapshot.usageHistories, usageViewMode))
+      .map(({ provider, state, snapshot }) => {
+        const visibleMetrics = provider.metrics.filter((metric) => {
+          if (!metric.enabled) return false;
+          const source = metricDefinition(metric.id)?.source.kind;
+          return (
+            (source !== 'usage' && source !== 'trend') ||
+            usageHistoriesForMode(snapshot.usageHistories, usageViewMode).length > 0
+          );
+        });
+        return {
+          provider,
+          state,
+          snapshot,
+          alwaysMetrics: visibleMetrics.filter((metric) => metric.section === 'alwaysVisible'),
+          demandMetrics: visibleMetrics.filter((metric) => metric.section === 'onDemand'),
+          links: catalog.provider(provider.id)?.links ?? [],
+        };
+      }),
   );
   const providerUsage = $derived(
     enabledProviders
       .filter((provider) => providerSupportsSpend(provider.id))
       .flatMap((provider) => {
-        const usage = viewState.providers[provider.id]?.snapshot?.usage;
-        return usage ? [{ id: provider.id, usage }] : [];
+        const usageHistories = viewState.providers[provider.id]?.snapshot?.usageHistories;
+        return usageHistories && Object.keys(usageHistories).length > 0
+          ? [{ id: provider.id, usageHistories }]
+          : [];
       }),
   );
 
@@ -416,6 +422,8 @@
     providers={providerUsage}
     {settings}
     {catalog}
+    viewMode={usageViewMode}
+    onViewModeChange={(mode) => (usageViewMode = mode)}
     onChange={onSettingsChange}
     onShare={onShareTotal}
   />
@@ -564,6 +572,7 @@
               {settings}
               {now}
               {catalog}
+              viewMode={usageViewMode}
               {onSettingsChange}
             />
           </div>
@@ -623,6 +632,7 @@
                     {settings}
                     {now}
                     {catalog}
+                    viewMode={usageViewMode}
                     {onSettingsChange}
                   />
                 </div>
@@ -671,7 +681,7 @@
         ><Icon name="sliders" size={15} />Customize…</button
       >
       <hr />
-      <button type="button" role="menuitem" onclick={() => onShare(menuProvider.id)}
+      <button type="button" role="menuitem" onclick={() => onShare(menuProvider.id, usageViewMode)}
         ><Icon name="share" size={15} />Share Screenshot</button
       >
     </div>

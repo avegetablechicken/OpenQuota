@@ -5,10 +5,11 @@
   import type { DailyUsage } from './types';
 
   interface Props {
+    label: string;
     daily: DailyUsage[];
     sourceNote: string;
   }
-  let { daily, sourceNote }: Props = $props();
+  let { label, daily, sourceNote }: Props = $props();
   const points = $derived(fillDays(daily));
   const max = $derived(Math.max(1, ...points.map((point) => point.tokens)));
   const total = $derived(points.reduce((sum, point) => sum + point.tokens, 0));
@@ -64,8 +65,8 @@
   });
 </script>
 
-<section class="trend-row" aria-label="Usage Trend">
-  <strong>Usage Trend</strong>
+<section class="trend-row" aria-label={label}>
+  <strong>{label}</strong>
   {#if total > 0}
     <div
       class="trend-chart-wrap"
@@ -90,7 +91,7 @@
       {#if detailVisible}
         <aside class="trend-detail" onmouseenter={revealDetail} onmouseleave={concealDetail}>
           <header>
-            <strong>Usage Trend</strong><span
+            <strong>{label}</strong><span
               >{hoveredDate
                 ? `${dayLabel(highlightedPoint.date)} · ${compact(highlightedPoint.tokens)} tokens`
                 : `peak ${compact(peak.tokens)} tokens`}</span

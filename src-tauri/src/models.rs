@@ -189,8 +189,6 @@ pub enum UsageScope {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageHistory {
-    #[serde(default)]
-    pub scope: UsageScope,
     pub today: Option<UsagePeriod>,
     pub yesterday: Option<UsagePeriod>,
     pub last_30_days: Option<UsagePeriod>,
@@ -198,18 +196,85 @@ pub struct UsageHistory {
     pub unknown_models: Vec<String>,
 }
 
-impl UsageHistory {
-    pub fn empty(scope: UsageScope) -> Self {
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageHistories {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_device: Option<UsageHistory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<UsageHistory>,
+}
+
+impl UsageHistories {
+    pub fn local_device(history: UsageHistory) -> Self {
         Self {
-            scope,
-            ..Self::default()
+            local_device: Some(history),
+            account: None,
         }
     }
 
-    pub fn with_scope(mut self, scope: UsageScope) -> Self {
-        self.scope = scope;
-        self
+    pub fn account(history: UsageHistory) -> Self {
+        Self {
+            local_device: None,
+            account: Some(history),
+        }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyUsageHistory {
+    #[serde(default)]
+    scope: UsageScope,
+    today: Option<UsagePeriod>,
+    yesterday: Option<UsagePeriod>,
+    last_30_days: Option<UsagePeriod>,
+    daily: Vec<DailyUsage>,
+    unknown_models: Vec<String>,
+}
+
+impl LegacyUsageHistory {
+    fn into_histories(self) -> UsageHistories {
+        let history = UsageHistory {
+            today: self.today,
+            yesterday: self.yesterday,
+            last_30_days: self.last_30_days,
+            daily: self.daily,
+            unknown_models: self.unknown_models,
+        };
+        match self.scope {
+            UsageScope::LocalDevice => UsageHistories::local_device(history),
+            UsageScope::Account => UsageHistories::account(history),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UsageHistoriesWire {
+    Legacy(Box<LegacyUsageHistory>),
+    Current {
+        #[serde(default, rename = "localDevice")]
+        local_device: Option<Box<UsageHistory>>,
+        #[serde(default)]
+        account: Option<Box<UsageHistory>>,
+    },
+}
+
+fn deserialize_usage_histories<'de, D>(deserializer: D) -> Result<UsageHistories, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match UsageHistoriesWire::deserialize(deserializer)? {
+        UsageHistoriesWire::Legacy(history) => history.into_histories(),
+        UsageHistoriesWire::Current {
+            local_device,
+            account,
+        } => UsageHistories {
+            local_device: local_device.map(|history| *history),
+            account: account.map(|history| *history),
+        },
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -224,7 +289,12 @@ pub struct ProviderSnapshot {
     pub status_metrics: Vec<StatusMetric>,
     #[serde(default)]
     pub notices: Vec<ProviderNotice>,
-    pub usage: UsageHistory,
+    #[serde(
+        default,
+        alias = "usage",
+        deserialize_with = "deserialize_usage_histories"
+    )]
+    pub usage_histories: UsageHistories,
     pub warnings: Vec<String>,
     pub refreshed_at: DateTime<Utc>,
 }
@@ -806,7 +876,7 @@ mod tests {
     use super::{
         ApiKeyMutationOutcome, ApiKeyStatus, AppSettings, LogLevel, MenuBarStyle,
         ProviderApiKeyState, ProviderErrorKind, ProviderLink, ProviderSnapshot, ProviderViewState,
-        UsageHistory, UsagePeriod, UsageScope, WindowMode,
+        UsagePeriod, WindowMode,
     };
 
     #[test]
@@ -919,13 +989,64 @@ mod tests {
     }
 
     #[test]
-    fn cached_usage_histories_default_to_the_local_device_scope() {
-        let history: UsageHistory = serde_json::from_str(
-            r#"{"today":null,"yesterday":null,"last30Days":null,"daily":[],"unknownModels":[]}"#,
+    fn cached_snapshot_usage_defaults_to_the_local_device_history() {
+        let snapshot: ProviderSnapshot = serde_json::from_str(
+            r#"{
+                "providerId":"codex",
+                "plan":null,
+                "quotas":[],
+                "usage":{"today":null,"yesterday":null,"last30Days":null,"daily":[],"unknownModels":[]},
+                "warnings":[],
+                "refreshedAt":"2026-07-15T00:00:00Z"
+            }"#,
         )
         .unwrap();
 
-        assert_eq!(history.scope, UsageScope::LocalDevice);
+        assert!(snapshot.usage_histories.local_device.is_some());
+        assert!(snapshot.usage_histories.account.is_none());
+    }
+
+    #[test]
+    fn cached_account_usage_moves_to_the_account_history() {
+        let snapshot: ProviderSnapshot = serde_json::from_str(
+            r#"{
+                "providerId":"cursor",
+                "plan":null,
+                "quotas":[],
+                "usage":{"scope":"account","today":null,"yesterday":null,"last30Days":null,"daily":[],"unknownModels":[]},
+                "warnings":[],
+                "refreshedAt":"2026-07-15T00:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(snapshot.usage_histories.local_device.is_none());
+        assert!(snapshot.usage_histories.account.is_some());
+    }
+
+    #[test]
+    fn current_snapshot_keeps_both_usage_histories() {
+        let snapshot: ProviderSnapshot = serde_json::from_str(
+            r#"{
+                "providerId":"opencode",
+                "plan":null,
+                "quotas":[],
+                "usageHistories":{
+                    "localDevice":{"today":null,"yesterday":null,"last30Days":null,"daily":[],"unknownModels":[]},
+                    "account":{"today":null,"yesterday":null,"last30Days":null,"daily":[],"unknownModels":[]}
+                },
+                "warnings":[],
+                "refreshedAt":"2026-07-15T00:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(snapshot.usage_histories.local_device.is_some());
+        assert!(snapshot.usage_histories.account.is_some());
+        assert!(serde_json::to_value(snapshot)
+            .unwrap()
+            .get("usage")
+            .is_none());
     }
 
     #[test]

@@ -14,13 +14,16 @@ import {
 } from './providerIconPaths';
 import { fillRingSector, spendRingArcs } from './spendRing';
 import { SPEND_SCOPE_LABELS, type SpendProjection } from './totalSpend';
+import { USAGE_SCOPE_LABELS, usageHistoriesForMode } from './usageScopes';
 import type {
   AppSettings,
   DailyUsage,
   ProviderLayout,
   ProviderSnapshot,
   QuotaWindow,
+  UsageHistory,
   UsagePeriod,
+  UsageViewMode,
 } from './types';
 
 export const SHARE_CARD_WIDTH = 360;
@@ -89,7 +92,7 @@ interface ProviderShareCardOptions {
 }
 
 interface TotalSpendShareCardOptions {
-  projection: SpendProjection;
+  projections: SpendProjection[];
   providerNames?: Record<string, string>;
   metric: AppSettings['totalSpendMetric'];
   period: AppSettings['totalSpendPeriod'];
@@ -101,6 +104,7 @@ export function buildProviderShareRows(
   layout: ProviderLayout,
   settings: AppSettings,
   now: number,
+  viewMode: UsageViewMode = 'localDevice',
 ) {
   const alwaysVisible = layout.metrics.filter(
     (metric) => metric.enabled && metric.section === 'alwaysVisible',
@@ -157,7 +161,16 @@ export function buildProviderShareRows(
       continue;
     }
     if (source.kind === 'trend') {
-      rows.push({ kind: 'trend', label: definition.label, daily: snapshot.usage.daily });
+      for (const scoped of usageHistoriesForMode(snapshot.usageHistories, viewMode)) {
+        rows.push({
+          kind: 'trend',
+          label:
+            viewMode === 'all'
+              ? `${USAGE_SCOPE_LABELS[scoped.scope]} ${definition.label}`
+              : definition.label,
+          daily: scoped.history.daily,
+        });
+      }
       previousTextSection = null;
       continue;
     }
@@ -193,13 +206,18 @@ export function buildProviderShareRows(
     }
 
     if (source.kind !== 'usage') continue;
-    const period = usagePeriod(snapshot, source.period);
-    rows.push({
-      kind: 'text',
-      label: definition.label,
-      value: usageReading(period),
-      condensed: previousTextSection === metric.section,
-    });
+    for (const scoped of usageHistoriesForMode(snapshot.usageHistories, viewMode)) {
+      const period = usagePeriod(scoped.history, source.period);
+      rows.push({
+        kind: 'text',
+        label:
+          viewMode === 'all'
+            ? `${USAGE_SCOPE_LABELS[scoped.scope]} ${definition.label}`
+            : definition.label,
+        value: usageReading(period),
+        condensed: previousTextSection === metric.section,
+      });
+    }
     previousTextSection = metric.section;
   }
   return rows;
@@ -213,14 +231,17 @@ export function providerShareCardHeight(rows: ShareRow[]) {
   return OUTER_PADDING + HEADER_HEIGHT + CONTENT_GAP + cardHeight + OUTER_PADDING;
 }
 
-export function totalSpendShareCardHeight() {
+export function totalSpendShareCardHeight(scopeCount = 1) {
+  const scopes = Math.max(1, scopeCount);
   const cardHeight =
     TOTAL_SPEND_GEOMETRY.cardPaddingY +
-    TOTAL_SPEND_GEOMETRY.scopeLabelHeight +
-    TOTAL_SPEND_GEOMETRY.scopeLabelGap +
     TOTAL_SPEND_GEOMETRY.switcherHeight +
     TOTAL_SPEND_GEOMETRY.bodyGap +
-    TOTAL_SPEND_GEOMETRY.ringDiameter +
+    scopes *
+      (TOTAL_SPEND_GEOMETRY.scopeLabelHeight +
+        TOTAL_SPEND_GEOMETRY.scopeLabelGap +
+        TOTAL_SPEND_GEOMETRY.ringDiameter) +
+    (scopes - 1) * TOTAL_SPEND_GEOMETRY.bodyGap +
     TOTAL_SPEND_GEOMETRY.cardPaddingY;
   return TOTAL_SPEND_OUTER_PADDING + cardHeight + TOTAL_SPEND_OUTER_PADDING;
 }
@@ -276,7 +297,8 @@ export function renderTotalSpendShareCard(
   catalog: ProviderCatalogIndex,
   options: TotalSpendShareCardOptions,
 ) {
-  const height = totalSpendShareCardHeight();
+  const projections = options.projections.length > 0 ? options.projections : [];
+  const height = totalSpendShareCardHeight(projections.length);
   const width = TOTAL_SPEND_GEOMETRY.width;
   const { canvas, context } = createCanvas(width, height);
   const palette = canvasPalette();
@@ -293,16 +315,7 @@ export function renderTotalSpendShareCard(
     CARD_RADIUS,
     palette.surface,
   );
-  const scopeTop = cardTop + TOTAL_SPEND_GEOMETRY.cardPaddingY;
-  context.fillStyle = palette.secondary;
-  context.font = '600 10px system-ui';
-  context.fillText(
-    SPEND_SCOPE_LABELS[options.projection.scope],
-    TOTAL_SPEND_OUTER_PADDING + TOTAL_SPEND_GEOMETRY.cardPaddingX,
-    scopeTop + 11,
-  );
-  const switcherTop =
-    scopeTop + TOTAL_SPEND_GEOMETRY.scopeLabelHeight + TOTAL_SPEND_GEOMETRY.scopeLabelGap;
+  const switcherTop = cardTop + TOTAL_SPEND_GEOMETRY.cardPaddingY;
   drawPeriodSwitcher(
     context,
     palette,
@@ -311,15 +324,29 @@ export function renderTotalSpendShareCard(
     TOTAL_SPEND_OUTER_PADDING,
     width,
   );
-  drawSpendBody(
-    context,
-    palette,
-    catalog,
-    options,
-    switcherTop + TOTAL_SPEND_GEOMETRY.switcherHeight + TOTAL_SPEND_GEOMETRY.bodyGap,
-    TOTAL_SPEND_OUTER_PADDING,
-    width,
-  );
+  let scopeTop = switcherTop + TOTAL_SPEND_GEOMETRY.switcherHeight + TOTAL_SPEND_GEOMETRY.bodyGap;
+  for (const projection of projections) {
+    context.fillStyle = palette.secondary;
+    context.font = '600 10px system-ui';
+    context.fillText(
+      SPEND_SCOPE_LABELS[projection.scope],
+      TOTAL_SPEND_OUTER_PADDING + TOTAL_SPEND_GEOMETRY.cardPaddingX,
+      scopeTop + 11,
+    );
+    const bodyTop =
+      scopeTop + TOTAL_SPEND_GEOMETRY.scopeLabelHeight + TOTAL_SPEND_GEOMETRY.scopeLabelGap;
+    drawSpendBody(
+      context,
+      palette,
+      catalog,
+      projection,
+      options,
+      bodyTop,
+      TOTAL_SPEND_OUTER_PADDING,
+      width,
+    );
+    scopeTop = bodyTop + TOTAL_SPEND_GEOMETRY.ringDiameter + TOTAL_SPEND_GEOMETRY.bodyGap;
+  }
   return canvas;
 }
 
@@ -381,10 +408,10 @@ function quotaShareRow(quota: QuotaWindow, settings: AppSettings, now: number): 
   };
 }
 
-function usagePeriod(snapshot: ProviderSnapshot, sourceId: string) {
-  if (sourceId === 'today') return snapshot.usage.today;
-  if (sourceId === 'yesterday') return snapshot.usage.yesterday;
-  return snapshot.usage.last30Days;
+function usagePeriod(history: UsageHistory, sourceId: string) {
+  if (sourceId === 'today') return history.today;
+  if (sourceId === 'yesterday') return history.yesterday;
+  return history.last30Days;
 }
 
 function usageReading(period: UsagePeriod | null) {
@@ -600,12 +627,13 @@ function drawSpendBody(
   context: CanvasRenderingContext2D,
   palette: SharePalette,
   catalog: ProviderCatalogIndex,
+  projection: SpendProjection,
   options: TotalSpendShareCardOptions,
   top: number,
   outerPadding: number,
   canvasWidth: number,
 ) {
-  const { projection, metric } = options;
+  const { metric } = options;
   if (projection.centerValue === null) {
     context.fillStyle = palette.secondary;
     context.font = '12px system-ui';

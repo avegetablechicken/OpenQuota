@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::models::{
-    MetricDefinition, MetricSection, ProviderDefinition, ProviderSnapshot, UsageHistory,
+    MetricDefinition, MetricSection, ProviderDefinition, ProviderSnapshot, UsageHistories,
 };
 
 use self::{
@@ -372,7 +372,7 @@ fn snapshot(plan: Option<String>, quotas: Vec<crate::models::QuotaWindow>) -> Pr
         value_metrics: Vec::new(),
         status_metrics: Vec::new(),
         notices: Vec::new(),
-        usage: UsageHistory::default(),
+        usage_histories: UsageHistories::default(),
         warnings: Vec::new(),
         refreshed_at: Utc::now(),
     }

@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::models::{
     MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind, ProviderLink,
-    ProviderSnapshot, UsageHistory,
+    ProviderSnapshot, UsageHistories,
 };
 
 use self::{
@@ -164,7 +164,7 @@ impl DevinProvider {
             value_metrics: mapped.value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: UsageHistories::default(),
             warnings: Vec::new(),
             refreshed_at: (self.now)(),
         })

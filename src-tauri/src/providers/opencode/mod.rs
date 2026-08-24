@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::{
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind, ProviderLink,
-        ProviderSnapshot, UsageHistory, UsagePeriodSelection,
+        ProviderSnapshot, UsageHistories, UsageHistory, UsagePeriodSelection,
     },
     pricing::PricingStore,
 };
@@ -216,7 +216,7 @@ fn snapshot(
         value_metrics: Vec::new(),
         status_metrics: Vec::new(),
         notices: Vec::new(),
-        usage,
+        usage_histories: UsageHistories::local_device(usage),
         warnings,
         refreshed_at,
     }

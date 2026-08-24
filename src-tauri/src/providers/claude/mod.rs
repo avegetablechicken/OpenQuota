@@ -18,7 +18,7 @@ use thiserror::Error;
 use crate::{
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderLink, ProviderNotice,
-        ProviderNoticeTone, ProviderSnapshot, UsagePeriodSelection,
+        ProviderNoticeTone, ProviderSnapshot, UsageHistories, UsagePeriodSelection,
     },
     pricing::{ModelPricing, PricingStore},
     storage::Storage,
@@ -413,7 +413,7 @@ impl ClaudeProvider {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: Vec::new(),
-                usage,
+                usage_histories: UsageHistories::local_device(usage),
                 warnings,
                 refreshed_at: now,
             });
@@ -430,7 +430,7 @@ impl ClaudeProvider {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: Vec::new(),
-                usage,
+                usage_histories: UsageHistories::local_device(usage),
                 warnings,
                 refreshed_at: now,
             });
@@ -459,7 +459,7 @@ impl ClaudeProvider {
         if let Some(until) = cooldown_until {
             let retry = until.signed_duration_since(now).num_seconds().max(0) as u64;
             if let Some(mut snapshot) = self.last_good.lock().ok().and_then(|value| value.clone()) {
-                snapshot.usage = usage;
+                snapshot.usage_histories = UsageHistories::local_device(usage);
                 snapshot.warnings.push(
                     "Claude live usage is rate limited; showing the last successful limits.".into(),
                 );
@@ -478,7 +478,7 @@ impl ClaudeProvider {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: vec![rate_limit_notice(retry, false)],
-                usage,
+                usage_histories: UsageHistories::local_device(usage),
                 warnings,
                 refreshed_at: now,
             });
@@ -510,7 +510,7 @@ impl ClaudeProvider {
                 *until = Some(now + Duration::seconds(retry as i64));
             }
             if let Some(mut snapshot) = self.last_good.lock().ok().and_then(|value| value.clone()) {
-                snapshot.usage = usage;
+                snapshot.usage_histories = UsageHistories::local_device(usage);
                 snapshot.warnings.push(format!(
                     "Claude live usage is rate limited; retrying in about {}.",
                     retry_minutes(retry)
@@ -530,7 +530,7 @@ impl ClaudeProvider {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: vec![rate_limit_notice(retry, false)],
-                usage,
+                usage_histories: UsageHistories::local_device(usage),
                 warnings,
                 refreshed_at: now,
             });
@@ -555,7 +555,7 @@ impl ClaudeProvider {
             value_metrics: mapped.value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage,
+            usage_histories: UsageHistories::local_device(usage),
             warnings,
             refreshed_at: now,
         };
@@ -746,7 +746,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        models::{ProviderNoticeTone, ProviderSnapshot, UsageHistory},
+        models::{ProviderNoticeTone, ProviderSnapshot},
         pricing::PricingStore,
         storage::Storage,
     };
@@ -889,7 +889,7 @@ mod tests {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage: UsageHistory::default(),
+            usage_histories: Default::default(),
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };

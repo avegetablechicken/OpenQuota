@@ -18,8 +18,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::models::{
     DailyUsage, MetricDefinition, MetricLayout, MetricSection, ModelUsageBreakdown,
-    ModelUsageEntry, ProviderDefinition, ProviderSnapshot, UsageHistory, UsagePeriod,
-    UsagePeriodSelection, UsageScope,
+    ModelUsageEntry, ProviderDefinition, ProviderSnapshot, UsageHistories, UsageHistory,
+    UsagePeriod, UsagePeriodSelection,
 };
 use crate::storage::Storage;
 
@@ -835,7 +835,7 @@ impl Sub2ApiProvider {
                 warnings.push(format!(
                     "Sub2API server usage statistics are unavailable: {error}"
                 ));
-                UsageHistory::empty(UsageScope::Account)
+                UsageHistory::default()
             }
         };
         Ok(ProviderSnapshot {
@@ -845,7 +845,7 @@ impl Sub2ApiProvider {
             value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage,
+            usage_histories: UsageHistories::account(usage),
             warnings,
             refreshed_at: Utc::now(),
         })
@@ -1076,7 +1076,6 @@ fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistor
     });
 
     UsageHistory {
-        scope: UsageScope::Account,
         today: today_period,
         yesterday: yesterday_period,
         last_30_days,
@@ -1176,10 +1175,7 @@ mod tests {
         codex::{client::UsageResponse, mapper::map_usage},
         UsageProvider,
     };
-    use crate::{
-        models::{ProviderSnapshot, UsageScope},
-        storage::Storage,
-    };
+    use crate::{models::ProviderSnapshot, storage::Storage};
 
     const QUOTA_DATA: &str = r#"{
       "user_id":"user-redacted",
@@ -1389,7 +1385,7 @@ mod tests {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: Vec::new(),
-                usage: Default::default(),
+                usage_histories: Default::default(),
                 warnings: Vec::new(),
                 refreshed_at: Utc::now(),
             })
@@ -1419,7 +1415,7 @@ mod tests {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: Vec::new(),
-                usage: Default::default(),
+                usage_histories: Default::default(),
                 warnings: Vec::new(),
                 refreshed_at: Utc::now(),
             })
@@ -1700,9 +1696,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["session", "weekly", "sonnet", "fable"]
         );
-        assert_eq!(snapshot.usage.daily.len(), 2);
-        assert_eq!(snapshot.usage.scope, UsageScope::Account);
-        assert_eq!(snapshot.usage.last_30_days.unwrap().tokens, 3500);
+        let history = snapshot.usage_histories.account.unwrap();
+        assert_eq!(history.daily.len(), 2);
+        assert_eq!(history.last_30_days.unwrap().tokens, 3500);
         let request_paths = (0..4)
             .map(|_| {
                 requests

@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { availableSpendScopes, projectSpend } from './totalSpend';
-import type { UsageHistory } from './types';
+import { availableSpendScopes, projectSpend, type SpendProvider } from './totalSpend';
+import type { UsageHistory, UsagePeriod, UsageScope } from './types';
 
 const empty: UsageHistory = {
-  scope: 'localDevice',
   today: null,
   yesterday: null,
   last30Days: null,
@@ -11,23 +10,28 @@ const empty: UsageHistory = {
   unknownModels: [],
 };
 
-function usage(today: UsageHistory['today']): UsageHistory {
+function history(today: UsagePeriod | null): UsageHistory {
   return { ...empty, today };
+}
+
+function provider(
+  id: string,
+  today: UsagePeriod | null,
+  scope: UsageScope = 'localDevice',
+): SpendProvider {
+  return { id, usageHistories: { [scope]: history(today) } };
 }
 
 describe('Total Spend projection', () => {
   it('keeps token-only Codex data available without inventing cost data', () => {
     const providers = [
-      {
-        id: 'codex',
-        usage: usage({
-          tokens: 164_800_000,
-          estimatedCostUsd: null,
-          costEstimated: true,
-          estimateComplete: false,
-        }),
-      },
-      { id: 'antigravity', usage: empty },
+      provider('codex', {
+        tokens: 164_800_000,
+        estimatedCostUsd: null,
+        costEstimated: true,
+        estimateComplete: false,
+      }),
+      { id: 'antigravity', usageHistories: {} },
     ];
 
     expect(projectSpend(providers, 'today', 'cost', 'localDevice').slices).toEqual([]);
@@ -39,24 +43,18 @@ describe('Total Spend projection', () => {
 
   it('does not let a token-only provider erase another provider cost', () => {
     const providers = [
-      {
-        id: 'claude',
-        usage: usage({
-          tokens: 1_000_000,
-          estimatedCostUsd: 4,
-          costEstimated: true,
-          estimateComplete: true,
-        }),
-      },
-      {
-        id: 'codex',
-        usage: usage({
-          tokens: 9_000_000,
-          estimatedCostUsd: null,
-          costEstimated: true,
-          estimateComplete: false,
-        }),
-      },
+      provider('claude', {
+        tokens: 1_000_000,
+        estimatedCostUsd: 4,
+        costEstimated: true,
+        estimateComplete: true,
+      }),
+      provider('codex', {
+        tokens: 9_000_000,
+        estimatedCostUsd: null,
+        costEstimated: true,
+        estimateComplete: false,
+      }),
     ];
 
     expect(projectSpend(providers, 'today', 'cost', 'localDevice')).toMatchObject({
@@ -67,24 +65,18 @@ describe('Total Spend projection', () => {
 
   it('calculates a blended cost per million instead of summing provider rates', () => {
     const providers = [
-      {
-        id: 'claude',
-        usage: usage({
-          tokens: 1_000_000,
-          estimatedCostUsd: 10,
-          costEstimated: true,
-          estimateComplete: true,
-        }),
-      },
-      {
-        id: 'codex',
-        usage: usage({
-          tokens: 3_000_000,
-          estimatedCostUsd: 60,
-          costEstimated: true,
-          estimateComplete: true,
-        }),
-      },
+      provider('claude', {
+        tokens: 1_000_000,
+        estimatedCostUsd: 10,
+        costEstimated: true,
+        estimateComplete: true,
+      }),
+      provider('codex', {
+        tokens: 3_000_000,
+        estimatedCostUsd: 60,
+        costEstimated: true,
+        estimateComplete: true,
+      }),
     ];
 
     expect(projectSpend(providers, 'today', 'costPerMillion', 'localDevice').centerValue).toBe(
@@ -94,15 +86,12 @@ describe('Total Spend projection', () => {
 
   it('tracks local estimation independently from pricing coverage', () => {
     const providers = [
-      {
-        id: 'claude',
-        usage: usage({
-          tokens: 1_000,
-          estimatedCostUsd: 2,
-          costEstimated: true,
-          estimateComplete: false,
-        }),
-      },
+      provider('claude', {
+        tokens: 1_000,
+        estimatedCostUsd: 2,
+        costEstimated: true,
+        estimateComplete: false,
+      }),
     ];
 
     expect(projectSpend(providers, 'today', 'cost', 'localDevice')).toMatchObject({
@@ -115,27 +104,23 @@ describe('Total Spend projection', () => {
     });
   });
 
-  it('never combines local-device and account histories', () => {
-    const providers = [
+  it('keeps local-device and account histories independent for the same provider', () => {
+    const providers: SpendProvider[] = [
       {
-        id: 'codex',
-        usage: usage({
-          tokens: 1_000,
-          estimatedCostUsd: 2,
-          costEstimated: true,
-          estimateComplete: true,
-        }),
-      },
-      {
-        id: 'cursor',
-        usage: {
-          ...usage({
+        id: 'opencode',
+        usageHistories: {
+          localDevice: history({
+            tokens: 1_000,
+            estimatedCostUsd: 2,
+            costEstimated: true,
+            estimateComplete: true,
+          }),
+          account: history({
             tokens: 4_000,
             estimatedCostUsd: 8,
             costEstimated: false,
             estimateComplete: true,
           }),
-          scope: 'account' as const,
         },
       },
     ];
@@ -144,12 +129,12 @@ describe('Total Spend projection', () => {
     expect(projectSpend(providers, 'today', 'cost', 'localDevice')).toMatchObject({
       scope: 'localDevice',
       centerValue: 2,
-      slices: [{ id: 'codex', value: 2 }],
+      slices: [{ id: 'opencode', value: 2 }],
     });
     expect(projectSpend(providers, 'today', 'cost', 'account')).toMatchObject({
       scope: 'account',
       centerValue: 8,
-      slices: [{ id: 'cursor', value: 8 }],
+      slices: [{ id: 'opencode', value: 8 }],
     });
   });
 });

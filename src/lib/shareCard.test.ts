@@ -99,7 +99,7 @@ describe('share card layout', () => {
 
   it('does not encode unknown pricing as an approximation prefix', () => {
     const snapshot = structuredClone(codexState.snapshot!);
-    snapshot.usage.today = {
+    snapshot.usageHistories.localDevice!.today = {
       tokens: 500,
       estimatedCostUsd: 0.03,
       costEstimated: true,
@@ -226,13 +226,14 @@ describe('share card layout', () => {
         },
       ],
       notices: [],
-      usage: {
-        scope: 'localDevice',
-        today: null,
-        yesterday: null,
-        last30Days: null,
-        daily: [],
-        unknownModels: [],
+      usageHistories: {
+        localDevice: {
+          today: null,
+          yesterday: null,
+          last30Days: null,
+          daily: [],
+          unknownModels: [],
+        },
       },
       warnings: [],
       refreshedAt: '2026-07-18T00:00:00Z',
@@ -348,24 +349,26 @@ describe('share card layout', () => {
     );
 
     const canvas = renderTotalSpendShareCard({
-      projection: {
-        scope: 'localDevice',
-        slices: [
-          {
-            id: 'codex',
-            value: 12,
-            period: {
-              tokens: 1_000_000,
-              estimatedCostUsd: 12,
-              costEstimated: true,
-              estimateComplete: true,
+      projections: [
+        {
+          scope: 'localDevice',
+          slices: [
+            {
+              id: 'codex',
+              value: 12,
+              period: {
+                tokens: 1_000_000,
+                estimatedCostUsd: 12,
+                costEstimated: true,
+                estimateComplete: true,
+              },
             },
-          },
-        ],
-        centerValue: 12,
-        costEstimated: true,
-        estimateComplete: true,
-      },
+          ],
+          centerValue: 12,
+          costEstimated: true,
+          estimateComplete: true,
+        },
+      ],
       metric: 'cost',
       period: 'last30Days',
     });

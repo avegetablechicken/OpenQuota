@@ -14,7 +14,7 @@ use crate::{
     hashing::sha256_hex,
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderLink, ProviderSnapshot,
-        UsagePeriodSelection,
+        UsageHistories, UsagePeriodSelection,
     },
     pricing::PricingStore,
     storage::Storage,
@@ -295,7 +295,7 @@ impl CodexProvider {
             value_metrics: mapped.value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage,
+            usage_histories: UsageHistories::local_device(usage),
             warnings,
             refreshed_at: now,
         })

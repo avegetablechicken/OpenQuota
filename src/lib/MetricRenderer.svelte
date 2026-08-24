@@ -5,7 +5,15 @@
   import UsageMetric from './UsageMetric.svelte';
   import UsageTrend from './UsageTrend.svelte';
   import ValueMetric from './ValueMetric.svelte';
-  import type { AppSettings, MetricLayout, ProviderSnapshot } from './types';
+  import { USAGE_SCOPE_LABELS, usageHistoriesForMode } from './usageScopes';
+  import type {
+    AppSettings,
+    MetricLayout,
+    ProviderSnapshot,
+    UsageHistory,
+    UsageScope,
+    UsageViewMode,
+  } from './types';
 
   interface Props {
     layout: MetricLayout;
@@ -13,9 +21,10 @@
     settings: AppSettings;
     now: number;
     catalog: ProviderCatalogIndex;
+    viewMode: UsageViewMode;
     onSettingsChange: (settings: AppSettings) => void;
   }
-  let { layout, snapshot, settings, now, catalog, onSettingsChange }: Props = $props();
+  let { layout, snapshot, settings, now, catalog, viewMode, onSettingsChange }: Props = $props();
   const definition = $derived(catalog.metric(layout.id));
   const quota = $derived.by(() => {
     const source = definition?.source;
@@ -26,12 +35,16 @@
     (definition?.source.kind === 'quota' || definition?.source.kind === 'quotaOrValue') &&
       definition.source.sessionWindow,
   );
-  const period = $derived.by(() => {
+  const scopedUsageHistories = $derived(usageHistoriesForMode(snapshot.usageHistories, viewMode));
+  function usagePeriod(history: UsageHistory) {
     if (definition?.source.kind !== 'usage') return null;
-    if (definition.source.period === 'today') return snapshot.usage.today;
-    if (definition.source.period === 'yesterday') return snapshot.usage.yesterday;
-    return snapshot.usage.last30Days;
-  });
+    if (definition.source.period === 'today') return history.today;
+    if (definition.source.period === 'yesterday') return history.yesterday;
+    return history.last30Days;
+  }
+  function usageLabel(label: string, scope: UsageScope) {
+    return viewMode === 'all' ? `${USAGE_SCOPE_LABELS[scope]} ${label}` : label;
+  }
   const valueMetric = $derived.by(() => {
     const source = definition?.source;
     if (source?.kind !== 'value' && source?.kind !== 'quotaOrValue') return null;
@@ -42,7 +55,6 @@
     if (source?.kind !== 'status') return null;
     return snapshot.statusMetrics.find((item) => item.id === source.sourceId) ?? null;
   });
-  const resolvedUsageSourceNote = $derived(usageSourceNote(catalog, snapshot));
 </script>
 
 {#if (definition?.source.kind === 'quota' || definition?.source.kind === 'quotaOrValue') && quota}
@@ -89,11 +101,22 @@
     <div class="metric__reading"><span>No data</span><span>Reset unavailable</span></div>
   </section>
 {:else if definition?.source.kind === 'trend'}
-  <UsageTrend daily={snapshot.usage.daily} sourceNote={resolvedUsageSourceNote} />
+  {#each scopedUsageHistories as scoped (scoped.scope)}
+    <UsageTrend
+      label={usageLabel(definition.label, scoped.scope)}
+      daily={scoped.history.daily}
+      sourceNote={usageSourceNote(catalog, snapshot, scoped.history, scoped.scope)}
+    />
+  {/each}
 {:else if definition?.source.kind === 'status'}
   <StatusMetric label={definition.label} metric={statusMetric} />
 {:else if definition?.source.kind === 'usage'}
-  <UsageMetric label={definition.label} {period} />
+  {#each scopedUsageHistories as scoped (scoped.scope)}
+    <UsageMetric
+      label={usageLabel(definition.label, scoped.scope)}
+      period={usagePeriod(scoped.history)}
+    />
+  {/each}
 {:else if definition?.source.kind === 'value'}
   <ValueMetric
     label={definition.label}

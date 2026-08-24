@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import TotalSpend from './TotalSpend.svelte';
 import { ProviderCatalogIndex } from './metrics';
 import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
-import type { AppSettings, ProviderCatalog, UsageHistory } from './types';
+import type { AppSettings, ProviderCatalog, UsageHistory, UsageScope } from './types';
 
 const catalog: ProviderCatalog = {
   providers: [
@@ -64,9 +64,8 @@ const settings: AppSettings = {
   detectionNoticeDismissed: true,
 };
 
-function usage(tokens: number, scope: UsageHistory['scope'] = 'account'): UsageHistory {
+function usage(tokens: number): UsageHistory {
   return {
-    scope,
     today: null,
     yesterday: null,
     last30Days: {
@@ -82,6 +81,10 @@ function usage(tokens: number, scope: UsageHistory['scope'] = 'account'): UsageH
   };
 }
 
+function scopedUsage(tokens: number, scope: UsageScope = 'account') {
+  return { [scope]: usage(tokens) };
+}
+
 describe('TotalSpend Sub2API labels', () => {
   afterEach(() => {
     cleanup();
@@ -95,11 +98,13 @@ describe('TotalSpend Sub2API labels', () => {
 
     render(TotalSpend, {
       providers: [
-        { id: 'sub2api', usage: usage(100) },
-        { id: 'sub2api@2', usage: usage(200) },
+        { id: 'sub2api', usageHistories: scopedUsage(100) },
+        { id: 'sub2api@2', usageHistories: scopedUsage(200) },
       ],
       settings,
       catalog: new ProviderCatalogIndex(catalog),
+      viewMode: 'account',
+      onViewModeChange: vi.fn(),
       onChange: vi.fn(),
       onShare: vi.fn(),
     });
@@ -108,7 +113,7 @@ describe('TotalSpend Sub2API labels', () => {
     expect(screen.getByText('Sub2API · Claude')).toBeInTheDocument();
     expect(
       screen.getByRole('img', {
-        name: 'Account-wide history from Sub2API · Codex and Sub2API · Claude. Local-device usage is excluded.',
+        name: 'Account-wide history from Sub2API · Codex and Sub2API · Claude.',
       }),
     ).toBeInTheDocument();
     expect(screen.getByText('Accounts')).toBeInTheDocument();
@@ -118,22 +123,28 @@ describe('TotalSpend Sub2API labels', () => {
   it('switches scopes without combining local and account usage', async () => {
     rememberSub2ApiUpstream('sub2api', 'codex');
 
-    render(TotalSpend, {
+    const onViewModeChange = vi.fn();
+    const props = {
       providers: [
-        { id: 'codex', usage: usage(100, 'localDevice') },
-        { id: 'sub2api', usage: usage(200) },
+        { id: 'codex', usageHistories: scopedUsage(100, 'localDevice') },
+        { id: 'sub2api', usageHistories: scopedUsage(200) },
       ],
       settings,
       catalog: new ProviderCatalogIndex(catalog),
+      viewMode: 'localDevice' as const,
+      onViewModeChange,
       onChange: vi.fn(),
       onShare: vi.fn(),
-    });
+    };
+    const view = render(TotalSpend, props);
 
     expect(screen.getByRole('button', { name: 'Device' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('Codex')).toBeInTheDocument();
     expect(screen.queryByText('Sub2API · Codex')).not.toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    expect(onViewModeChange).toHaveBeenCalledWith('account');
+    await view.rerender({ ...props, viewMode: 'account' });
 
     expect(screen.getByRole('button', { name: 'Accounts' })).toHaveAttribute(
       'aria-pressed',
@@ -143,7 +154,7 @@ describe('TotalSpend Sub2API labels', () => {
     expect(screen.queryByText('Codex')).not.toBeInTheDocument();
     expect(
       screen.getByRole('img', {
-        name: 'Account-wide history from Sub2API · Codex. Local-device usage is excluded.',
+        name: 'Account-wide history from Sub2API · Codex.',
       }),
     ).toBeInTheDocument();
   });
