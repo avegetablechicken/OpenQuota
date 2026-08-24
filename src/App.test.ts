@@ -331,7 +331,7 @@ describe('OpenQuota dashboard', () => {
     expect(screen.getAllByRole('progressbar')).toHaveLength(6);
     expect(
       within(screen.getByRole('region', { name: 'Total Spend' })).getByRole('img', {
-        name: 'Only includes Claude and Codex',
+        name: 'Local-device history from Claude and Codex. Account-wide usage is excluded.',
       }),
     ).toBeInTheDocument();
   });

@@ -220,6 +220,7 @@ export const codexState: ProviderViewState = {
     statusMetrics: [],
     notices: [],
     usage: {
+      scope: 'localDevice',
       today: {
         tokens: 2100000,
         estimatedCostUsd: 3.84,
@@ -287,7 +288,14 @@ export const claudeState: ProviderViewState = {
     valueMetrics: [],
     statusMetrics: [],
     notices: [],
-    usage: { today: null, yesterday: null, last30Days: null, daily: [], unknownModels: [] },
+    usage: {
+      scope: 'localDevice',
+      today: null,
+      yesterday: null,
+      last30Days: null,
+      daily: [],
+      unknownModels: [],
+    },
   },
 };
 
@@ -330,7 +338,14 @@ export const antigravityState: ProviderViewState = {
     valueMetrics: [],
     statusMetrics: [],
     notices: [],
-    usage: { today: null, yesterday: null, last30Days: null, daily: [], unknownModels: [] },
+    usage: {
+      scope: 'localDevice',
+      today: null,
+      yesterday: null,
+      last30Days: null,
+      daily: [],
+      unknownModels: [],
+    },
   },
 };
 

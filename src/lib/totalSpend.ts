@@ -1,4 +1,4 @@
-import type { AppSettings, UsageHistory, UsagePeriod } from './types';
+import type { AppSettings, UsageHistory, UsagePeriod, UsageScope } from './types';
 
 export interface SpendProvider {
   id: string;
@@ -12,10 +12,21 @@ export interface SpendSlice {
 }
 
 export interface SpendProjection {
+  scope: UsageScope;
   slices: SpendSlice[];
   centerValue: number | null;
   costEstimated: boolean;
   estimateComplete: boolean;
+}
+
+export const SPEND_SCOPE_LABELS: Record<UsageScope, string> = {
+  localDevice: 'Local Device',
+  account: 'Accounts',
+};
+
+export function availableSpendScopes(providers: SpendProvider[]): UsageScope[] {
+  const available = new Set(providers.map((provider) => provider.usage.scope));
+  return (['localDevice', 'account'] as const).filter((scope) => available.has(scope));
 }
 
 export function selectedPeriod(
@@ -40,8 +51,10 @@ export function projectSpend(
   providers: SpendProvider[],
   periodSelection: AppSettings['totalSpendPeriod'],
   metric: AppSettings['totalSpendMetric'],
+  scope: UsageScope,
 ): SpendProjection {
   const slices = providers
+    .filter((provider) => provider.usage.scope === scope)
     .flatMap((provider) => {
       const period = selectedPeriod(provider.usage, periodSelection);
       if (!period) return [];
@@ -51,7 +64,7 @@ export function projectSpend(
     .sort((left, right) => right.value - left.value || left.id.localeCompare(right.id));
 
   if (slices.length === 0) {
-    return { slices, centerValue: null, costEstimated: false, estimateComplete: true };
+    return { scope, slices, centerValue: null, costEstimated: false, estimateComplete: true };
   }
 
   const centerValue =
@@ -67,6 +80,7 @@ export function projectSpend(
       : slices.reduce((sum, slice) => sum + slice.value, 0);
 
   return {
+    scope,
     slices,
     centerValue,
     costEstimated: metric !== 'tokens' && slices.some((slice) => slice.period.costEstimated),

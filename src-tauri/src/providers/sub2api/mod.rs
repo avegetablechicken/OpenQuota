@@ -19,7 +19,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::models::{
     DailyUsage, MetricDefinition, MetricLayout, MetricSection, ModelUsageBreakdown,
     ModelUsageEntry, ProviderDefinition, ProviderSnapshot, UsageHistory, UsagePeriod,
-    UsagePeriodSelection,
+    UsagePeriodSelection, UsageScope,
 };
 use crate::storage::Storage;
 
@@ -835,7 +835,7 @@ impl Sub2ApiProvider {
                 warnings.push(format!(
                     "Sub2API server usage statistics are unavailable: {error}"
                 ));
-                UsageHistory::default()
+                UsageHistory::empty(UsageScope::Account)
             }
         };
         Ok(ProviderSnapshot {
@@ -1079,6 +1079,7 @@ fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistor
     };
 
     UsageHistory {
+        scope: UsageScope::Account,
         today: Some(today_period),
         yesterday: Some(yesterday_period),
         last_30_days: Some(last_30_days),
@@ -1189,7 +1190,10 @@ mod tests {
         codex::{client::UsageResponse, mapper::map_usage},
         UsageProvider,
     };
-    use crate::{models::ProviderSnapshot, storage::Storage};
+    use crate::{
+        models::{ProviderSnapshot, UsageScope},
+        storage::Storage,
+    };
 
     const QUOTA_DATA: &str = r#"{
       "user_id":"user-redacted",
@@ -1704,6 +1708,7 @@ mod tests {
             ["session", "weekly", "sonnet", "fable"]
         );
         assert_eq!(snapshot.usage.daily.len(), 2);
+        assert_eq!(snapshot.usage.scope, UsageScope::Account);
         assert_eq!(snapshot.usage.last_30_days.unwrap().tokens, 3500);
         let request_paths = (0..4)
             .map(|_| {

@@ -226,7 +226,14 @@ describe('share card layout', () => {
         },
       ],
       notices: [],
-      usage: { today: null, yesterday: null, last30Days: null, daily: [], unknownModels: [] },
+      usage: {
+        scope: 'localDevice',
+        today: null,
+        yesterday: null,
+        last30Days: null,
+        daily: [],
+        unknownModels: [],
+      },
       warnings: [],
       refreshedAt: '2026-07-18T00:00:00Z',
     };
@@ -302,7 +309,7 @@ describe('share card layout', () => {
       ringDiameter: 104,
       legendGap: 18,
     });
-    expect(totalSpendShareCardHeight()).toBe(187);
+    expect(totalSpendShareCardHeight()).toBe(206);
   });
 
   it('shares the same geometry source with the live Total Spend card', () => {
@@ -342,6 +349,7 @@ describe('share card layout', () => {
 
     const canvas = renderTotalSpendShareCard({
       projection: {
+        scope: 'localDevice',
         slices: [
           {
             id: 'codex',
@@ -365,7 +373,7 @@ describe('share card layout', () => {
     expect(canvas.width).toBe(TOTAL_SPEND_GEOMETRY.width * SHARE_CARD_SCALE);
     expect(canvas.height).toBe(totalSpendShareCardHeight() * SHARE_CARD_SCALE);
     expect(drawn).toEqual(
-      expect.arrayContaining(['Today', 'Yesterday', '30 Days', 'Codex', 'dollars']),
+      expect.arrayContaining(['Local Device', 'Today', 'Yesterday', '30 Days', 'Codex', 'dollars']),
     );
     expect(drawn).not.toEqual(
       expect.arrayContaining([

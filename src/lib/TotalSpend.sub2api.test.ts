@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TotalSpend from './TotalSpend.svelte';
 import { ProviderCatalogIndex } from './metrics';
@@ -7,6 +7,15 @@ import type { AppSettings, ProviderCatalog, UsageHistory } from './types';
 
 const catalog: ProviderCatalog = {
   providers: [
+    {
+      id: 'codex',
+      displayName: 'Codex',
+      shortName: 'Cx',
+      fallbackEnabled: true,
+      localUsageSourceNote: 'From your Codex logs (estimated)',
+      links: [],
+      metrics: [],
+    },
     {
       id: 'sub2api',
       displayName: 'Sub2API',
@@ -55,8 +64,9 @@ const settings: AppSettings = {
   detectionNoticeDismissed: true,
 };
 
-function usage(tokens: number): UsageHistory {
+function usage(tokens: number, scope: UsageHistory['scope'] = 'account'): UsageHistory {
   return {
+    scope,
     today: null,
     yesterday: null,
     last30Days: {
@@ -98,9 +108,43 @@ describe('TotalSpend Sub2API labels', () => {
     expect(screen.getByText('Sub2API · Claude')).toBeInTheDocument();
     expect(
       screen.getByRole('img', {
-        name: 'Only includes Sub2API · Codex and Sub2API · Claude',
+        name: 'Account-wide history from Sub2API · Codex and Sub2API · Claude. Local-device usage is excluded.',
       }),
     ).toBeInTheDocument();
+    expect(screen.getByText('Accounts')).toBeInTheDocument();
     expect(screen.queryByText('Sub2API 2')).not.toBeInTheDocument();
+  });
+
+  it('switches scopes without combining local and account usage', async () => {
+    rememberSub2ApiUpstream('sub2api', 'codex');
+
+    render(TotalSpend, {
+      providers: [
+        { id: 'codex', usage: usage(100, 'localDevice') },
+        { id: 'sub2api', usage: usage(200) },
+      ],
+      settings,
+      catalog: new ProviderCatalogIndex(catalog),
+      onChange: vi.fn(),
+      onShare: vi.fn(),
+    });
+
+    expect(screen.getByRole('button', { name: 'Device' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Codex')).toBeInTheDocument();
+    expect(screen.queryByText('Sub2API · Codex')).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+
+    expect(screen.getByRole('button', { name: 'Accounts' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByText('Sub2API · Codex')).toBeInTheDocument();
+    expect(screen.queryByText('Codex')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('img', {
+        name: 'Account-wide history from Sub2API · Codex. Local-device usage is excluded.',
+      }),
+    ).toBeInTheDocument();
   });
 });
