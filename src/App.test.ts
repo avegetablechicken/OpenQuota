@@ -410,6 +410,14 @@ describe('OpenQuota dashboard', () => {
         name: 'Local-device history from Claude and Codex. No account-wide history available.',
       }),
     ).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Device' }));
+    expect(screen.getByRole('group', { name: 'Claude provider' })).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Antigravity provider' })).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    expect(screen.queryByRole('group', { name: 'Claude provider' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Antigravity provider' })).not.toBeInTheDocument();
   });
 
   it('renames an observed Claude card from its context menu', async () => {
