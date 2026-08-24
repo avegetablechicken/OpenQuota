@@ -483,7 +483,7 @@ function drawProviderHeader(
   const iconColor = providerIconColor(providerId) ?? palette.text;
   drawProviderMark(context, providerId, OUTER_PADDING, OUTER_PADDING, 22, iconColor);
   const name =
-    sub2ApiDisplayName(providerId, sub2ApiUpstreams?.[providerId]) ??
+    sub2ApiDisplayName(providerId, sub2ApiUpstreams?.[providerId], providerNames?.[providerId]) ??
     catalog.displayName(providerId, providerNames);
   context.fillStyle = palette.text;
   context.font = '600 15px system-ui';
@@ -701,8 +701,11 @@ function drawSpendBody(
         ? 'Others'
         : slice.id === UNPRICED_OTHERS_SPEND_ID
           ? 'Others (unpriced)'
-          : (sub2ApiDisplayName(slice.id, options.sub2ApiUpstreams?.[slice.id]) ??
-            catalog.displayName(slice.id, options.providerNames)),
+          : (sub2ApiDisplayName(
+              slice.id,
+              options.sub2ApiUpstreams?.[slice.id],
+              options.providerNames?.[slice.id],
+            ) ?? catalog.displayName(slice.id, options.providerNames)),
       legendLeft + 15,
       baseline,
       62,

@@ -28,8 +28,11 @@
   let { layout, snapshot, settings, now, catalog, viewMode, onSettingsChange }: Props = $props();
   const definition = $derived(catalog.metric(layout.id));
   const providerDisplayName = $derived(
-    sub2ApiDisplayName(snapshot.providerId, $sub2ApiUpstreams[snapshot.providerId]) ??
-      catalog.displayName(snapshot.providerId, settings.providerNames),
+    sub2ApiDisplayName(
+      snapshot.providerId,
+      $sub2ApiUpstreams[snapshot.providerId],
+      settings.providerNames[snapshot.providerId],
+    ) ?? catalog.displayName(snapshot.providerId, settings.providerNames),
   );
   const quota = $derived.by(() => {
     const source = definition?.source;

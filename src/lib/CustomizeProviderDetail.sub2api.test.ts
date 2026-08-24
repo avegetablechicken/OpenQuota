@@ -92,7 +92,7 @@ const settings: AppSettings = {
   detectionNoticeDismissed: true,
 };
 
-function renderDetail(upstream: 'codex' | 'claude') {
+function renderDetail(upstream: 'codex' | 'claude', renamableProviderIds: string[] = []) {
   rememberSub2ApiUpstream('sub2api@2', upstream);
   mocks.invoke.mockResolvedValue({
     configured: true,
@@ -104,7 +104,7 @@ function renderDetail(upstream: 'codex' | 'claude') {
     settings,
     providerId: 'sub2api@2',
     catalog: new ProviderCatalogIndex(catalog),
-    renamableProviderIds: [],
+    renamableProviderIds,
     onChange: vi.fn(),
     onNameChange: vi.fn(),
     onReorderStart: vi.fn(),
@@ -129,6 +129,17 @@ describe('CustomizeProviderDetail Sub2API metric availability', () => {
     expect(screen.getByRole('checkbox', { name: 'Show Fable' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Extra Usage' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Pin Spark' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Name' })).not.toBeInTheDocument();
+  });
+
+  it('shows the name row only for a configured Sub2API slot admitted by the backend', () => {
+    renderDetail('codex', ['sub2api@2']);
+
+    expect(screen.getByRole('heading', { name: 'Name' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Name for Sub2API · Codex' })).toHaveAttribute(
+      'placeholder',
+      'Sub2API · Codex',
+    );
   });
 
   it('locks Claude-only metrics for a Codex upstream', () => {

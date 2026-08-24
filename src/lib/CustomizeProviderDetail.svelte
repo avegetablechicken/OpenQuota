@@ -10,7 +10,12 @@
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
   import { canRenameProvider } from './providerNames';
-  import { sub2ApiDisplayName, sub2ApiMetricSupported, sub2ApiUpstreams } from './sub2ApiUpstreams';
+  import {
+    sub2ApiDisplayName,
+    sub2ApiMetricSupported,
+    sub2ApiNamePlaceholder,
+    sub2ApiUpstreams,
+  } from './sub2ApiUpstreams';
 
   interface Props {
     settings: AppSettings;
@@ -38,8 +43,10 @@
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
   const providerDisplayName = (id: string) =>
-    sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
+    sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settings.providerNames[id]) ??
     catalog.displayName(id, settings.providerNames);
+  const providerNamePlaceholder = (id: string) =>
+    sub2ApiNamePlaceholder(id, $sub2ApiUpstreams[id]) ?? catalog.displayName(id);
   let message = $state('');
   let messageKind = $state<'success' | 'denied'>('success');
   let messageTimer: ReturnType<typeof setTimeout> | undefined;
@@ -131,7 +138,13 @@
     aria-label={`Customize ${providerDisplayName(provider.id)}`}
   >
     {#if canRenameProvider(provider.id, renamableProviderIds)}
-      <ProviderNameSection {settings} {provider} {catalog} onChange={onNameChange} />
+      <ProviderNameSection
+        {settings}
+        {provider}
+        {catalog}
+        placeholder={providerNamePlaceholder(provider.id)}
+        onChange={onNameChange}
+      />
     {/if}
     {#each ['alwaysVisible', 'onDemand'] as section (section)}
       {@const sectionMetrics = provider.metrics.filter((metric) => metric.section === section)}

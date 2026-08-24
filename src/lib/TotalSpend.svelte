@@ -35,7 +35,7 @@
     if (id === OTHERS_SPEND_ID) return 'Others';
     if (id === UNPRICED_OTHERS_SPEND_ID) return 'Others (unpriced)';
     return (
-      sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
+      sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settings.providerNames[id]) ??
       catalog.displayName(id, settings.providerNames)
     );
   };

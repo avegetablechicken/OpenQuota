@@ -38,7 +38,10 @@
   }: Props = $props();
   const providerDisplayName = (id: string) => catalog.displayName(id, settings.providerNames);
   function providerListName(id: string) {
-    return sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ?? providerDisplayName(id);
+    return (
+      sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settings.providerNames[id]) ??
+      providerDisplayName(id)
+    );
   }
   const visibleProviders = $derived(
     settings.providers.filter(

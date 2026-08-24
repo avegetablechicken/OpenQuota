@@ -7,13 +7,14 @@
     settings: AppSettings;
     provider: ProviderLayout;
     catalog: ProviderCatalogIndex;
+    placeholder?: string;
     onChange: (settings: AppSettings) => void;
   }
 
-  let { settings, provider, catalog, onChange }: Props = $props();
+  let { settings, provider, catalog, placeholder, onChange }: Props = $props();
   let draft = $state('');
   let focused = $state(false);
-  const defaultName = $derived(catalog.displayName(provider.id));
+  const defaultName = $derived(placeholder ?? catalog.displayName(provider.id));
 
   $effect(() => {
     if (!focused) draft = settings.providerNames[provider.id] ?? '';

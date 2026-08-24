@@ -981,6 +981,16 @@ impl UsageProvider for Sub2ApiProvider {
         self.configured.load(Ordering::SeqCst)
     }
 
+    fn supports_account_names(&self) -> bool {
+        self.configured.load(Ordering::SeqCst)
+    }
+
+    fn account_identity(&self) -> Option<&str> {
+        self.configured
+            .load(Ordering::SeqCst)
+            .then_some(self.provider_id.as_str())
+    }
+
     fn display_name(&self) -> String {
         self.load_config()
             .ok()
@@ -1396,6 +1406,28 @@ mod tests {
         assert_eq!(second.definition().metrics[0].id, "sub2api@2.session");
         assert_eq!(first.credential_account(), "connection");
         assert_eq!(second.credential_account(), "sub2api@2");
+    }
+
+    #[test]
+    fn only_configured_slots_expose_account_names() {
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api@2".into(),
+            "Sub2API 2".into(),
+            directory.path().join("sub2api@2.configured"),
+            false,
+        );
+
+        assert!(!provider.has_local_credentials());
+        assert!(provider.account_identity().is_none());
+
+        provider.set_configured(true).unwrap();
+        assert!(provider.has_local_credentials());
+        assert!(provider.supports_account_names());
+        assert_eq!(provider.account_identity(), Some("sub2api@2"));
+
+        provider.set_configured(false).unwrap();
+        assert!(provider.account_identity().is_none());
     }
 
     #[test]

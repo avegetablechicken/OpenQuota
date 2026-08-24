@@ -81,7 +81,7 @@
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
   const providerDisplayName = (id: string) =>
-    sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
+    sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settings.providerNames[id]) ??
     catalog.displayName(id, settings.providerNames);
   const providerSupportsSpend = (id: string) => catalog.supportsSpend(id);
   function emptyProviderSnapshot(providerId: string): ProviderSnapshot {

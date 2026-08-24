@@ -101,7 +101,7 @@
       (!settingsState.trayAvailable || settingsState.settings.windowMode === 'floating'),
   );
   const providerDisplayName = (id: string) =>
-    sub2ApiDisplayName(id, $sub2ApiUpstreams[id]) ??
+    sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settingsState?.settings.providerNames[id]) ??
     catalog.displayName(id, settingsState?.settings.providerNames);
   const updates = new UpdateController();
   let resizeEdge = $state<PanelResizeEdge>(platform === 'windows' ? 'top' : 'bottom');

@@ -48,10 +48,21 @@ function loadEndpoints(): Record<string, string> {
 
 export const sub2ApiEndpoints = writable(loadEndpoints());
 
-export function sub2ApiDisplayName(providerId: string, upstream?: Sub2ApiUpstream) {
+export function sub2ApiDisplayName(
+  providerId: string,
+  upstream?: Sub2ApiUpstream,
+  customName?: string,
+) {
   if (providerId.split('@', 1)[0] !== 'sub2api') return null;
+  if (customName?.trim()) return customName.trim();
   if (!upstream) return 'Sub2API';
   return `Sub2API · ${upstream === 'claude' ? 'Claude' : 'Codex'}`;
+}
+
+export function sub2ApiNamePlaceholder(providerId: string, upstream?: Sub2ApiUpstream) {
+  if (providerId.split('@', 1)[0] !== 'sub2api') return null;
+  if (!upstream) return 'Account name';
+  return sub2ApiDisplayName(providerId, upstream);
 }
 
 export function sub2ApiMetricSupported(
