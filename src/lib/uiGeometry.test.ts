@@ -57,6 +57,9 @@ describe('popover geometry contract', () => {
     expect(css).toContain('max-width: min(190px, calc(100vw - 24px))');
     expect(css).toMatch(/\.metric\s*{[^}]*padding: 10px 14px;/s);
     expect(css).toMatch(/\.meter\s*{[^}]*height: 5px;/s);
+    expect(css).toMatch(
+      /\.spend-scope-switcher\s*{[^}]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\) minmax\(0, 1\.2fr\);/s,
+    );
     expect(css).toMatch(/\.app-top-bar\s*{[^}]*min-height: 44px;/s);
     expect(css).toMatch(/\.footer\s*{[^}]*min-height: 52px;/s);
   });

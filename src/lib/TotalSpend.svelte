@@ -443,7 +443,7 @@
       width: 144px;
       height: 22px;
       flex: 0 0 144px;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr);
       gap: 1px;
       padding: 2px;
       border-radius: 6px;
