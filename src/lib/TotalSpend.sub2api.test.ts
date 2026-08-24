@@ -120,6 +120,26 @@ describe('TotalSpend Sub2API labels', () => {
     expect(screen.queryByText('Sub2API 2')).not.toBeInTheDocument();
   });
 
+  it('compresses an unsupported account scope while keeping its empty state visible', () => {
+    render(TotalSpend, {
+      providers: [{ id: 'codex', usageHistories: scopedUsage(100, 'localDevice') }],
+      settings,
+      catalog: new ProviderCatalogIndex(catalog),
+      viewMode: 'all',
+      onViewModeChange: vi.fn(),
+      onChange: vi.fn(),
+      onShare: vi.fn(),
+    });
+
+    expect(screen.getByRole('region', { name: 'Accounts Spend' })).toHaveClass(
+      'total-card__scope--empty-history',
+    );
+    expect(screen.getByRole('region', { name: 'Local Device Spend' })).not.toHaveClass(
+      'total-card__scope--empty-history',
+    );
+    expect(screen.getByText('No token data for this period')).toBeInTheDocument();
+  });
+
   it('keeps independent Sub2API accounts visually distinct in Accounts and All', async () => {
     rememberSub2ApiUpstream('sub2api', 'codex');
     rememberSub2ApiUpstream('sub2api@2', 'claude');

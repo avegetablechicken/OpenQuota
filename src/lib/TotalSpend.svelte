@@ -98,6 +98,9 @@
       ? `Local-device history from ${joinNames(names)}.`
       : `Account-wide history from ${joinNames(names)}.`;
   }
+  function hasScopeHistory(scope: SpendProjection['scope']) {
+    return providers.some((provider) => provider.usageHistories[scope]);
+  }
   async function share() {
     if (!(await onShare(projections))) return;
     shareCopied = true;
@@ -173,6 +176,9 @@
       {#each projections as projection (projection.scope)}
         <section
           class="total-card__scope"
+          class:total-card__scope--empty-history={
+            projection.centerValue === null && !hasScopeHistory(projection.scope)
+          }
           aria-label={`${SPEND_SCOPE_LABELS[projection.scope]} Spend`}
         >
           {#if viewMode === 'all'}
@@ -587,6 +593,10 @@
       color: var(--secondary);
       font-size: 11px;
       text-align: center;
+    }
+
+    .total-card__scope--empty-history .total-card__empty {
+      min-height: 36px;
     }
 
     :root[data-density='compact'] .total-card {
