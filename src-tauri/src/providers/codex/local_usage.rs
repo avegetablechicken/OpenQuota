@@ -20,6 +20,7 @@ use super::CodexError;
 use crate::providers::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+    model_scope::model_belongs_to_card,
     pi_usage,
 };
 
@@ -496,6 +497,9 @@ fn aggregate_into(
     let mut seen = HashSet::new();
 
     for event in events {
+        if !model_belongs_to_card("codex", &event.model) {
+            continue;
+        }
         let key = (
             event.timestamp,
             event.model.clone(),
@@ -631,6 +635,7 @@ mod tests {
             test_bundled_pricing, ModelPricing, ModelRates, PricingCatalog, PricingSupplement,
         },
         providers::log_usage::LogFileFingerprint,
+        providers::model_scope::model_belongs_to_card,
         storage::Storage,
     };
 
@@ -643,6 +648,27 @@ mod tests {
         assert_eq!(events[0].model, "gpt-5.5");
         assert_eq!(events[0].total, 115);
         assert_eq!(events[0].cached, 20);
+    }
+
+    #[test]
+    fn codex_model_filter_rejects_compatible_non_codex_models() {
+        for model in [
+            "qwen3.8:27b - mlx",
+            "claude-sonnet-4.6",
+            "gemini-3-flash",
+            "gpt-oss-20b",
+            "ollama/qwen3",
+        ] {
+            assert!(!model_belongs_to_card("codex", model), "{model}");
+        }
+        for model in [
+            "gpt-5.4",
+            "gpt-5.6-luna",
+            "gpt-5.3-codex",
+            "codex-auto-review",
+        ] {
+            assert!(model_belongs_to_card("codex", model), "{model}");
+        }
     }
 
     #[test]
@@ -961,14 +987,14 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}
 {"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":800,"output_tokens":100,"total_tokens":900}}}}
-{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
+{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
         let pricing = test_bundled_pricing();
         let history = aggregate(parse_jsonl(content), now, &pricing);
         let today = history.today.unwrap();
         let breakdown = today.model_breakdown.unwrap();
 
         assert_eq!(today.tokens, 2_000);
-        assert_eq!(today.unknown_models, ["future-unpriced-model"]);
+        assert_eq!(today.unknown_models, ["gpt-future-unpriced-model"]);
         assert_eq!(
             breakdown
                 .models
@@ -983,14 +1009,14 @@ mod tests {
     #[test]
     fn unknown_only_usage_does_not_create_spend_periods() {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
-        let content = r#"{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
+        let content = r#"{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
         let pricing = test_bundled_pricing();
         let history = aggregate(parse_jsonl(content), now, &pricing);
 
         assert!(history.today.is_none());
         assert!(history.last_30_days.is_none());
         assert!(history.daily.is_empty());
-        assert_eq!(history.unknown_models, ["future-unpriced-model"]);
+        assert_eq!(history.unknown_models, ["gpt-future-unpriced-model"]);
     }
 
     #[test]

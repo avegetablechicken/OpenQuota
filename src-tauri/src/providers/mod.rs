@@ -12,6 +12,7 @@ pub mod grok;
 pub mod kimi;
 mod log_usage;
 pub mod minimax;
+mod model_scope;
 pub mod opencode;
 pub mod openrouter;
 mod pi_usage;

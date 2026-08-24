@@ -17,6 +17,7 @@ use crate::{
 use super::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+    model_scope::model_belongs_to_card,
 };
 
 const LOG_CACHE_SCHEMA_VERSION: u8 = 1;
@@ -164,7 +165,17 @@ fn parse_line(line: &str) -> Option<PiUsageEvent> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    let card_id = mapped_card(message.get("provider")?.as_str()?)?;
+    let provider = message.get("provider")?.as_str()?;
+    let card_id = mapped_card(provider)?;
+    let model = message
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
+    if !model_belongs_to_card(card_id, &model) {
+        return None;
+    }
     let usage = message.get("usage")?.as_object()?;
     let cache_write = unsigned_number(usage.get("cacheWrite")).unwrap_or_default();
     let cache_write_1h = unsigned_number(usage.get("cacheWrite1h")).unwrap_or_default();
@@ -177,12 +188,7 @@ fn parse_line(line: &str) -> Option<PiUsageEvent> {
         id: object.get("id").and_then(Value::as_str).map(str::to_owned),
         timestamp,
         card_id: card_id.to_owned(),
-        model: message
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_owned(),
+        model,
         carried_cost,
         tokens: PiTokenBreakdown {
             input: unsigned_number(usage.get("input")).unwrap_or_default(),
@@ -225,7 +231,10 @@ fn aggregate_into(
 ) -> bool {
     let mut contributed = false;
     for event in events {
-        if event.card_id != card_id || event.timestamp > now {
+        if event.card_id != card_id
+            || event.timestamp > now
+            || !model_belongs_to_card(card_id, &event.model)
+        {
             continue;
         }
         let date = event.timestamp.with_timezone(&Local).date_naive();
@@ -309,7 +318,7 @@ mod tests {
 
     use super::{
         aggregate_into, deduplicate, mapped_card, parse_line, scan_directory_into,
-        sessions_directory,
+        sessions_directory, PiTokenBreakdown, PiUsageEvent,
     };
     use crate::{
         pricing::{ModelPricing, ModelRates, PricingCatalog, PricingSupplement},
@@ -388,16 +397,47 @@ mod tests {
     #[test]
     fn parser_rejects_unmapped_and_non_assistant_messages() {
         assert!(parse_line(&line("one", "nvidia-nim", "model", "1")).is_none());
+        assert!(parse_line(&line("mlx", "openai-codex", "qwen3.8:27b - mlx", "0")).is_none());
         let user = r#"{"type":"message","timestamp":"2026-07-12T10:00:00Z","message":{"role":"user","provider":"anthropic","usage":{}}}"#;
         assert!(parse_line(user).is_none());
     }
 
     #[test]
+    fn cached_non_codex_events_are_filtered_during_aggregation() {
+        let event = PiUsageEvent {
+            id: Some("mlx".into()),
+            timestamp: now(),
+            card_id: "codex".into(),
+            model: "qwen3.8:27b - mlx".into(),
+            carried_cost: Some(0.0),
+            tokens: PiTokenBreakdown {
+                input: 100,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_read: 0,
+                output: 50,
+            },
+            reported_total_tokens: 150,
+        };
+        let mut accumulator = DailyUsageAccumulator::default();
+
+        assert!(!aggregate_into(
+            vec![event],
+            "codex",
+            chrono::NaiveDate::MIN,
+            now(),
+            &pricing(),
+            &mut accumulator,
+        ));
+        assert!(accumulator.build(now(), "From pi").today.is_none());
+    }
+
+    #[test]
     fn carried_cost_is_exact_zero_cost_is_priced_and_unknowns_are_reported() {
         let events = vec![
-            parse_line(&line("exact", "anthropic", "unknown-exact", "0.5")).unwrap(),
-            parse_line(&line("priced", "anthropic", "priced-model", "0")).unwrap(),
-            parse_line(&line("unknown", "anthropic", "missing-model", "0")).unwrap(),
+            parse_line(&line("exact", "anthropic", "claude-unknown-exact", "0.5")).unwrap(),
+            parse_line(&line("priced", "anthropic", "claude-priced-model", "0")).unwrap(),
+            parse_line(&line("unknown", "anthropic", "claude-missing-model", "0")).unwrap(),
         ];
         let mut accumulator = DailyUsageAccumulator::default();
         assert!(aggregate_into(
@@ -413,12 +453,13 @@ mod tests {
         assert_eq!(period.tokens, 404);
         assert!(period.cost_estimated);
         assert!((period.estimated_cost_usd.unwrap() - 0.502_43).abs() < 0.000_001);
-        assert_eq!(period.unknown_models, ["missing-model"]);
+        assert_eq!(period.unknown_models, ["claude-missing-model"]);
     }
 
     #[test]
     fn future_dated_events_do_not_contribute_usage() {
-        let mut event = parse_line(&line("future", "anthropic", "priced-model", "0.5")).unwrap();
+        let mut event =
+            parse_line(&line("future", "anthropic", "claude-priced-model", "0.5")).unwrap();
         event.timestamp = now() + chrono::Duration::seconds(1);
         let mut accumulator = DailyUsageAccumulator::default();
 
@@ -435,7 +476,7 @@ mod tests {
 
     #[test]
     fn repeated_message_ids_are_counted_once_across_files() {
-        let event = parse_line(&line("duplicate", "anthropic", "model", "0.5")).unwrap();
+        let event = parse_line(&line("duplicate", "anthropic", "claude-model", "0.5")).unwrap();
         assert_eq!(deduplicate(vec![event.clone(), event]).len(), 1);
     }
 
@@ -449,7 +490,7 @@ mod tests {
             &log,
             [
                 line("claude", "anthropic", "claude-model", "0.5"),
-                line("codex", "openai-codex", "gpt-model", "0.25"),
+                line("codex", "openai-codex", "gpt-5.5", "0.25"),
             ]
             .join("\n"),
         )
