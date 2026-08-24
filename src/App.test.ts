@@ -124,7 +124,7 @@ describe('OpenQuota dashboard', () => {
     );
     expect(screen.getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Total Spend' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Device Usage Trend' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
     expect(container.querySelector('.spend-ring__label')).toHaveAttribute(
       'data-tooltip',
       '$3.84 · Estimated locally, so it may be off',
@@ -184,21 +184,14 @@ describe('OpenQuota dashboard', () => {
     const provider = await screen.findByRole('group', { name: 'Codex provider' });
     expect(screen.getByRole('region', { name: 'Local Device Spend' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Accounts Spend' })).toBeInTheDocument();
-    expect(
-      within(provider).getByRole('region', { name: 'Device Usage Trend' }),
-    ).toBeInTheDocument();
-    expect(
-      within(provider).getByRole('region', { name: 'Accounts Usage Trend' }),
-    ).toBeInTheDocument();
+    expect(within(provider).getAllByRole('region', { name: 'Usage Trend' })).toHaveLength(2);
     expect(within(provider).getByText('Device Today')).toBeInTheDocument();
     expect(within(provider).getByText('Accounts Today')).toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
     expect(within(provider).getByRole('progressbar', { name: 'Session used' })).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
-    expect(
-      within(provider).queryByRole('region', { name: 'Device Usage Trend' }),
-    ).not.toBeInTheDocument();
+    expect(within(provider).getAllByRole('region', { name: 'Usage Trend' })).toHaveLength(1);
     expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
     expect(within(provider).queryByText('Device Today')).not.toBeInTheDocument();
     expect(within(provider).getByText('Today')).toBeInTheDocument();

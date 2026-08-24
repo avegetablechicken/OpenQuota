@@ -108,7 +108,7 @@
 {:else if definition?.source.kind === 'trend'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
     <UsageTrend
-      label={usageLabel(definition.label, scoped.scope)}
+      label={definition.label}
       daily={scoped.history.daily}
       sourceNote={usageSourceNote(
         catalog,
