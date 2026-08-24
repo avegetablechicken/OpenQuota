@@ -11,6 +11,6 @@ export function desktopPlatform(
 
 export function shortcutLabels(platform = desktopPlatform()) {
   return platform === 'macos'
-    ? { settings: '⌘,', quit: '⌘Q' }
-    : { settings: 'Ctrl+,', quit: 'Ctrl+Q' };
+    ? { back: '⌘[', settings: '⌘,', quit: '⌘Q' }
+    : { back: 'Alt+←', settings: 'Ctrl+,', quit: 'Ctrl+Q' };
 }

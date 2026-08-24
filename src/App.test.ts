@@ -1104,6 +1104,21 @@ describe('OpenQuota dashboard', () => {
     expect(mocks.invoke).toHaveBeenCalledWith('dismiss_main_window');
   });
 
+  it('returns from pages with a Back button using the platform back shortcut', async () => {
+    render(App);
+    await screen.findByText('Plus');
+    await fireEvent.click(screen.getByText('Options').closest('summary')!);
+    await fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    expect(await screen.findByRole('button', { name: 'Back' })).toHaveAttribute(
+      'aria-keyshortcuts',
+      'Alt+ArrowLeft',
+    );
+
+    await fireEvent.keyDown(document, { key: 'ArrowLeft', altKey: true });
+
+    expect(screen.getByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
+  });
+
   it('lets reset details consume Escape before the popup shortcut', async () => {
     render(App);
     await screen.findByText('Plus');

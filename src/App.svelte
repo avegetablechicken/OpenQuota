@@ -709,6 +709,23 @@
           return;
         }
         back();
+      } else if (
+        screen !== 'dashboard' &&
+        ((platform === 'macos' &&
+          event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          !event.shiftKey &&
+          (event.key === '[' || event.code === 'BracketLeft')) ||
+          (platform !== 'macos' &&
+            event.altKey &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.shiftKey &&
+            event.key === 'ArrowLeft'))
+      ) {
+        event.preventDefault();
+        back();
       } else if (event.key === 'Enter' && screen === 'dashboard' && !ownsEnterKey(event.target)) {
         event.preventDefault();
         navigate('customize');
@@ -824,7 +841,13 @@
   {#if settingsState}
     {#if screen !== 'dashboard'}
       <header class="screen-header app-top-bar">
-        <button type="button" onclick={back} aria-label="Back" data-tooltip="Back">
+        <button
+          type="button"
+          onclick={back}
+          aria-label="Back"
+          aria-keyshortcuts={platform === 'macos' ? 'Meta+[' : 'Alt+ArrowLeft'}
+          data-tooltip={`Back (${shortcuts.back})`}
+        >
           <Icon name="back" size={16} strokeWidth={2.2} />
         </button>
         <h1>{topBarTitle()}</h1>
