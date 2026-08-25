@@ -69,19 +69,12 @@ describe('native visual contract', () => {
     expect(account.container.innerHTML).toBe(claude.container.innerHTML);
   });
 
-  it('composes the Sub2API mark with its Codex upstream mark', () => {
+  it('shows the original Sub2API mark before an upstream is configured', () => {
     const { container } = render(ProviderIcon, { providerId: 'sub2api' });
-    expect(container.querySelectorAll('path')).toHaveLength(2);
-    expect(container.querySelector('circle')).not.toBeNull();
-    expect(container.querySelector('path[stroke="#39D9E7"]')).not.toBeNull();
-    expect(container.querySelector('[data-icon-layer="sub2api"]')).toHaveAttribute(
-      'transform',
-      'scale(2.85)',
-    );
-    expect(container.querySelector('[data-icon-layer="upstream"]')).toHaveAttribute(
-      'transform',
-      'translate(44 44) scale(.56)',
-    );
+    expect(container.querySelectorAll('path')).toHaveLength(1);
+    expect(container.querySelector('circle')).toBeNull();
+    expect(container.querySelector('[data-icon-layer="upstream"]')).toBeNull();
+    expect(container.querySelector('path')).toHaveAttribute('stroke', '#39D9E7');
   });
 
   it('can compose the Sub2API mark with its Claude upstream mark', () => {

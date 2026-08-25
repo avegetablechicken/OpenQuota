@@ -10,16 +10,18 @@
   interface Props {
     providerId: string;
     size?: number;
-    upstreamProvider?: 'codex' | 'claude';
+    upstreamProvider?: 'codex' | 'claude' | null;
   }
 
   let { providerId, size = 18, upstreamProvider }: Props = $props();
   const family = $derived(providerFamily(providerId));
-  const composite = $derived(family === 'sub2api');
+  const resolvedUpstream = $derived(
+    upstreamProvider === null ? undefined : (upstreamProvider ?? $sub2ApiUpstreams[providerId]),
+  );
+  const composite = $derived(family === 'sub2api' && resolvedUpstream !== undefined);
   const path = $derived(providerIconPath(providerId));
-  const resolvedUpstream = $derived(upstreamProvider ?? $sub2ApiUpstreams[providerId] ?? 'codex');
-  const upstreamPath = $derived(providerIconPath(resolvedUpstream));
-  const upstreamColor = $derived(providerIconColor(resolvedUpstream));
+  const upstreamPath = $derived(resolvedUpstream ? providerIconPath(resolvedUpstream) : '');
+  const upstreamColor = $derived(resolvedUpstream ? providerIconColor(resolvedUpstream) : null);
   const color = $derived(providerIconColor(providerId));
   const viewBox = $derived(composite ? '0 0 100 100' : providerIconViewBox(providerId));
 </script>
@@ -47,6 +49,15 @@
     <g data-icon-layer="upstream" transform="translate(44 44) scale(.56)">
       <path d={upstreamPath} fill={upstreamColor ?? 'currentColor'} />
     </g>
+  {:else if family === 'sub2api'}
+    <path
+      d={path}
+      fill="none"
+      stroke={color ?? 'currentColor'}
+      stroke-width="2.7"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
   {:else}
     <path d={path} fill={color ?? 'currentColor'} />
   {/if}

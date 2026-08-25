@@ -45,6 +45,7 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
 
     await screen.findByText('Not configured');
+    expect(screen.getByText('Account')).toBeInTheDocument();
     expect(get(sub2ApiUpstreams)['sub2api@2']).toBeUndefined();
   });
 
@@ -77,7 +78,7 @@ describe('Sub2ApiConfigSection', () => {
     );
     expect(screen.queryByDisplayValue('secret-password')).not.toBeInTheDocument();
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
-    expect(screen.getByText('Claude upstream')).toBeInTheDocument();
+    expect(screen.getByText('Account')).toBeInTheDocument();
   });
 
   it('clears saved connection fields without deleting the Sub2API item', async () => {
@@ -112,13 +113,14 @@ describe('Sub2ApiConfigSection', () => {
     );
     expect(mocks.invoke).not.toHaveBeenCalledWith('delete_sub2api_config', expect.anything());
     expect(screen.getByText('Not configured')).toBeInTheDocument();
+    expect(screen.getByText('Account')).toBeInTheDocument();
   });
 
   it('deletes an item from the separate bottom action row', async () => {
     const onRemove = vi.fn();
     render(Sub2ApiConfigSection, { providerId: 'sub2api@3', onRemove });
     await screen.findByRole('region', { name: 'Sub2API Connection' });
-    await fireEvent.click(screen.getByRole('button', { name: /^Delete Sub2API/ }));
+    await fireEvent.click(screen.getByRole('button', { name: /^Delete Remove/ }));
 
     expect(
       screen.getByRole('group', { name: 'Delete this Sub2API item?' }),

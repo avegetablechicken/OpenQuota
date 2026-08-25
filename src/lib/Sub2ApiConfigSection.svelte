@@ -190,9 +190,13 @@
   <h2>Connection</h2>
   <div class="sub2api-config-card">
     <div class="sub2api-config-summary">
-      <ProviderIcon {providerId} upstreamProvider={connectionState.upstream} size={20} />
+      <ProviderIcon
+        {providerId}
+        upstreamProvider={connectionState.configured ? connectionState.upstream : null}
+        size={20}
+      />
       <span>
-        <b>{connectionState.upstream === 'claude' ? 'Claude' : 'Codex'} upstream</b>
+        <b>Account</b>
         <small>{connectionState.configured ? connectionState.email : 'Not configured'}</small>
       </span>
       <i class:missing={!connectionState.configured} aria-hidden="true"></i>
@@ -334,7 +338,7 @@
   >
     <Icon name="clear-filled" size={17} />
     <span>
-      <b>Delete Sub2API</b>
+      <b>Delete</b>
       <small>Remove this provider and its connection</small>
     </span>
     <Icon name="chevron-right" size={13} strokeWidth={2.2} />
