@@ -3,6 +3,7 @@
   import { deleteProviderApiKey, getProviderApiKeyState, saveProviderApiKey } from './backend';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
+  import { saveShortcut } from './saveShortcut';
   import type { ApiKeyStatus, ProviderApiKeyState } from './types';
 
   interface Props {
@@ -28,6 +29,7 @@
   const status = $derived<ApiKeyStatus>(credentialState?.status ?? 'notSet');
   const editable = $derived(status === 'notSet' || overrideExternal);
   const canClear = $derived(status === 'saved' || status === 'overrideActive');
+  const canSave = $derived(Boolean(apiKey.trim() && !saving));
   const sourceLabel = $derived(
     status === 'fromEnvironment'
       ? 'From Your Environment'
@@ -187,7 +189,8 @@
                 <button
                   class="primary"
                   type="button"
-                  disabled={!apiKey.trim() || saving}
+                  disabled={!canSave}
+                  use:saveShortcut={canSave}
                   onclick={save}>{saving ? 'Saving…' : 'Save'}</button
                 >
                 {#if overrideExternal}

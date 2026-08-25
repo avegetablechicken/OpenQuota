@@ -81,6 +81,41 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByText('Account')).toBeInTheDocument();
   });
 
+  it('registers Ctrl+S only while the Save button is enabled', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+    expect(mocks.invoke).not.toHaveBeenCalledWith('save_sub2api_config', expect.anything());
+
+    await fireEvent.input(screen.getByLabelText('Sub2API Base URL'), {
+      target: { value: 'https://shortcut.example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'shortcut@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'shortcut-password' },
+    });
+    const saveButton = screen.getByRole('button', { name: 'Save' });
+    expect(saveButton).toHaveAttribute('aria-keyshortcuts', 'Control+S');
+    await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', {
+        providerId: 'sub2api@2',
+        config: {
+          baseUrl: 'https://shortcut.example.com',
+          email: 'shortcut@example.com',
+          password: 'shortcut-password',
+          upstream: 'codex',
+        },
+      }),
+    );
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+  });
+
   it('confirms a save before backend persistence finishes', async () => {
     let resolveSave!: (value: {
       configured: boolean;

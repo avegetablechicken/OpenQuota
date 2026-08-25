@@ -8,6 +8,7 @@
   } from './backend';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
+  import { saveShortcut } from './saveShortcut';
   import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
   import type { Sub2ApiConfigState, Sub2ApiUpstream } from './types';
 
@@ -292,8 +293,12 @@
         </label>
 
         <div class="sub2api-config-actions">
-          <button class="primary" type="button" disabled={!canSave} onclick={() => void save()}
-            >{saving ? 'Saving…' : 'Save'}</button
+          <button
+            class="primary"
+            type="button"
+            disabled={!canSave}
+            use:saveShortcut={canSave}
+            onclick={() => void save()}>{saving ? 'Saving…' : 'Save'}</button
           >
           {#if connectionState.configured}
             <button

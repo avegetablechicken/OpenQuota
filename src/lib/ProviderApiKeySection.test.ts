@@ -49,6 +49,33 @@ describe('ProviderApiKeySection', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Done' })).toHaveFocus());
   });
 
+  it('registers Ctrl+S only while the Save button is enabled', async () => {
+    render(ProviderApiKeySection, {
+      providerId: 'openrouter',
+      providerName: 'OpenRouter',
+    });
+    await screen.findByRole('region', { name: 'OpenRouter API Key' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+    expect(mocks.invoke).not.toHaveBeenCalledWith('save_provider_api_key', expect.anything());
+
+    await fireEvent.input(screen.getByLabelText('OpenRouter API key'), {
+      target: { value: 'shortcut-secret' },
+    });
+    const saveButton = screen.getByRole('button', { name: 'Save' });
+    expect(saveButton).toHaveAttribute('aria-keyshortcuts', 'Control+S');
+    await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('save_provider_api_key', {
+        providerId: 'openrouter',
+        apiKey: 'shortcut-secret',
+      }),
+    );
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+  });
+
   it('offers an override for environment keys and clear for saved overrides', async () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === 'get_provider_api_key_state') {
