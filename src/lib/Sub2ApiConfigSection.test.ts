@@ -15,21 +15,47 @@ describe('Sub2ApiConfigSection', () => {
   beforeEach(() => {
     mocks.invoke.mockReset().mockImplementation((command: string) => {
       if (command === 'get_sub2api_config_state') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
+        return Promise.resolve({
+          configured: false,
+          baseUrl: '',
+          codexProvider: '',
+          customBaseUrl: false,
+          email: '',
+          upstream: 'codex',
+        });
+      }
+      if (command === 'resolve_sub2api_codex_provider') {
+        return Promise.resolve('https://resolved.example.com');
       }
       if (command === 'save_sub2api_config') {
         return Promise.resolve({
           configured: true,
           baseUrl: 'https://sub2api.example.com',
+          codexProvider: '',
+          customBaseUrl: true,
           email: 'admin@example.com',
           upstream: 'claude',
         });
       }
       if (command === 'clear_sub2api_config') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
+        return Promise.resolve({
+          configured: false,
+          baseUrl: '',
+          codexProvider: '',
+          customBaseUrl: false,
+          email: '',
+          upstream: 'codex',
+        });
       }
       if (command === 'delete_sub2api_config') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
+        return Promise.resolve({
+          configured: false,
+          baseUrl: '',
+          codexProvider: '',
+          customBaseUrl: false,
+          email: '',
+          upstream: 'codex',
+        });
       }
       return Promise.reject(new Error(`unexpected command ${command}`));
     });
@@ -53,6 +79,7 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api' });
     expect(await screen.findByRole('region', { name: 'Sub2API Connection' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
     await fireEvent.input(screen.getByLabelText('Sub2API Base URL'), {
       target: { value: 'https://sub2api.example.com' },
     });
@@ -62,7 +89,6 @@ describe('Sub2ApiConfigSection', () => {
     const password = screen.getByLabelText('Sub2API administrator password');
     expect(password).toHaveAttribute('type', 'password');
     await fireEvent.input(password, { target: { value: 'secret-password' } });
-    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() =>
@@ -70,6 +96,8 @@ describe('Sub2ApiConfigSection', () => {
         providerId: 'sub2api',
         config: {
           baseUrl: 'https://sub2api.example.com',
+          codexProvider: '',
+          customBaseUrl: true,
           email: 'admin@example.com',
           password: 'secret-password',
           upstream: 'claude',
@@ -81,6 +109,48 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByText('Account')).toBeInTheDocument();
   });
 
+  it('resolves an exact Codex provider and keeps Base URL read-only by default', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const baseUrl = screen.getByLabelText('Sub2API Base URL');
+    const provider = screen.getByLabelText('Codex provider or profile');
+
+    expect(baseUrl).toBeDisabled();
+    expect(screen.getByRole('switch', { name: 'Use custom Sub2API Base URL' })).not.toBeChecked();
+    await fireEvent.input(provider, { target: { value: 'ShareCoder' } });
+    expect(mocks.invoke).not.toHaveBeenCalledWith(
+      'resolve_sub2api_codex_provider',
+      expect.anything(),
+    );
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('resolve_sub2api_codex_provider', {
+        provider: 'ShareCoder',
+      }),
+    );
+    await waitFor(() => expect(baseUrl).toHaveValue('https://resolved.example.com'));
+    expect(baseUrl).toBeDisabled();
+  });
+
+  it('clears and disables Provider when custom Base URL is enabled', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const provider = screen.getByLabelText('Codex provider or profile');
+    await fireEvent.input(provider, { target: { value: 'ShareCoder' } });
+    await waitFor(() =>
+      expect(screen.getByLabelText('Sub2API Base URL')).toHaveValue('https://resolved.example.com'),
+    );
+
+    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Sub2API Base URL' }));
+
+    expect(provider).toBeDisabled();
+    expect(provider).toHaveValue('');
+    expect(screen.getByLabelText('Sub2API Base URL')).toBeEnabled();
+    expect(screen.getByLabelText('Sub2API Base URL')).toHaveValue('');
+  });
+
   it('registers Ctrl+S only while the Save button is enabled', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
@@ -89,9 +159,12 @@ describe('Sub2ApiConfigSection', () => {
     await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
     expect(mocks.invoke).not.toHaveBeenCalledWith('save_sub2api_config', expect.anything());
 
-    await fireEvent.input(screen.getByLabelText('Sub2API Base URL'), {
-      target: { value: 'https://shortcut.example.com' },
+    await fireEvent.input(screen.getByLabelText('Codex provider or profile'), {
+      target: { value: 'shortcut' },
     });
+    await waitFor(() =>
+      expect(screen.getByLabelText('Sub2API Base URL')).toHaveValue('https://resolved.example.com'),
+    );
     await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
       target: { value: 'shortcut@example.com' },
     });
@@ -106,7 +179,9 @@ describe('Sub2ApiConfigSection', () => {
       expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', {
         providerId: 'sub2api@2',
         config: {
-          baseUrl: 'https://shortcut.example.com',
+          baseUrl: 'https://resolved.example.com',
+          codexProvider: 'shortcut',
+          customBaseUrl: false,
           email: 'shortcut@example.com',
           password: 'shortcut-password',
           upstream: 'codex',
@@ -120,12 +195,16 @@ describe('Sub2ApiConfigSection', () => {
     let resolveSave!: (value: {
       configured: boolean;
       baseUrl: string;
+      codexProvider: string;
+      customBaseUrl: boolean;
       email: string;
       upstream: string;
     }) => void;
     const pendingSave = new Promise<{
       configured: boolean;
       baseUrl: string;
+      codexProvider: string;
+      customBaseUrl: boolean;
       email: string;
       upstream: string;
     }>((resolve) => {
@@ -133,7 +212,14 @@ describe('Sub2ApiConfigSection', () => {
     });
     mocks.invoke.mockImplementation((command: string) => {
       if (command === 'get_sub2api_config_state') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
+        return Promise.resolve({
+          configured: false,
+          baseUrl: '',
+          codexProvider: '',
+          customBaseUrl: false,
+          email: '',
+          upstream: 'codex',
+        });
       }
       if (command === 'save_sub2api_config') return pendingSave;
       return Promise.reject(new Error(`unexpected command ${command}`));
@@ -141,6 +227,7 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Sub2API Base URL' }));
     await fireEvent.input(screen.getByLabelText('Sub2API Base URL'), {
       target: { value: 'https://pending.example.com' },
     });
@@ -163,6 +250,8 @@ describe('Sub2ApiConfigSection', () => {
     resolveSave({
       configured: true,
       baseUrl: 'https://pending.example.com',
+      codexProvider: '',
+      customBaseUrl: true,
       email: 'pending@example.com',
       upstream: 'codex',
     });
@@ -176,7 +265,14 @@ describe('Sub2ApiConfigSection', () => {
     });
     mocks.invoke.mockImplementation((command: string) => {
       if (command === 'get_sub2api_config_state') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
+        return Promise.resolve({
+          configured: false,
+          baseUrl: '',
+          codexProvider: '',
+          customBaseUrl: false,
+          email: '',
+          upstream: 'codex',
+        });
       }
       if (command === 'save_sub2api_config') return pendingSave;
       return Promise.reject(new Error(`unexpected command ${command}`));
@@ -184,6 +280,7 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Sub2API Base URL' }));
     await fireEvent.input(screen.getByLabelText('Sub2API Base URL'), {
       target: { value: 'https://failed.example.com' },
     });
@@ -211,12 +308,21 @@ describe('Sub2ApiConfigSection', () => {
         return Promise.resolve({
           configured: true,
           baseUrl: 'https://sub2api.example.com',
+          codexProvider: '',
+          customBaseUrl: true,
           email: 'admin@example.com',
           upstream: 'codex',
         });
       }
       if (command === 'clear_sub2api_config') {
-        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
+        return Promise.resolve({
+          configured: false,
+          baseUrl: '',
+          codexProvider: '',
+          customBaseUrl: false,
+          email: '',
+          upstream: 'codex',
+        });
       }
       return Promise.reject(new Error(`unexpected command ${command}`));
     });

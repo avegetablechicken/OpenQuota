@@ -12,7 +12,10 @@ use crate::{
     notifications::finish_refresh,
     pacing::NotificationEvaluator,
     providers::{
-        sub2api::{metric_template, Sub2ApiConfigInput, Sub2ApiConfigState, Sub2ApiProviders},
+        sub2api::{
+            codex_provider_base_url, metric_template, Sub2ApiConfigInput, Sub2ApiConfigState,
+            Sub2ApiProviders,
+        },
         ProviderRegistry, UsageProvider,
     },
     service::ProviderService,
@@ -328,6 +331,14 @@ pub async fn get_sub2api_config_state(
     tauri::async_runtime::spawn_blocking(move || provider.config_state())
         .await
         .map_err(|_| "The Sub2API connection could not be read.".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn resolve_sub2api_codex_provider(provider: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || codex_provider_base_url(&provider))
+        .await
+        .map_err(|_| "The Codex provider could not be resolved.".to_owned())?
         .map_err(|error| error.to_string())
 }
 

@@ -20,6 +20,13 @@ password. Each click creates the next independent Sub2API item. OpenQuota signs 
 `/api/v1/auth/login`, discovers active OpenAI OAuth accounts, and reads quota from
 `/api/v1/admin/openai/accounts/:id/quota`.
 
+For a Codex upstream, enter a **Provider** that exactly matches the top-level `model_provider` value,
+a name under `[model_providers]` in `~/.codex/config.toml`, or a standalone profile file named
+`~/.codex/<profile>.config.toml`. OpenQuota reads that configuration's model provider and fills the
+Base URL from `[model_providers.<name>].base_url`; that URL is read-only in the connection editor.
+Enable **Custom Base URL** to enter an endpoint manually. Custom Base URL mode clears and disables
+Provider, so the two sources cannot be combined.
+
 Each complete connection is stored under its own entry in the operating system's credential store.
 The connection is stored and confirmed as soon as **Save** is selected, without first authenticating
 it or fetching an access token. OpenQuota refreshes its quota in the background after the editor

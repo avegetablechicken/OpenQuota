@@ -191,6 +191,8 @@ export interface ApiKeyMutationOutcome extends ProviderApiKeyState {
 export interface Sub2ApiConfigState {
   configured: boolean;
   baseUrl: string;
+  codexProvider: string;
+  customBaseUrl: boolean;
   email: string;
   upstream: Sub2ApiUpstream;
 }
@@ -199,6 +201,8 @@ export type Sub2ApiUpstream = 'codex' | 'claude';
 
 export interface Sub2ApiConfigInput {
   baseUrl: string;
+  codexProvider: string;
+  customBaseUrl: boolean;
   email: string;
   password: string;
   upstream: Sub2ApiUpstream;

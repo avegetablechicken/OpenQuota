@@ -25,7 +25,11 @@ use crate::storage::Storage;
 
 use super::{
     claude::map_sub2api_usage,
-    codex::{client::UsageResponse, mapper::map_usage},
+    codex::{
+        client::UsageResponse,
+        config::{resolve_provider_base_url, CodexConfigError},
+        mapper::map_usage,
+    },
     credential_store::{delete_owned_password, read_owned_password, write_owned_password},
     CacheIdentity, ProviderError, UsageProvider,
 };
@@ -195,6 +199,10 @@ pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<Metr
 #[serde(rename_all = "camelCase")]
 pub struct Sub2ApiConfigInput {
     pub base_url: String,
+    #[serde(default)]
+    pub codex_provider: String,
+    #[serde(default)]
+    pub custom_base_url: bool,
     pub email: String,
     pub password: String,
     #[serde(default)]
@@ -212,6 +220,8 @@ impl Drop for Sub2ApiConfigInput {
 pub struct Sub2ApiConfigState {
     pub configured: bool,
     pub base_url: String,
+    pub codex_provider: String,
+    pub custom_base_url: bool,
     pub email: String,
     pub upstream: Sub2ApiUpstream,
 }
@@ -259,6 +269,10 @@ impl std::fmt::Display for Sub2ApiUpstream {
 #[derive(Serialize, Deserialize)]
 struct StoredConfig {
     base_url: String,
+    #[serde(default)]
+    codex_provider: String,
+    #[serde(default = "default_true")]
+    custom_base_url: bool,
     email: String,
     password: String,
     #[serde(default)]
@@ -271,6 +285,8 @@ impl Clone for StoredConfig {
     fn clone(&self) -> Self {
         Self {
             base_url: self.base_url.clone(),
+            codex_provider: self.codex_provider.clone(),
+            custom_base_url: self.custom_base_url,
             email: self.email.clone(),
             password: self.password.clone(),
             upstream: self.upstream,
@@ -295,6 +311,8 @@ impl StoredConfig {
         Sub2ApiConfigState {
             configured: true,
             base_url: self.base_url.clone(),
+            codex_provider: self.codex_provider.clone(),
+            custom_base_url: self.custom_base_url,
             email: self.email.clone(),
             upstream: self.upstream,
         }
@@ -307,6 +325,10 @@ enum Sub2ApiError {
     MissingConfig,
     #[error("Enter a valid Sub2API Base URL, email, and password.")]
     InvalidConfig,
+    #[error("Clear Provider when using a custom Base URL.")]
+    ProviderWithCustomBaseUrl,
+    #[error(transparent)]
+    CodexConfig(#[from] CodexConfigError),
     #[error("The Sub2API connection could not be read or updated securely.")]
     CredentialStorage,
     #[error("Sub2API rejected the administrator email or password.")]
@@ -337,9 +359,10 @@ impl From<Sub2ApiError> for ProviderError {
             | Sub2ApiError::TwoFactorRequired => Kind::Authentication,
             Sub2ApiError::Permission => Kind::Permission,
             Sub2ApiError::CredentialStorage => Kind::CredentialStorage,
+            Sub2ApiError::CodexConfig(_) => Kind::LocalData,
             Sub2ApiError::RateLimited => Kind::RateLimited,
             Sub2ApiError::RequestFailed(_) | Sub2ApiError::ConnectionFailed => Kind::Network,
-            Sub2ApiError::InvalidConfig => Kind::Internal,
+            Sub2ApiError::InvalidConfig | Sub2ApiError::ProviderWithCustomBaseUrl => Kind::Internal,
             Sub2ApiError::NoUpstreamAccount(_) | Sub2ApiError::InvalidResponse => {
                 Kind::InvalidResponse
             }
@@ -687,8 +710,12 @@ impl Sub2ApiProvider {
             input.password.trim().to_owned()
         };
         let apply_metric_template = should_apply_metric_template(previous.as_ref(), input.upstream);
+        let (base_url, codex_provider, custom_base_url) =
+            connection_target(&input, resolve_codex_provider_base_url)?;
         let config = StoredConfig {
-            base_url: normalized_base_url_text(&input.base_url)?,
+            base_url,
+            codex_provider,
+            custom_base_url,
             email: input.email.trim().to_owned(),
             password,
             upstream: input.upstream,
@@ -997,6 +1024,53 @@ fn normalized_base_url_text(value: &str) -> Result<String, Sub2ApiError> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
+fn resolve_codex_provider_base_url(value: &str) -> Result<String, Sub2ApiError> {
+    normalized_codex_provider_base_url_text(&resolve_provider_base_url(value)?)
+}
+
+pub fn codex_provider_base_url(value: &str) -> Result<String, ProviderError> {
+    resolve_codex_provider_base_url(value).map_err(ProviderError::from)
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn normalized_codex_provider_base_url_text(value: &str) -> Result<String, Sub2ApiError> {
+    let mut url = normalize_base_url(value)?;
+    let path = url.path().trim_end_matches('/');
+    if let Some(path) = path.strip_suffix("/v1") {
+        let path = if path.is_empty() { "/" } else { path }.to_owned();
+        url.set_path(&path);
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn connection_target(
+    input: &Sub2ApiConfigInput,
+    resolve_codex: impl FnOnce(&str) -> Result<String, Sub2ApiError>,
+) -> Result<(String, String, bool), Sub2ApiError> {
+    let codex_provider = input.codex_provider.trim().to_owned();
+    match input.upstream {
+        Sub2ApiUpstream::Codex if input.custom_base_url => {
+            if !codex_provider.is_empty() {
+                return Err(Sub2ApiError::ProviderWithCustomBaseUrl);
+            }
+            Ok((
+                normalized_base_url_text(&input.base_url)?,
+                String::new(),
+                true,
+            ))
+        }
+        Sub2ApiUpstream::Codex => Ok((resolve_codex(&codex_provider)?, codex_provider, false)),
+        Sub2ApiUpstream::Claude => Ok((
+            normalized_base_url_text(&input.base_url)?,
+            String::new(),
+            true,
+        )),
+    }
+}
+
 fn session_scope(config: &StoredConfig) -> String {
     let password_fingerprint = crate::hashing::sha256_hex(config.password.as_bytes());
     crate::hashing::sha256_hex(
@@ -1167,10 +1241,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        default_display_name_for_slot, definition_for, map_stats, metric_template,
-        normalize_base_url, session_scope, should_apply_metric_template, AccountStats,
-        AccountStatsDay, StoredConfig, Sub2ApiClient, Sub2ApiError, Sub2ApiProvider,
-        Sub2ApiProviders,
+        connection_target, default_display_name_for_slot, definition_for, map_stats,
+        metric_template, normalize_base_url, normalized_codex_provider_base_url_text,
+        session_scope, should_apply_metric_template, AccountStats, AccountStatsDay, StoredConfig,
+        Sub2ApiClient, Sub2ApiConfigInput, Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
     };
     use crate::providers::{
         codex::{client::UsageResponse, mapper::map_usage},
@@ -1334,6 +1408,8 @@ mod tests {
     fn metric_template_runs_once_per_version_or_upstream_change() {
         let mut config = StoredConfig {
             base_url: "https://sub2api.example.com".into(),
+            codex_provider: String::new(),
+            custom_base_url: true,
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Codex,
@@ -1363,6 +1439,8 @@ mod tests {
     fn cached_sessions_are_scoped_to_the_saved_password() {
         let mut config = StoredConfig {
             base_url: "https://sub2api.example.com".into(),
+            codex_provider: String::new(),
+            custom_base_url: true,
             email: "admin@example.com".into(),
             password: "first-password".into(),
             upstream: super::Sub2ApiUpstream::Codex,
@@ -1508,6 +1586,8 @@ mod tests {
         );
         let config = StoredConfig {
             base_url,
+            codex_provider: String::new(),
+            custom_base_url: true,
             email: "admin@example.com".into(),
             password: "secret-password".into(),
             upstream: super::Sub2ApiUpstream::Codex,
@@ -1531,6 +1611,62 @@ mod tests {
         );
         assert!(normalize_base_url("file:///tmp/sub2api").is_err());
         assert!(normalize_base_url("https://user:secret@example.test").is_err());
+    }
+
+    #[test]
+    fn codex_provider_urls_are_converted_from_openai_to_instance_roots() {
+        assert_eq!(
+            normalized_codex_provider_base_url_text("https://quota.example.test/v1/").unwrap(),
+            "https://quota.example.test"
+        );
+        assert_eq!(
+            normalized_codex_provider_base_url_text("https://quota.example.test/sub2/v1").unwrap(),
+            "https://quota.example.test/sub2"
+        );
+    }
+
+    #[test]
+    fn codex_connection_targets_cannot_override_resolved_provider_urls() {
+        let input = Sub2ApiConfigInput {
+            base_url: "https://ignored.example.com".into(),
+            codex_provider: " exact-provider ".into(),
+            custom_base_url: false,
+            email: "admin@example.com".into(),
+            password: "secret".into(),
+            upstream: super::Sub2ApiUpstream::Codex,
+        };
+
+        let target = connection_target(&input, |provider| {
+            assert_eq!(provider, "exact-provider");
+            Ok("https://resolved.example.com".into())
+        })
+        .unwrap();
+
+        assert_eq!(
+            target,
+            (
+                "https://resolved.example.com".into(),
+                "exact-provider".into(),
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn custom_codex_urls_reject_provider_names() {
+        let input = Sub2ApiConfigInput {
+            base_url: "https://custom.example.com".into(),
+            codex_provider: "provider-must-be-empty".into(),
+            custom_base_url: true,
+            email: "admin@example.com".into(),
+            password: "secret".into(),
+            upstream: super::Sub2ApiUpstream::Codex,
+        };
+
+        assert_eq!(
+            connection_target(&input, |_| unreachable!()).unwrap_err(),
+            Sub2ApiError::ProviderWithCustomBaseUrl
+        );
     }
 
     #[test]
@@ -1733,6 +1869,8 @@ mod tests {
         );
         let config = StoredConfig {
             base_url,
+            codex_provider: String::new(),
+            custom_base_url: true,
             email: "admin@example.com".into(),
             password: "secret-password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
@@ -1775,6 +1913,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.upstream, super::Sub2ApiUpstream::Codex);
+        assert!(config.codex_provider.is_empty());
+        assert!(config.custom_base_url);
         assert_eq!(config.metric_template_version, 0);
     }
 

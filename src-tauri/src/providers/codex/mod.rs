@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod client;
+pub mod config;
 pub mod local_usage;
 pub mod mapper;
 pub mod reset_claim;

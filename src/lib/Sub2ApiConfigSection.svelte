@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import {
     clearSub2ApiConfig,
     deleteSub2ApiConfig,
     getSub2ApiConfigState,
+    resolveSub2ApiCodexProvider,
     saveSub2ApiConfig,
   } from './backend';
   import Icon from './Icon.svelte';
@@ -22,11 +23,15 @@
   let connectionState = $state<Sub2ApiConfigState>({
     configured: false,
     baseUrl: '',
+    codexProvider: '',
+    customBaseUrl: false,
     email: '',
     upstream: 'codex',
   });
   let open = $state(false);
   let baseUrl = $state('');
+  let codexProvider = $state('');
+  let customBaseUrl = $state(false);
   let email = $state('');
   let password = $state('');
   let upstream = $state<Sub2ApiUpstream>('codex');
@@ -35,16 +40,26 @@
   let confirmingClear = $state(false);
   let confirmingItemRemoval = $state(false);
   let error = $state<string | null>(null);
+  let providerError = $state<string | null>(null);
+  let resolvingProvider = $state(false);
+  let providerResolution = 0;
+  let providerResolutionTimer: number | undefined;
   let toggleButton = $state<HTMLButtonElement>();
   let clearButton = $state<HTMLButtonElement>();
   let clearCancelButton = $state<HTMLButtonElement>();
   let removeItemButton = $state<HTMLButtonElement>();
   let removeItemCancelButton = $state<HTMLButtonElement>();
   const upstreamOptions: Sub2ApiUpstream[] = ['codex', 'claude'];
+  const providerResolutionDelayMs = 300;
 
+  const endpointReady = $derived(
+    upstream === 'codex' && !customBaseUrl
+      ? Boolean(codexProvider.trim() && baseUrl.trim() && !providerError && !resolvingProvider)
+      : Boolean(baseUrl.trim()),
+  );
   const canSave = $derived(
     Boolean(
-      baseUrl.trim() && email.trim() && (connectionState.configured || password.trim()) && !saving,
+      endpointReady && email.trim() && (connectionState.configured || password.trim()) && !saving,
     ),
   );
 
@@ -54,14 +69,25 @@
     return fallback;
   }
 
+  function cancelProviderResolution() {
+    if (providerResolutionTimer !== undefined) window.clearTimeout(providerResolutionTimer);
+    providerResolutionTimer = undefined;
+  }
+
   function resetEditor(next = connectionState) {
     baseUrl = next.baseUrl;
+    codexProvider = next.codexProvider ?? '';
+    customBaseUrl = next.upstream === 'claude' || Boolean(next.customBaseUrl);
     email = next.email;
     upstream = next.upstream;
     password = '';
     revealPassword = false;
     confirmingClear = false;
     error = null;
+    providerError = null;
+    resolvingProvider = false;
+    cancelProviderResolution();
+    providerResolution += 1;
   }
 
   function syncRememberedUpstream(next: Sub2ApiConfigState) {
@@ -72,6 +98,62 @@
   function toggleEditor() {
     open = !open;
     if (open) resetEditor();
+    else {
+      cancelProviderResolution();
+      resolvingProvider = false;
+      providerResolution += 1;
+    }
+  }
+
+  function selectUpstream(next: Sub2ApiUpstream) {
+    if (upstream === next) return;
+    upstream = next;
+    baseUrl = '';
+    codexProvider = '';
+    customBaseUrl = next === 'claude';
+    providerError = null;
+    resolvingProvider = false;
+    cancelProviderResolution();
+    providerResolution += 1;
+  }
+
+  function setCustomBaseUrl(next: boolean) {
+    customBaseUrl = next;
+    baseUrl = '';
+    codexProvider = '';
+    providerError = null;
+    resolvingProvider = false;
+    cancelProviderResolution();
+    providerResolution += 1;
+  }
+
+  function updateCodexProvider(value: string) {
+    codexProvider = value;
+    baseUrl = '';
+    providerError = null;
+    cancelProviderResolution();
+    const candidate = value.trim();
+    const resolution = ++providerResolution;
+    if (!candidate || upstream !== 'codex' || customBaseUrl) {
+      resolvingProvider = false;
+      return;
+    }
+    resolvingProvider = true;
+    providerResolutionTimer = window.setTimeout(() => {
+      providerResolutionTimer = undefined;
+      void resolveSub2ApiCodexProvider(candidate)
+        .then((resolved) => {
+          if (resolution === providerResolution) baseUrl = resolved;
+        })
+        .catch((cause) => {
+          if (resolution === providerResolution) {
+            providerError = errorMessage(cause, 'The Codex provider could not be resolved.');
+          }
+        })
+        .finally(() => {
+          if (resolution === providerResolution) resolvingProvider = false;
+        });
+    }, providerResolutionDelayMs);
   }
 
   async function save() {
@@ -79,6 +161,8 @@
     const previousState = connectionState;
     const submitted = {
       baseUrl: baseUrl.trim(),
+      codexProvider: codexProvider.trim(),
+      customBaseUrl,
       email: email.trim(),
       password,
       upstream,
@@ -86,6 +170,8 @@
     const optimisticState: Sub2ApiConfigState = {
       configured: true,
       baseUrl: submitted.baseUrl,
+      codexProvider: submitted.codexProvider,
+      customBaseUrl: submitted.customBaseUrl,
       email: submitted.email,
       upstream: submitted.upstream,
     };
@@ -104,6 +190,8 @@
       connectionState = previousState;
       syncRememberedUpstream(previousState);
       baseUrl = submitted.baseUrl;
+      codexProvider = submitted.codexProvider;
+      customBaseUrl = submitted.customBaseUrl;
       email = submitted.email;
       upstream = submitted.upstream;
       revealPassword = false;
@@ -204,6 +292,11 @@
         open = true;
       });
   });
+
+  onDestroy(() => {
+    cancelProviderResolution();
+    providerResolution += 1;
+  });
 </script>
 
 <section class="sub2api-config-section" aria-label="Sub2API Connection">
@@ -236,8 +329,9 @@
                   type="radio"
                   name={`${providerId}-upstream`}
                   value={option}
-                  bind:group={upstream}
+                  checked={upstream === option}
                   disabled={saving}
+                  onchange={() => selectUpstream(option)}
                 />
                 <ProviderIcon providerId={option} size={15} />
                 <span>{option === 'claude' ? 'Claude' : 'Codex'}</span>
@@ -245,6 +339,36 @@
             {/each}
           </div>
         </fieldset>
+        {#if upstream === 'codex'}
+          <label>
+            <span>Provider</span>
+            <input
+              type="text"
+              value={codexProvider}
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Provider or profile"
+              aria-label="Codex provider or profile"
+              disabled={saving || customBaseUrl}
+              oninput={(event) => updateCodexProvider(event.currentTarget.value)}
+            />
+          </label>
+          {#if providerError}<div class="config-error" role="alert">{providerError}</div>{/if}
+          <div class="custom-base-url-row">
+            <span>Custom Base URL</span>
+            <label class="switch">
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label="Use custom Sub2API Base URL"
+                checked={customBaseUrl}
+                disabled={saving}
+                onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
+              />
+              <span></span>
+            </label>
+          </div>
+        {/if}
         <label>
           <span>Base URL</span>
           <input
@@ -254,7 +378,7 @@
             spellcheck="false"
             placeholder="https://sub2api.example.com"
             aria-label="Sub2API Base URL"
-            disabled={saving}
+            disabled={saving || (upstream === 'codex' && !customBaseUrl)}
           />
         </label>
         <label>
@@ -549,6 +673,23 @@
     color: var(--secondary);
     font-size: 10px;
     font-weight: 600;
+  }
+
+  .custom-base-url-row {
+    display: flex;
+    min-height: 24px;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--secondary);
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .custom-base-url-row .switch input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
   }
 
   .sub2api-config-editor input {
