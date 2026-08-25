@@ -24,7 +24,10 @@ use crate::models::{
 use crate::storage::Storage;
 
 use super::{
-    claude::map_sub2api_usage,
+    claude::{
+        config::{resolve_anthropic_base_url, ClaudeConfigError},
+        map_sub2api_usage,
+    },
     codex::{
         client::UsageResponse,
         config::{resolve_provider_base_url, CodexConfigError},
@@ -323,12 +326,14 @@ impl StoredConfig {
 enum Sub2ApiError {
     #[error("Configure the Sub2API connection in Customize.")]
     MissingConfig,
-    #[error("Enter a valid Sub2API Base URL, email, and password.")]
+    #[error("Enter a valid Base URL, email, and password.")]
     InvalidConfig,
     #[error("Clear Provider when using a custom Base URL.")]
     ProviderWithCustomBaseUrl,
     #[error(transparent)]
     CodexConfig(#[from] CodexConfigError),
+    #[error(transparent)]
+    ClaudeConfig(#[from] ClaudeConfigError),
     #[error("The Sub2API connection could not be read or updated securely.")]
     CredentialStorage,
     #[error("Sub2API rejected the administrator email or password.")]
@@ -359,7 +364,7 @@ impl From<Sub2ApiError> for ProviderError {
             | Sub2ApiError::TwoFactorRequired => Kind::Authentication,
             Sub2ApiError::Permission => Kind::Permission,
             Sub2ApiError::CredentialStorage => Kind::CredentialStorage,
-            Sub2ApiError::CodexConfig(_) => Kind::LocalData,
+            Sub2ApiError::CodexConfig(_) | Sub2ApiError::ClaudeConfig(_) => Kind::LocalData,
             Sub2ApiError::RateLimited => Kind::RateLimited,
             Sub2ApiError::RequestFailed(_) | Sub2ApiError::ConnectionFailed => Kind::Network,
             Sub2ApiError::InvalidConfig | Sub2ApiError::ProviderWithCustomBaseUrl => Kind::Internal,
@@ -710,8 +715,11 @@ impl Sub2ApiProvider {
             input.password.trim().to_owned()
         };
         let apply_metric_template = should_apply_metric_template(previous.as_ref(), input.upstream);
-        let (base_url, codex_provider, custom_base_url) =
-            connection_target(&input, resolve_codex_provider_base_url)?;
+        let (base_url, codex_provider, custom_base_url) = connection_target(
+            &input,
+            resolve_codex_provider_base_url,
+            resolve_claude_base_url,
+        )?;
         let config = StoredConfig {
             base_url,
             codex_provider,
@@ -1032,6 +1040,14 @@ pub fn codex_provider_base_url(value: &str) -> Result<String, ProviderError> {
     resolve_codex_provider_base_url(value).map_err(ProviderError::from)
 }
 
+fn resolve_claude_base_url() -> Result<String, Sub2ApiError> {
+    normalized_base_url_text(&resolve_anthropic_base_url()?)
+}
+
+pub fn claude_base_url() -> Result<String, ProviderError> {
+    resolve_claude_base_url().map_err(ProviderError::from)
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1049,6 +1065,7 @@ fn normalized_codex_provider_base_url_text(value: &str) -> Result<String, Sub2Ap
 fn connection_target(
     input: &Sub2ApiConfigInput,
     resolve_codex: impl FnOnce(&str) -> Result<String, Sub2ApiError>,
+    resolve_claude: impl FnOnce() -> Result<String, Sub2ApiError>,
 ) -> Result<(String, String, bool), Sub2ApiError> {
     let codex_provider = input.codex_provider.trim().to_owned();
     match input.upstream {
@@ -1063,11 +1080,12 @@ fn connection_target(
             ))
         }
         Sub2ApiUpstream::Codex => Ok((resolve_codex(&codex_provider)?, codex_provider, false)),
-        Sub2ApiUpstream::Claude => Ok((
+        Sub2ApiUpstream::Claude if input.custom_base_url => Ok((
             normalized_base_url_text(&input.base_url)?,
             String::new(),
             true,
         )),
+        Sub2ApiUpstream::Claude => Ok((resolve_claude()?, String::new(), false)),
     }
 }
 
@@ -1636,10 +1654,14 @@ mod tests {
             upstream: super::Sub2ApiUpstream::Codex,
         };
 
-        let target = connection_target(&input, |provider| {
-            assert_eq!(provider, "exact-provider");
-            Ok("https://resolved.example.com".into())
-        })
+        let target = connection_target(
+            &input,
+            |provider| {
+                assert_eq!(provider, "exact-provider");
+                Ok("https://resolved.example.com".into())
+            },
+            || unreachable!(),
+        )
         .unwrap();
 
         assert_eq!(
@@ -1664,8 +1686,50 @@ mod tests {
         };
 
         assert_eq!(
-            connection_target(&input, |_| unreachable!()).unwrap_err(),
+            connection_target(&input, |_| unreachable!(), || unreachable!()).unwrap_err(),
             Sub2ApiError::ProviderWithCustomBaseUrl
+        );
+    }
+
+    #[test]
+    fn claude_connection_targets_require_resolution_unless_custom_is_enabled() {
+        let resolved = Sub2ApiConfigInput {
+            base_url: "https://ignored.example.com".into(),
+            codex_provider: String::new(),
+            custom_base_url: false,
+            email: "admin@example.com".into(),
+            password: "secret".into(),
+            upstream: super::Sub2ApiUpstream::Claude,
+        };
+        assert_eq!(
+            connection_target(
+                &resolved,
+                |_| unreachable!(),
+                || Ok("https://resolved-claude.example.com".into())
+            )
+            .unwrap(),
+            (
+                "https://resolved-claude.example.com".into(),
+                String::new(),
+                false
+            )
+        );
+
+        let custom = Sub2ApiConfigInput {
+            base_url: "https://custom-claude.example.com/api/v1".into(),
+            codex_provider: String::new(),
+            custom_base_url: true,
+            email: "admin@example.com".into(),
+            password: "secret".into(),
+            upstream: super::Sub2ApiUpstream::Claude,
+        };
+        assert_eq!(
+            connection_target(&custom, |_| unreachable!(), || unreachable!()).unwrap(),
+            (
+                "https://custom-claude.example.com".into(),
+                String::new(),
+                true
+            )
         );
     }
 

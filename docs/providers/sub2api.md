@@ -27,6 +27,11 @@ Base URL from `[model_providers.<name>].base_url`; that URL is read-only in the 
 Enable **Custom Base URL** to enter an endpoint manually. Custom Base URL mode clears and disables
 Provider, so the two sources cannot be combined.
 
+For a Claude upstream, OpenQuota first reads `ANTHROPIC_BASE_URL` from
+`~/.claude/settings.json` (including its `env` object), then falls back to the environment. The
+resolved Base URL is read-only by default. Enable **Custom Base URL** to replace it with a manually
+entered endpoint.
+
 Each complete connection is stored under its own entry in the operating system's credential store.
 The connection is stored and confirmed as soon as **Save** is selected, without first authenticating
 it or fetching an access token. OpenQuota refreshes its quota in the background after the editor

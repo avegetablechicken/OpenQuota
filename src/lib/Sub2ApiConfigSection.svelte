@@ -4,6 +4,7 @@
     clearSub2ApiConfig,
     deleteSub2ApiConfig,
     getSub2ApiConfigState,
+    resolveSub2ApiClaudeBaseUrl,
     resolveSub2ApiCodexProvider,
     saveSub2ApiConfig,
   } from './backend';
@@ -44,6 +45,9 @@
   let resolvingProvider = $state(false);
   let providerResolution = 0;
   let providerResolutionTimer: number | undefined;
+  let claudeBaseUrlError = $state<string | null>(null);
+  let resolvingClaudeBaseUrl = $state(false);
+  let claudeBaseUrlResolution = 0;
   let toggleButton = $state<HTMLButtonElement>();
   let clearButton = $state<HTMLButtonElement>();
   let clearCancelButton = $state<HTMLButtonElement>();
@@ -53,8 +57,10 @@
   const providerResolutionDelayMs = 300;
 
   const endpointReady = $derived(
-    upstream === 'codex' && !customBaseUrl
-      ? Boolean(codexProvider.trim() && baseUrl.trim() && !providerError && !resolvingProvider)
+    !customBaseUrl
+      ? upstream === 'codex'
+        ? Boolean(codexProvider.trim() && baseUrl.trim() && !providerError && !resolvingProvider)
+        : Boolean(baseUrl.trim() && !claudeBaseUrlError && !resolvingClaudeBaseUrl)
       : Boolean(baseUrl.trim()),
   );
   const canSave = $derived(
@@ -77,7 +83,7 @@
   function resetEditor(next = connectionState) {
     baseUrl = next.baseUrl;
     codexProvider = next.codexProvider ?? '';
-    customBaseUrl = next.upstream === 'claude' || Boolean(next.customBaseUrl);
+    customBaseUrl = Boolean(next.customBaseUrl);
     email = next.email;
     upstream = next.upstream;
     password = '';
@@ -88,6 +94,9 @@
     resolvingProvider = false;
     cancelProviderResolution();
     providerResolution += 1;
+    claudeBaseUrlError = null;
+    resolvingClaudeBaseUrl = false;
+    claudeBaseUrlResolution += 1;
   }
 
   function syncRememberedUpstream(next: Sub2ApiConfigState) {
@@ -97,11 +106,15 @@
 
   function toggleEditor() {
     open = !open;
-    if (open) resetEditor();
-    else {
+    if (open) {
+      resetEditor();
+      if (upstream === 'claude' && !customBaseUrl) resolveClaudeBaseUrl();
+    } else {
       cancelProviderResolution();
       resolvingProvider = false;
       providerResolution += 1;
+      resolvingClaudeBaseUrl = false;
+      claudeBaseUrlResolution += 1;
     }
   }
 
@@ -110,11 +123,15 @@
     upstream = next;
     baseUrl = '';
     codexProvider = '';
-    customBaseUrl = next === 'claude';
+    customBaseUrl = false;
     providerError = null;
     resolvingProvider = false;
     cancelProviderResolution();
     providerResolution += 1;
+    claudeBaseUrlError = null;
+    resolvingClaudeBaseUrl = false;
+    claudeBaseUrlResolution += 1;
+    if (next === 'claude') resolveClaudeBaseUrl();
   }
 
   function setCustomBaseUrl(next: boolean) {
@@ -125,6 +142,10 @@
     resolvingProvider = false;
     cancelProviderResolution();
     providerResolution += 1;
+    claudeBaseUrlError = null;
+    resolvingClaudeBaseUrl = false;
+    claudeBaseUrlResolution += 1;
+    if (!next && upstream === 'claude') resolveClaudeBaseUrl();
   }
 
   function updateCodexProvider(value: string) {
@@ -154,6 +175,25 @@
           if (resolution === providerResolution) resolvingProvider = false;
         });
     }, providerResolutionDelayMs);
+  }
+
+  function resolveClaudeBaseUrl() {
+    const resolution = ++claudeBaseUrlResolution;
+    baseUrl = '';
+    claudeBaseUrlError = null;
+    resolvingClaudeBaseUrl = true;
+    void resolveSub2ApiClaudeBaseUrl()
+      .then((resolved) => {
+        if (resolution === claudeBaseUrlResolution) baseUrl = resolved;
+      })
+      .catch((cause) => {
+        if (resolution === claudeBaseUrlResolution) {
+          claudeBaseUrlError = errorMessage(cause, 'The Claude Base URL could not be resolved.');
+        }
+      })
+      .finally(() => {
+        if (resolution === claudeBaseUrlResolution) resolvingClaudeBaseUrl = false;
+      });
   }
 
   async function save() {
@@ -286,6 +326,7 @@
         connectionState = next;
         syncRememberedUpstream(next);
         resetEditor(next);
+        if (next.upstream === 'claude' && !next.customBaseUrl) resolveClaudeBaseUrl();
       })
       .catch((cause) => {
         error = errorMessage(cause, 'The Sub2API connection could not be read.');
@@ -296,6 +337,7 @@
   onDestroy(() => {
     cancelProviderResolution();
     providerResolution += 1;
+    claudeBaseUrlResolution += 1;
   });
 </script>
 
@@ -354,20 +396,23 @@
             />
           </label>
           {#if providerError}<div class="config-error" role="alert">{providerError}</div>{/if}
-          <div class="custom-base-url-row">
-            <span>Custom Base URL</span>
-            <label class="switch">
-              <input
-                type="checkbox"
-                role="switch"
-                aria-label="Use custom Sub2API Base URL"
-                checked={customBaseUrl}
-                disabled={saving}
-                onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
-              />
-              <span></span>
-            </label>
-          </div>
+        {/if}
+        <div class="custom-base-url-row">
+          <span>Custom Base URL</span>
+          <label class="switch">
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label="Use custom Base URL"
+              checked={customBaseUrl}
+              disabled={saving}
+              onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
+            />
+            <span></span>
+          </label>
+        </div>
+        {#if upstream === 'claude' && claudeBaseUrlError}
+          <div class="config-error" role="alert">{claudeBaseUrlError}</div>
         {/if}
         <label>
           <span>Base URL</span>
@@ -377,8 +422,8 @@
             autocomplete="url"
             spellcheck="false"
             placeholder="https://sub2api.example.com"
-            aria-label="Sub2API Base URL"
-            disabled={saving || (upstream === 'codex' && !customBaseUrl)}
+            aria-label="Base URL"
+            disabled={saving || !customBaseUrl}
           />
         </label>
         <label>

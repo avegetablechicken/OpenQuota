@@ -1,6 +1,7 @@
 mod accounts;
 pub mod auth;
 mod client;
+pub mod config;
 mod local_usage;
 mod mapper;
 

@@ -6,7 +6,8 @@ use std::{sync::Arc, time::Duration};
 #[cfg(unix)]
 use crate::{child_process, storage::Storage};
 
-const IDENTITY_KEYS: &[&str] = &[
+const SNAPSHOT_KEYS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
     "XDG_CONFIG_HOME",
@@ -30,12 +31,12 @@ pub fn initialize(launch_snapshot: Option<HashMap<String, String>>) {
 
 /// Returns provider configuration without ever persisting credentials.
 ///
-/// The process environment always wins. On Unix, identity-sensitive values captured from the
-/// login shell on the previous launch remain fixed for this session so provider IDs cannot change
-/// while the app is running.
+/// The process environment always wins. On Unix, supported values captured from the login shell on
+/// the previous launch remain fixed for this session so provider configuration cannot drift while
+/// the app is running.
 pub fn value(name: &str) -> Option<String> {
     process_value(name).or_else(|| {
-        if !IDENTITY_KEYS.contains(&name) {
+        if !SNAPSHOT_KEYS.contains(&name) {
             return None;
         }
         ENVIRONMENT
@@ -109,7 +110,7 @@ fn capture_login_shell_snapshot() -> Option<HashMap<String, String>> {
     }
 
     parse_environment(&output.stdout, BEGIN, END).map(|environment| {
-        IDENTITY_KEYS
+        SNAPSHOT_KEYS
             .iter()
             .filter_map(|key| {
                 environment
@@ -178,12 +179,17 @@ mod tests {
     }
 
     #[test]
-    fn identity_snapshot_serializes_without_secret_keys() {
+    fn configuration_snapshot_serializes_supported_values_without_secret_keys() {
         let mut source = HashMap::new();
         source.insert("CLAUDE_CONFIG_DIR".to_owned(), "/tmp/claude".to_owned());
         source.insert("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), "secret".to_owned());
 
-        let filtered = super::IDENTITY_KEYS
+        source.insert(
+            "ANTHROPIC_BASE_URL".to_owned(),
+            "https://claude.example.com".to_owned(),
+        );
+
+        let filtered = super::SNAPSHOT_KEYS
             .iter()
             .filter_map(|key| {
                 source
@@ -197,5 +203,9 @@ mod tests {
             Some("/tmp/claude")
         );
         assert!(!filtered.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
+        assert_eq!(
+            filtered.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://claude.example.com")
+        );
     }
 }

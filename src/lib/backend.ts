@@ -63,6 +63,10 @@ export function resolveSub2ApiCodexProvider(provider: string) {
   return invoke<string>('resolve_sub2api_codex_provider', { provider });
 }
 
+export function resolveSub2ApiClaudeBaseUrl() {
+  return invoke<string>('resolve_sub2api_claude_base_url');
+}
+
 export function saveSub2ApiConfig(providerId: string, config: Sub2ApiConfigInput) {
   return invoke<Sub2ApiConfigState>('save_sub2api_config', { providerId, config });
 }

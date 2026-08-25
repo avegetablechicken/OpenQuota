@@ -13,8 +13,8 @@ use crate::{
     pacing::NotificationEvaluator,
     providers::{
         sub2api::{
-            codex_provider_base_url, metric_template, Sub2ApiConfigInput, Sub2ApiConfigState,
-            Sub2ApiProviders,
+            claude_base_url, codex_provider_base_url, metric_template, Sub2ApiConfigInput,
+            Sub2ApiConfigState, Sub2ApiProviders,
         },
         ProviderRegistry, UsageProvider,
     },
@@ -339,6 +339,14 @@ pub async fn resolve_sub2api_codex_provider(provider: String) -> Result<String, 
     tauri::async_runtime::spawn_blocking(move || codex_provider_base_url(&provider))
         .await
         .map_err(|_| "The Codex provider could not be resolved.".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn resolve_sub2api_claude_base_url() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(claude_base_url)
+        .await
+        .map_err(|_| "The Claude Base URL could not be resolved.".to_owned())?
         .map_err(|error| error.to_string())
 }
 
