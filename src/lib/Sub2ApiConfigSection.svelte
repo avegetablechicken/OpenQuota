@@ -75,22 +75,41 @@
 
   async function save() {
     if (!canSave) return;
+    const previousState = connectionState;
+    const submitted = {
+      baseUrl: baseUrl.trim(),
+      email: email.trim(),
+      password,
+      upstream,
+    };
+    const optimisticState: Sub2ApiConfigState = {
+      configured: true,
+      baseUrl: submitted.baseUrl,
+      email: submitted.email,
+      upstream: submitted.upstream,
+    };
     saving = true;
     error = null;
+    connectionState = optimisticState;
+    syncRememberedUpstream(optimisticState);
+    resetEditor(optimisticState);
+    open = false;
+    await tick();
+    toggleButton?.focus();
     try {
-      connectionState = await saveSub2ApiConfig(providerId, {
-        baseUrl: baseUrl.trim(),
-        email: email.trim(),
-        password,
-        upstream,
-      });
+      connectionState = await saveSub2ApiConfig(providerId, submitted);
       syncRememberedUpstream(connectionState);
-      resetEditor(connectionState);
-      open = false;
-      await tick();
-      toggleButton?.focus();
     } catch (cause) {
+      connectionState = previousState;
+      syncRememberedUpstream(previousState);
+      baseUrl = submitted.baseUrl;
+      email = submitted.email;
+      upstream = submitted.upstream;
+      revealPassword = false;
+      confirmingClear = false;
+      open = true;
       error = errorMessage(cause, 'The Sub2API connection could not be saved.');
+      await tick();
     } finally {
       password = '';
       saving = false;
@@ -274,7 +293,7 @@
 
         <div class="sub2api-config-actions">
           <button class="primary" type="button" disabled={!canSave} onclick={() => void save()}
-            >{saving ? 'Connecting…' : 'Save'}</button
+            >{saving ? 'Saving…' : 'Save'}</button
           >
           {#if connectionState.configured}
             <button

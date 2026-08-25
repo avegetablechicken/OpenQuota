@@ -702,11 +702,10 @@ impl Sub2ApiProvider {
             return Err(Sub2ApiError::InvalidConfig.into());
         }
 
-        let session = self.validate_config(&config)?;
         self.write_config(&config)?;
         self.set_configured(true)?;
         if let Ok(mut cached) = self.session.lock() {
-            *cached = session;
+            *cached = None;
         }
         Ok(Sub2ApiConfigSaveOutcome {
             state: config.state(),
@@ -742,28 +741,6 @@ impl Sub2ApiProvider {
             account,
             account_count,
         })
-    }
-
-    fn validate_config(
-        &self,
-        config: &StoredConfig,
-    ) -> Result<Option<CachedSession>, Sub2ApiError> {
-        let client = Sub2ApiClient::new(&config.base_url)?;
-        let login = client.login(&config.email, &config.password)?;
-        let (account, account_count) =
-            match client.first_account(login.value.as_str(), config.upstream) {
-                Ok(account) => account,
-                Err(Sub2ApiError::NoUpstreamAccount(_)) => return Ok(None),
-                Err(error) => return Err(error),
-            };
-        client.usage(login.value.as_str(), account.id, config.upstream)?;
-        Ok(Some(CachedSession {
-            scope: session_scope(config),
-            token: login.value,
-            expires_at: token_expiry(login.expires_in),
-            account,
-            account_count,
-        }))
     }
 
     fn session(&self, config: &StoredConfig) -> Result<CachedSession, Sub2ApiError> {
@@ -1021,11 +998,13 @@ fn normalized_base_url_text(value: &str) -> Result<String, Sub2ApiError> {
 }
 
 fn session_scope(config: &StoredConfig) -> String {
+    let password_fingerprint = crate::hashing::sha256_hex(config.password.as_bytes());
     crate::hashing::sha256_hex(
         format!(
-            "{}\0{}\0{}",
+            "{}\0{}\0{}\0{}",
             config.base_url,
             config.email,
+            password_fingerprint,
             config.upstream.label()
         )
         .as_bytes(),
@@ -1189,8 +1168,9 @@ mod tests {
 
     use super::{
         default_display_name_for_slot, definition_for, map_stats, metric_template,
-        normalize_base_url, should_apply_metric_template, AccountStats, AccountStatsDay,
-        StoredConfig, Sub2ApiClient, Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
+        normalize_base_url, session_scope, should_apply_metric_template, AccountStats,
+        AccountStatsDay, StoredConfig, Sub2ApiClient, Sub2ApiError, Sub2ApiProvider,
+        Sub2ApiProviders,
     };
     use crate::providers::{
         codex::{client::UsageResponse, mapper::map_usage},
@@ -1380,6 +1360,22 @@ mod tests {
     }
 
     #[test]
+    fn cached_sessions_are_scoped_to_the_saved_password() {
+        let mut config = StoredConfig {
+            base_url: "https://sub2api.example.com".into(),
+            email: "admin@example.com".into(),
+            password: "first-password".into(),
+            upstream: super::Sub2ApiUpstream::Codex,
+            metric_template_version: super::METRIC_TEMPLATE_VERSION,
+        };
+        let first = session_scope(&config);
+
+        config.password = "second-password".into();
+
+        assert_ne!(session_scope(&config), first);
+    }
+
+    #[test]
     fn provider_slots_have_independent_ids_metrics_and_credentials() {
         let directory = tempdir().unwrap();
         let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
@@ -1497,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_admin_login_can_be_saved_without_an_active_codex_account() {
+    fn missing_upstream_is_reported_when_the_saved_connection_is_refreshed() {
         let responses = vec![
             r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
             r#"{"code":0,"message":"success","data":{"items":[],"total":0,"page":1,"page_size":1,"pages":0}}"#.into(),
@@ -1518,7 +1514,10 @@ mod tests {
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
 
-        assert!(provider.validate_config(&config).unwrap().is_none());
+        assert_eq!(
+            provider.refresh_snapshot(&config).unwrap_err(),
+            Sub2ApiError::NoUpstreamAccount(super::Sub2ApiUpstream::Codex)
+        );
         worker.join().unwrap();
     }
 

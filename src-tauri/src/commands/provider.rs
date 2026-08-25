@@ -156,6 +156,21 @@ fn incomplete_mutation_warning(action: &str) -> String {
     )
 }
 
+fn spawn_sub2api_refresh(
+    app: AppHandle,
+    service: Arc<ProviderService>,
+    settings: Arc<SettingsService>,
+    notifications: Arc<NotificationEvaluator>,
+    provider_id: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        service.refresh(&provider_id, true).await;
+        let usage = service.state();
+        let _ = app.emit("usage-state", &usage);
+        finish_refresh(&app, &usage, &settings, &notifications);
+    });
+}
+
 #[tauri::command]
 pub async fn get_provider_api_key_state(
     registry: State<'_, Arc<ProviderRegistry>>,
@@ -367,13 +382,22 @@ pub async fn save_sub2api_config(
     service
         .clear_provider_data(&provider_id)
         .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;
-    drop(command_guard);
-    drop(credential_guard);
-    service.refresh(&provider_id, true).await;
     let usage = service.state();
     let _ = app.emit("usage-state", &usage);
-    finish_refresh(&app, &usage, &settings, &notifications);
+    let refresh_service = service.inner().clone();
+    let refresh_settings = settings.inner().clone();
+    let refresh_notifications = notifications.inner().clone();
+    let refresh_provider_id = provider_id.clone();
+    drop(command_guard);
+    drop(credential_guard);
     crate::app_info!("auth", "Sub2API connection saved");
+    spawn_sub2api_refresh(
+        app,
+        refresh_service,
+        refresh_settings,
+        refresh_notifications,
+        refresh_provider_id,
+    );
     Ok(outcome.state)
 }
 

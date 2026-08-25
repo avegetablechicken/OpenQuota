@@ -21,8 +21,10 @@ password. Each click creates the next independent Sub2API item. OpenQuota signs 
 `/api/v1/admin/openai/accounts/:id/quota`.
 
 Each complete connection is stored under its own entry in the operating system's credential store.
-The password is not returned to the interface after it is saved, and login or quota response bodies
-are not written to OpenQuota logs. The small clear control beside **Save** removes only the
+The connection is stored and confirmed as soon as **Save** is selected, without first authenticating
+it or fetching an access token. OpenQuota refreshes its quota in the background after the editor
+closes. The password is not returned to the interface after it is saved, and login or quota response
+bodies are not written to OpenQuota logs. The small clear control beside **Save** removes only the
 Connection fields and keeps the Sub2API item. The **Delete Sub2API** row at the bottom removes the
 whole item, including an empty item whose login has not been saved yet.
 

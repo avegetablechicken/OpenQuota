@@ -81,6 +81,95 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByText('Account')).toBeInTheDocument();
   });
 
+  it('confirms a save before backend persistence finishes', async () => {
+    let resolveSave!: (value: {
+      configured: boolean;
+      baseUrl: string;
+      email: string;
+      upstream: string;
+    }) => void;
+    const pendingSave = new Promise<{
+      configured: boolean;
+      baseUrl: string;
+      email: string;
+      upstream: string;
+    }>((resolve) => {
+      resolveSave = resolve;
+    });
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === 'get_sub2api_config_state') {
+        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
+      }
+      if (command === 'save_sub2api_config') return pendingSave;
+      return Promise.reject(new Error(`unexpected command ${command}`));
+    });
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.input(screen.getByLabelText('Sub2API Base URL'), {
+      target: { value: 'https://pending.example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'pending@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'pending-password' },
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', expect.anything()),
+    );
+    expect(screen.getByText('pending@example.com')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Sub2API administrator password')).not.toBeInTheDocument();
+
+    resolveSave({
+      configured: true,
+      baseUrl: 'https://pending.example.com',
+      email: 'pending@example.com',
+      upstream: 'codex',
+    });
+    await waitFor(() => expect(screen.getByText('pending@example.com')).toBeInTheDocument());
+  });
+
+  it('restores the editor when optimistic persistence fails', async () => {
+    let rejectSave!: (reason: Error) => void;
+    const pendingSave = new Promise<never>((_resolve, reject) => {
+      rejectSave = reject;
+    });
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === 'get_sub2api_config_state') {
+        return Promise.resolve({ configured: false, baseUrl: '', email: '', upstream: 'codex' });
+      }
+      if (command === 'save_sub2api_config') return pendingSave;
+      return Promise.reject(new Error(`unexpected command ${command}`));
+    });
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.input(screen.getByLabelText('Sub2API Base URL'), {
+      target: { value: 'https://failed.example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'failed@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'failed-password' },
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByRole('button', { name: 'Edit' });
+    rejectSave(new Error('Credential store unavailable'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Credential store unavailable');
+    expect(screen.getByLabelText('Sub2API Base URL')).toHaveValue('https://failed.example.com');
+    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('failed@example.com');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('');
+    expect(screen.getByText('Not configured')).toBeInTheDocument();
+  });
+
   it('clears saved connection fields without deleting the Sub2API item', async () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === 'get_sub2api_config_state') {
