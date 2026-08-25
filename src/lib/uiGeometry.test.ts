@@ -87,6 +87,16 @@ describe('popover geometry contract', () => {
     );
   });
 
+  it('confines the new Base URL switch hit target without changing shared switches', () => {
+    expect(layoutCss).not.toMatch(/\.switch\s*{[^}]*position: relative;/s);
+    expect(coLocatedComponentCss).toMatch(
+      /\.custom-base-url-switch\s*{[^}]*position: relative;[^}]*width: 28px;[^}]*height: 16px;/s,
+    );
+    expect(coLocatedComponentCss).toMatch(
+      /\.custom-base-url-switch input\s*{[^}]*position: absolute;[^}]*inset: 0;[^}]*width: 100%;[^}]*height: 100%;[^}]*margin: 0;/s,
+    );
+  });
+
   it('keeps compact rows aligned and compact controls genuinely dense', () => {
     expect(css).toMatch(/:root\[data-density='compact'\] \.usage-row\s*{[^}]*padding: 3px 14px;/s);
     expect(css).toMatch(/:root\[data-density='compact'\] \.trend-row\s*{[^}]*padding: 6px 14px;/s);

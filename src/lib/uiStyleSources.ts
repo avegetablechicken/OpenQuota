@@ -8,6 +8,7 @@ import providerIconSource from './ProviderIcon.svelte?raw';
 import quotaMetricSource from './QuotaMetric.svelte?raw';
 import selectMenuSource from './SelectMenu.svelte?raw';
 import settingsSource from './SettingsScreen.svelte?raw';
+import sub2ApiConfigSource from './Sub2ApiConfigSection.svelte?raw';
 import totalSpendSource from './TotalSpend.svelte?raw';
 import usageMetricSource from './UsageMetric.svelte?raw';
 import usageTrendSource from './UsageTrend.svelte?raw';
@@ -23,6 +24,7 @@ const componentSources = [
   quotaMetricSource,
   selectMenuSource,
   settingsSource,
+  sub2ApiConfigSource,
   totalSpendSource,
   usageMetricSource,
   usageTrendSource,

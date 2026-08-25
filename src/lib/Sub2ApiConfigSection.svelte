@@ -399,7 +399,7 @@
         {/if}
         <div class="custom-base-url-row">
           <span>Custom Base URL</span>
-          <label class="switch">
+          <label class="switch custom-base-url-switch">
             <input
               type="checkbox"
               role="switch"
@@ -730,11 +730,28 @@
     font-weight: 600;
   }
 
-  .custom-base-url-row .switch input {
+  .custom-base-url-switch {
+    position: relative;
+    display: block;
+    width: 28px;
+    height: 16px;
+  }
+
+  .custom-base-url-switch input {
     position: absolute;
-    width: 1px;
-    height: 1px;
+    z-index: 1;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    border: 0;
+    padding: 0;
     opacity: 0;
+    cursor: pointer;
+  }
+
+  .custom-base-url-switch input:disabled {
+    cursor: default;
   }
 
   .sub2api-config-editor input {
