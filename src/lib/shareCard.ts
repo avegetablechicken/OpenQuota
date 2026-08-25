@@ -16,7 +16,6 @@ import {
 } from './providerIconPaths';
 import { fillRingSector, spendRingArcs } from './spendRing';
 import { SPEND_SCOPE_LABELS, type SpendProjection } from './totalSpend';
-import { sub2ApiDisplayName } from './sub2ApiUpstreams';
 import { USAGE_SCOPE_LABELS, usageHistoriesForMode } from './usageScopes';
 import type {
   AppSettings,
@@ -27,7 +26,6 @@ import type {
   UsageHistory,
   UsagePeriod,
   UsageViewMode,
-  Sub2ApiUpstream,
 } from './types';
 
 export const SHARE_CARD_WIDTH = 360;
@@ -91,7 +89,6 @@ interface SharePalette {
 interface ProviderShareCardOptions {
   providerId: string;
   providerNames?: Record<string, string>;
-  sub2ApiUpstreams?: Record<string, Sub2ApiUpstream>;
   plan: string | null;
   rows: ShareRow[];
 }
@@ -99,7 +96,6 @@ interface ProviderShareCardOptions {
 interface TotalSpendShareCardOptions {
   projections: SpendProjection[];
   providerNames?: Record<string, string>;
-  sub2ApiUpstreams?: Record<string, Sub2ApiUpstream>;
   metric: AppSettings['totalSpendMetric'];
   period: AppSettings['totalSpendPeriod'];
 }
@@ -267,7 +263,6 @@ export function renderProviderShareCard(
     catalog,
     options.providerId,
     options.providerNames,
-    options.sub2ApiUpstreams,
     options.plan,
   );
   const cardTop = OUTER_PADDING + HEADER_HEIGHT + CONTENT_GAP;
@@ -477,14 +472,11 @@ function drawProviderHeader(
   catalog: ProviderCatalogIndex,
   providerId: string,
   providerNames: Record<string, string> | undefined,
-  sub2ApiUpstreams: Record<string, Sub2ApiUpstream> | undefined,
   plan: string | null,
 ) {
   const iconColor = providerIconColor(providerId) ?? palette.text;
   drawProviderMark(context, providerId, OUTER_PADDING, OUTER_PADDING, 22, iconColor);
-  const name =
-    sub2ApiDisplayName(providerId, sub2ApiUpstreams?.[providerId], providerNames?.[providerId]) ??
-    catalog.displayName(providerId, providerNames);
+  const name = catalog.resolvedDisplayName(providerId, providerNames);
   context.fillStyle = palette.text;
   context.font = '600 15px system-ui';
   context.fillText(name, 48, 31);
@@ -701,11 +693,7 @@ function drawSpendBody(
         ? 'Others'
         : slice.id === UNPRICED_OTHERS_SPEND_ID
           ? 'Others (unpriced)'
-          : (sub2ApiDisplayName(
-              slice.id,
-              options.sub2ApiUpstreams?.[slice.id],
-              options.providerNames?.[slice.id],
-            ) ?? catalog.displayName(slice.id, options.providerNames)),
+          : catalog.resolvedDisplayName(slice.id, options.providerNames),
       legendLeft + 15,
       baseline,
       62,

@@ -1,6 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { get } from 'svelte/store';
 import Sub2ApiConfigSection from './Sub2ApiConfigSection.svelte';
+import {
+  forgetSub2ApiUpstream,
+  rememberSub2ApiUpstream,
+  sub2ApiUpstreams,
+} from './sub2ApiUpstreams';
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
@@ -29,7 +35,18 @@ describe('Sub2ApiConfigSection', () => {
     });
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    forgetSub2ApiUpstream('sub2api@2');
+  });
+
+  it('forgets a stale upstream when the configuration is not configured', async () => {
+    rememberSub2ApiUpstream('sub2api@2', 'codex', 'https://sub2api.example.com');
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+
+    await screen.findByText('Not configured');
+    expect(get(sub2ApiUpstreams)['sub2api@2']).toBeUndefined();
+  });
 
   it('saves a Claude upstream login without retaining the password in the UI', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api' });

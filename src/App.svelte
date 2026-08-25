@@ -50,7 +50,6 @@
   } from './lib/shareCard';
   import SettingsScreen from './lib/SettingsScreen.svelte';
   import { SettingsController } from './lib/settingsController.svelte';
-  import { sub2ApiDisplayName, sub2ApiUpstreams } from './lib/sub2ApiUpstreams';
   import type { SpendProjection } from './lib/totalSpend';
   import type { AppSettings, UsageViewState } from './lib/types';
   import { nextUpdateLabel, UpdateController } from './lib/updateController.svelte';
@@ -101,8 +100,7 @@
       (!settingsState.trayAvailable || settingsState.settings.windowMode === 'floating'),
   );
   const providerDisplayName = (id: string) =>
-    sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settingsState?.settings.providerNames[id]) ??
-    catalog.displayName(id, settingsState?.settings.providerNames);
+    catalog.resolvedDisplayName(id, settingsState?.settings.providerNames);
   const updates = new UpdateController();
   let resizeEdge = $state<PanelResizeEdge>(platform === 'windows' ? 'top' : 'bottom');
   const renderedResizeEdge = $derived(floatingWindow ? 'bottom' : resizeEdge);
@@ -448,7 +446,6 @@
       const canvas = renderProviderShareCard(catalog, {
         providerId,
         providerNames: current.settings.providerNames,
-        sub2ApiUpstreams: $sub2ApiUpstreams,
         plan: provider.plan,
         rows,
       });
@@ -466,7 +463,6 @@
       const canvas = renderTotalSpendShareCard(catalog, {
         projections,
         providerNames: current.settings.providerNames,
-        sub2ApiUpstreams: $sub2ApiUpstreams,
         metric: current.settings.totalSpendMetric,
         period: current.settings.totalSpendPeriod,
       });

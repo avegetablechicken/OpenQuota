@@ -27,7 +27,7 @@ const catalog: ProviderCatalog = {
     },
     {
       id: 'sub2api@2',
-      displayName: 'Sub2API 2',
+      displayName: 'Sub2API',
       shortName: 'S2',
       fallbackEnabled: false,
       localUsageSourceNote: null,
@@ -109,15 +109,14 @@ describe('TotalSpend Sub2API labels', () => {
       onShare: vi.fn(),
     });
 
-    expect(screen.getByText('Sub2API · Codex')).toBeInTheDocument();
-    expect(screen.getByText('Sub2API · Claude')).toBeInTheDocument();
+    expect(screen.getByText('Sub2API')).toBeInTheDocument();
+    expect(screen.getByText('Sub2API 2')).toBeInTheDocument();
     expect(
       screen.getByRole('img', {
-        name: 'Account-wide history from Sub2API · Codex and Sub2API · Claude.',
+        name: 'Account-wide history from Sub2API and Sub2API 2.',
       }),
     ).toBeInTheDocument();
     expect(screen.getByText('Accounts')).toBeInTheDocument();
-    expect(screen.queryByText('Sub2API 2')).not.toBeInTheDocument();
   });
 
   it('compresses an unsupported account scope while keeping its empty state visible', () => {
@@ -158,7 +157,7 @@ describe('TotalSpend Sub2API labels', () => {
     const view = render(TotalSpend, props);
 
     const legendColors = () =>
-      ['Sub2API · Codex', 'Sub2API · Claude'].map((name) =>
+      ['Sub2API', 'Sub2API 2'].map((name) =>
         screen.getByText(name).querySelector('i')?.getAttribute('style'),
       );
     const ringColors = () =>
@@ -198,7 +197,7 @@ describe('TotalSpend Sub2API labels', () => {
 
     expect(screen.getByRole('button', { name: 'Device' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('Codex')).toBeInTheDocument();
-    expect(screen.queryByText('Sub2API · Codex')).not.toBeInTheDocument();
+    expect(screen.queryByText('Sub2API')).not.toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
     expect(onViewModeChange).toHaveBeenCalledWith('account');
@@ -208,11 +207,11 @@ describe('TotalSpend Sub2API labels', () => {
       'aria-pressed',
       'true',
     );
-    expect(screen.getByText('Sub2API · Codex')).toBeInTheDocument();
+    expect(screen.getByText('Sub2API')).toBeInTheDocument();
     expect(screen.queryByText('Codex')).not.toBeInTheDocument();
     expect(
       screen.getByRole('img', {
-        name: 'Account-wide history from Sub2API · Codex.',
+        name: 'Account-wide history from Sub2API.',
       }),
     ).toBeInTheDocument();
   });

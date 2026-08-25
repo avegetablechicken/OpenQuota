@@ -62,7 +62,7 @@ describe('provider catalog index', () => {
       providers: [
         {
           id: 'sub2api@2',
-          displayName: 'Sub2API 2',
+          displayName: 'Sub2API',
           shortName: 'S2',
           fallbackEnabled: false,
           localUsageSourceNote: null,
@@ -90,9 +90,103 @@ describe('provider catalog index', () => {
         snapshot,
         snapshot.usageHistories.localDevice!,
         'localDevice',
-        'Sub2API · Claude',
+        'Sub2API 2',
       ),
-    ).toBe('From your Sub2API · Claude usage history');
+    ).toBe('From your Sub2API 2 usage history');
+  });
+
+  it('uses resolved provider names in provider messages', () => {
+    const catalog = new ProviderCatalogIndex({
+      providers: [
+        {
+          id: 'sub2api',
+          displayName: 'Sub2API',
+          shortName: 'S2',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'sub2api@2',
+          displayName: 'Sub2API',
+          shortName: 'S2',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'codex',
+          displayName: 'Codex',
+          shortName: 'Cx',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+
+    expect(
+      catalog.displayMessage(
+        'sub2api@2',
+        'Could not reach Sub2API. Check the Base URL and connection.',
+        'Team gateway',
+      ),
+    ).toBe('Could not reach Team gateway. Check the Base URL and connection.');
+    expect(catalog.displayMessage('codex', 'Could not connect to Codex.', 'Work')).toBe(
+      'Could not connect to Work.',
+    );
+  });
+
+  it('resolves custom and upstream-aware provider names in one place', () => {
+    const catalog = new ProviderCatalogIndex({
+      providers: [
+        {
+          id: 'sub2api',
+          displayName: 'Sub2API',
+          shortName: 'S2',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'codex',
+          displayName: 'Codex',
+          shortName: 'Cx',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+
+    expect(catalog.resolvedDisplayName('sub2api')).toBe('Sub2API');
+    expect(catalog.resolvedDisplayName('sub2api', { sub2api: 'Team gateway' })).toBe(
+      'Team gateway',
+    );
+    expect(catalog.resolvedDisplayName('codex', { codex: 'Work' })).toBe('Work');
+  });
+
+  it('keeps the catalog slot name until an upstream is known', () => {
+    const catalog = new ProviderCatalogIndex({
+      providers: [
+        {
+          id: 'sub2api@2',
+          displayName: 'Unconfigured slot',
+          shortName: 'S2',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+
+    expect(catalog.resolvedDisplayName('sub2api@2')).toBe(`Sub2API ${2}`);
   });
 
   it('rejects duplicate provider and metric ids at the frontend boundary', () => {

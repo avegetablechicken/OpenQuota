@@ -341,7 +341,7 @@ describe('pointer reorder integrations', () => {
         },
         {
           id: 'sub2api@2',
-          displayName: 'Sub2API 2',
+          displayName: 'Sub2API',
           shortName: 'S2',
           fallbackEnabled: false,
           localUsageSourceNote: null,

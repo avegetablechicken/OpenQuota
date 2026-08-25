@@ -240,8 +240,14 @@ impl Sub2ApiUpstream {
     }
 }
 
-fn display_name_for_upstream(upstream: Sub2ApiUpstream) -> String {
-    format!("Sub2API · {upstream}")
+fn default_display_name_for_slot(provider_id: &str) -> String {
+    provider_id
+        .strip_prefix(PROVIDER_ID)
+        .and_then(|suffix| suffix.strip_prefix('@'))
+        .map_or_else(
+            || "Sub2API".to_owned(),
+            |number| format!("Sub2API {number}"),
+        )
 }
 
 impl std::fmt::Display for Sub2ApiUpstream {
@@ -924,11 +930,7 @@ impl Sub2ApiProviders {
                 } else {
                     format!("{PROVIDER_ID}@{number}")
                 };
-                let display_name = if index == 0 {
-                    "Sub2API".to_owned()
-                } else {
-                    format!("Sub2API {number}")
-                };
+                let display_name = default_display_name_for_slot(&provider_id);
                 let configured_marker = marker_directory.join(format!("{provider_id}.configured"));
                 let configured = configured_marker.is_file()
                     || (migrate_snapshots
@@ -992,11 +994,7 @@ impl UsageProvider for Sub2ApiProvider {
     }
 
     fn display_name(&self) -> String {
-        self.load_config()
-            .ok()
-            .flatten()
-            .map(|config| display_name_for_upstream(config.upstream))
-            .unwrap_or_else(|| self.display_name.clone())
+        self.display_name.clone()
     }
 
     fn cache_identity(&self) -> CacheIdentity<'_> {
@@ -1190,9 +1188,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        definition_for, display_name_for_upstream, map_stats, metric_template, normalize_base_url,
-        should_apply_metric_template, AccountStats, AccountStatsDay, StoredConfig, Sub2ApiClient,
-        Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
+        default_display_name_for_slot, definition_for, map_stats, metric_template,
+        normalize_base_url, should_apply_metric_template, AccountStats, AccountStatsDay,
+        StoredConfig, Sub2ApiClient, Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
     };
     use crate::providers::{
         codex::{client::UsageResponse, mapper::map_usage},
@@ -1295,18 +1293,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_upstreams_have_stable_public_display_names() {
-        assert_eq!(
-            display_name_for_upstream(super::Sub2ApiUpstream::Codex),
-            "Sub2API · Codex"
-        );
-        assert_eq!(
-            display_name_for_upstream(super::Sub2ApiUpstream::Claude),
-            "Sub2API · Claude"
-        );
-    }
-
-    #[test]
     fn metric_templates_match_the_supported_native_provider_defaults() {
         for (upstream, native, unsupported) in [
             (
@@ -1402,10 +1388,22 @@ mod tests {
         let second = providers.provider("sub2api@2").unwrap();
 
         assert_eq!(first.definition().metrics[0].id, "sub2api.session");
-        assert_eq!(second.definition().display_name, "Sub2API 2");
+        assert_eq!(
+            second.definition().display_name,
+            default_display_name_for_slot("sub2api@2")
+        );
         assert_eq!(second.definition().metrics[0].id, "sub2api@2.session");
         assert_eq!(first.credential_account(), "connection");
         assert_eq!(second.credential_account(), "sub2api@2");
+    }
+
+    #[test]
+    fn unconfigured_slot_names_are_generated_from_the_slot_id() {
+        assert_eq!(default_display_name_for_slot("sub2api"), "Sub2API");
+        assert_eq!(
+            default_display_name_for_slot("sub2api@2"),
+            format!("Sub2API {}", 2)
+        );
     }
 
     #[test]
@@ -1413,7 +1411,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let provider = Sub2ApiProvider::new(
             "sub2api@2".into(),
-            "Sub2API 2".into(),
+            default_display_name_for_slot("sub2api@2"),
             directory.path().join("sub2api@2.configured"),
             false,
         );
@@ -1479,7 +1477,7 @@ mod tests {
             .unwrap();
         let provider = Sub2ApiProvider::new(
             "sub2api@2".into(),
-            "Sub2API 2".into(),
+            default_display_name_for_slot("sub2api@2"),
             directory.path().join("sub2api@2.configured"),
             false,
         );
@@ -1508,7 +1506,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let provider = Sub2ApiProvider::new(
             "sub2api@2".into(),
-            "Sub2API 2".into(),
+            default_display_name_for_slot("sub2api@2"),
             directory.path().join("sub2api@2.configured"),
             false,
         );
@@ -1730,7 +1728,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let provider = Sub2ApiProvider::new(
             "sub2api@2".into(),
-            "Sub2API 2".into(),
+            default_display_name_for_slot("sub2api@2"),
             directory.path().join("sub2api@2.configured"),
             false,
         );

@@ -12,7 +12,7 @@ const catalog: ProviderCatalog = {
   providers: [
     {
       id: 'sub2api@2',
-      displayName: 'Sub2API 2',
+      displayName: 'Sub2API',
       shortName: 'S2',
       fallbackEnabled: false,
       localUsageSourceNote: null,
@@ -94,10 +94,9 @@ describe('CustomizeProviderList Sub2API labels', () => {
       reducedMotion: false,
     });
 
-    expect(await screen.findByText('Sub2API · Claude')).toBeInTheDocument();
-    expect(screen.queryByText(/Sub2API 2/)).not.toBeInTheDocument();
+    expect(await screen.findByText('Sub2API 2')).toBeInTheDocument();
     expect(screen.queryByText('192.0.2.8:6060')).not.toBeInTheDocument();
-    expect(screen.getByText('2 metrics')).toBeInTheDocument();
+    expect(await screen.findByText('2 metrics')).toBeInTheDocument();
     expect(mocks.invoke).toHaveBeenCalledWith('get_sub2api_config_state', {
       providerId: 'sub2api@2',
     });
@@ -146,7 +145,8 @@ describe('CustomizeProviderList Sub2API labels', () => {
 
     expect(await screen.findByText('192.0.2.8:6060')).toBeInTheDocument();
     expect(screen.getByText('claude.example.com')).toBeInTheDocument();
-    expect(screen.getAllByText('Sub2API · Claude')).toHaveLength(2);
+    expect(screen.getByText('Sub2API 2')).toBeInTheDocument();
+    expect(screen.getByText('Sub2API 3')).toBeInTheDocument();
     expect(screen.queryByText('2 metrics')).not.toBeInTheDocument();
   });
 });

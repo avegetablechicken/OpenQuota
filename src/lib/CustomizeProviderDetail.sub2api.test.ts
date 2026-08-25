@@ -41,7 +41,7 @@ const catalog: ProviderCatalog = {
   providers: [
     {
       id: 'sub2api@2',
-      displayName: 'Sub2API 2',
+      displayName: 'Sub2API',
       shortName: 'S2',
       fallbackEnabled: false,
       localUsageSourceNote: null,
@@ -136,9 +136,9 @@ describe('CustomizeProviderDetail Sub2API metric availability', () => {
     renderDetail('codex', ['sub2api@2']);
 
     expect(screen.getByRole('heading', { name: 'Name' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Name for Sub2API · Codex' })).toHaveAttribute(
+    expect(screen.getByRole('textbox', { name: 'Name for Sub2API 2' })).toHaveAttribute(
       'placeholder',
-      'Sub2API · Codex',
+      'Sub2API 2',
     );
   });
 

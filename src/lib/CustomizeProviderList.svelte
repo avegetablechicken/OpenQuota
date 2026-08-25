@@ -10,7 +10,6 @@
   import { pointerReorder } from './pointerReorder';
   import {
     rememberSub2ApiUpstream,
-    sub2ApiDisplayName,
     sub2ApiEndpoints,
     sub2ApiMetricSupported,
     sub2ApiUpstreams,
@@ -36,13 +35,7 @@
     onSettings,
     reducedMotion,
   }: Props = $props();
-  const providerDisplayName = (id: string) => catalog.displayName(id, settings.providerNames);
-  function providerListName(id: string) {
-    return (
-      sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settings.providerNames[id]) ??
-      providerDisplayName(id)
-    );
-  }
+  const providerListName = (id: string) => catalog.resolvedDisplayName(id, settings.providerNames);
   const visibleProviders = $derived(
     settings.providers.filter(
       (provider) =>

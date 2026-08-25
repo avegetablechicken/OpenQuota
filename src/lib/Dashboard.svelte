@@ -13,7 +13,6 @@
   import type { SpendProjection } from './totalSpend';
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
-  import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
   import { shouldShowProviderForMode, usageHistoriesForMode } from './usageScopes';
   import type {
     AppSettings,
@@ -81,8 +80,9 @@
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
   const providerDisplayName = (id: string) =>
-    sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settings.providerNames[id]) ??
-    catalog.displayName(id, settings.providerNames);
+    catalog.resolvedDisplayName(id, settings.providerNames);
+  const providerMessage = (id: string, message: string) =>
+    catalog.displayMessage(id, message, providerDisplayName(id));
   const providerSupportsSpend = (id: string) => catalog.supportsSpend(id);
   function emptyProviderSnapshot(providerId: string): ProviderSnapshot {
     return {
@@ -124,6 +124,8 @@
       })
       .filter(({ snapshot }) => shouldShowProviderForMode(snapshot.usageHistories, usageViewMode))
       .map(({ provider, state, snapshot }) => {
+        const error = state?.error ? providerMessage(provider.id, state.error) : null;
+        const warnings = snapshot.warnings.map((warning) => providerMessage(provider.id, warning));
         const visibleMetrics = provider.metrics.filter((metric) => {
           if (!metric.enabled) return false;
           const source = metricDefinition(metric.id)?.source.kind;
@@ -136,6 +138,8 @@
           provider,
           state,
           snapshot,
+          error,
+          warnings,
           alwaysMetrics: visibleMetrics.filter((metric) => metric.section === 'alwaysVisible'),
           demandMetrics: visibleMetrics.filter((metric) => metric.section === 'onDemand'),
           links: catalog.provider(provider.id)?.links ?? [],
@@ -429,7 +433,7 @@
   />
 {/if}
 
-{#each dashboardProviders as { provider, state, snapshot, alwaysMetrics, demandMetrics, links } (provider.id)}
+{#each dashboardProviders as { provider, state, snapshot, error, warnings, alwaysMetrics, demandMetrics, links } (provider.id)}
   <div
     class="provider-reorder-shell"
     class:provider-reorder-shell--content-morph={demandMorphing}
@@ -480,24 +484,24 @@
           >{/if}
         <span
           class="provider-status-slot"
-          class:active={Boolean(state?.refreshing || state?.error || snapshot.warnings.length > 0)}
+          class:active={Boolean(state?.refreshing || error || warnings.length > 0)}
         >
           {#if state?.refreshing}
             <span class="provider-refreshing" aria-label="Refreshing"
               ><Icon name="refresh" size={12} strokeWidth={2} /></span
             >
-          {:else if state?.error}
-            <span class="provider-warning" data-tooltip={state.error} aria-hidden="true"
+          {:else if error}
+            <span class="provider-warning" data-tooltip={error} aria-hidden="true"
               ><Icon name="warning" size={12} strokeWidth={2} /></span
             >
-          {:else if snapshot.warnings.length > 0}
+          {:else if warnings.length > 0}
             <span
               class="provider-warning"
               role="status"
-              data-tooltip={snapshot.warnings.join('\n')}
-              aria-label={snapshot.warnings.join(' ')}
+              data-tooltip={warnings.join('\n')}
+              aria-label={warnings.join(' ')}
               ><Icon name="warning" size={12} strokeWidth={2} /><span class="sr-only"
-                >{snapshot.warnings.join(' ')}</span
+                >{warnings.join(' ')}</span
               ></span
             >
           {/if}
@@ -512,12 +516,12 @@
         {#each snapshot.notices as notice (notice.id)}
           <ProviderNoticeRow {notice} />
         {/each}
-        {#if state?.error}
+        {#if error}
           <div class="provider-error-row">
             <span class="provider-error-row__icon" aria-hidden="true"
               ><Icon name="warning" size={12} strokeWidth={2} /></span
             >
-            <span class="provider-error-row__message" role="alert">{state.error}</span>
+            <span class="provider-error-row__message" role="alert">{error}</span>
             <span class="provider-error-row__actions">
               {#if (catalog.supportsApiKeyConfiguration(provider.id) || catalog.supportsConnectionConfiguration(provider.id)) && (state.errorKind === 'authentication' || state.errorKind === 'permission' || state.errorKind === 'credentialStorage')}
                 <button

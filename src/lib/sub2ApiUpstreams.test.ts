@@ -6,7 +6,6 @@ import {
   sub2ApiDisplayName,
   sub2ApiEndpoints,
   sub2ApiMetricSupported,
-  sub2ApiNamePlaceholder,
 } from './sub2ApiUpstreams';
 
 describe('Sub2API connection labels', () => {
@@ -29,12 +28,11 @@ describe('Sub2API connection labels', () => {
   });
 
   it('uses one public name for every internal slot', () => {
-    expect(sub2ApiDisplayName('sub2api', 'codex')).toBe('Sub2API · Codex');
-    expect(sub2ApiDisplayName('sub2api@2', 'claude')).toBe('Sub2API · Claude');
-    expect(sub2ApiDisplayName('sub2api@2', 'claude', 'Work')).toBe('Work');
-    expect(sub2ApiNamePlaceholder('sub2api@2', 'codex')).toBe('Sub2API · Codex');
-    expect(sub2ApiNamePlaceholder('sub2api@2')).toBe('Account name');
-    expect(sub2ApiDisplayName('codex', 'codex')).toBeNull();
+    expect(sub2ApiDisplayName('sub2api')).toBe('Sub2API');
+    expect(sub2ApiDisplayName('sub2api@2')).toBe(`Sub2API ${2}`);
+    expect(sub2ApiDisplayName('sub2api@3')).toBe(`Sub2API ${3}`);
+    expect(sub2ApiDisplayName('sub2api@2', 'Work')).toBe('Work');
+    expect(sub2ApiDisplayName('codex')).toBeNull();
   });
 
   it('separates unsupported metrics from supported metrics that default off', () => {

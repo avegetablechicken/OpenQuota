@@ -63,6 +63,11 @@
     error = null;
   }
 
+  function syncRememberedUpstream(next: Sub2ApiConfigState) {
+    if (next.configured) rememberSub2ApiUpstream(providerId, next.upstream, next.baseUrl);
+    else forgetSub2ApiUpstream(providerId);
+  }
+
   function toggleEditor() {
     open = !open;
     if (open) resetEditor();
@@ -79,7 +84,7 @@
         password,
         upstream,
       });
-      rememberSub2ApiUpstream(providerId, connectionState.upstream, connectionState.baseUrl);
+      syncRememberedUpstream(connectionState);
       resetEditor(connectionState);
       open = false;
       await tick();
@@ -98,7 +103,7 @@
     error = null;
     try {
       connectionState = await clearSub2ApiConfig(providerId);
-      rememberSub2ApiUpstream(providerId, connectionState.upstream, connectionState.baseUrl);
+      syncRememberedUpstream(connectionState);
       resetEditor(connectionState);
       await tick();
       clearButton?.focus();
@@ -171,7 +176,7 @@
     void getSub2ApiConfigState(providerId)
       .then((next) => {
         connectionState = next;
-        rememberSub2ApiUpstream(providerId, next.upstream, next.baseUrl);
+        syncRememberedUpstream(next);
         resetEditor(next);
       })
       .catch((cause) => {

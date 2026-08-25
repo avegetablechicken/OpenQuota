@@ -48,21 +48,17 @@ function loadEndpoints(): Record<string, string> {
 
 export const sub2ApiEndpoints = writable(loadEndpoints());
 
-export function sub2ApiDisplayName(
-  providerId: string,
-  upstream?: Sub2ApiUpstream,
-  customName?: string,
-) {
-  if (providerId.split('@', 1)[0] !== 'sub2api') return null;
-  if (customName?.trim()) return customName.trim();
-  if (!upstream) return 'Sub2API';
-  return `Sub2API · ${upstream === 'claude' ? 'Claude' : 'Codex'}`;
+function sub2ApiSlotDisplayName(providerId: string) {
+  const match = providerId.match(/^sub2api(?:@(\d+))?$/);
+  if (!match) return null;
+  return match[1] ? `Sub2API ${match[1]}` : 'Sub2API';
 }
 
-export function sub2ApiNamePlaceholder(providerId: string, upstream?: Sub2ApiUpstream) {
-  if (providerId.split('@', 1)[0] !== 'sub2api') return null;
-  if (!upstream) return 'Account name';
-  return sub2ApiDisplayName(providerId, upstream);
+export function sub2ApiDisplayName(providerId: string, customName?: string) {
+  const slotName = sub2ApiSlotDisplayName(providerId);
+  if (!slotName) return null;
+  if (customName?.trim()) return customName.trim();
+  return slotName;
 }
 
 export function sub2ApiMetricSupported(
@@ -70,7 +66,7 @@ export function sub2ApiMetricSupported(
   metricId: string,
   upstream?: Sub2ApiUpstream,
 ) {
-  if (sub2ApiDisplayName(providerId, upstream) === null || !upstream) return true;
+  if (sub2ApiDisplayName(providerId) === null || !upstream) return true;
   const prefix = `${providerId}.`;
   if (!metricId.startsWith(prefix)) return true;
   const suffix = metricId.slice(prefix.length);

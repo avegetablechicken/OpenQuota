@@ -6,6 +6,7 @@ import type {
   UsageHistory,
   UsageScope,
 } from './types';
+import { sub2ApiDisplayName } from './sub2ApiUpstreams';
 
 export class ProviderCatalogIndex {
   readonly providers: ProviderDefinition[];
@@ -49,6 +50,24 @@ export class ProviderCatalogIndex {
     return this.provider(id)?.displayName ?? id;
   }
 
+  resolvedDisplayName(id: string, providerNames?: Record<string, string>) {
+    const customName = providerNames?.[id]?.trim();
+    if (customName) return customName;
+    return sub2ApiDisplayName(id) ?? this.displayName(id);
+  }
+
+  displayMessage(id: string, message: string, resolvedName?: string) {
+    const displayName = resolvedName?.trim() || this.displayName(id);
+    const family = id.split('@', 1)[0];
+    const aliases = [this.provider(id)?.displayName, this.provider(family)?.displayName]
+      .filter((name): name is string => Boolean(name && name !== displayName))
+      .filter((name, index, names) => names.indexOf(name) === index)
+      .sort((left, right) => right.length - left.length);
+    if (aliases.length === 0) return message;
+    const pattern = new RegExp(aliases.map(escapeRegExp).join('|'), 'g');
+    return message.replace(pattern, () => displayName);
+  }
+
   supportsSpend(id: string) {
     return this.provider(id)?.metrics.some((metric) => metric.source.kind === 'usage') ?? false;
   }
@@ -73,6 +92,10 @@ export class ProviderCatalogIndex {
       `From your ${displayName ?? provider?.displayName ?? id} usage history`
     );
   }
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export function usageSourceNote(

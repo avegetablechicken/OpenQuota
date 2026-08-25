@@ -17,7 +17,6 @@
     UNPRICED_OTHERS_SPEND_ID,
     providerSpendColorVariable,
   } from './providerIconPaths';
-  import { sub2ApiDisplayName, sub2ApiUpstreams } from './sub2ApiUpstreams';
   import type { AppSettings, UsageHistories, UsageViewMode } from './types';
 
   interface Props {
@@ -34,10 +33,7 @@
   const providerDisplayName = (id: string) => {
     if (id === OTHERS_SPEND_ID) return 'Others';
     if (id === UNPRICED_OTHERS_SPEND_ID) return 'Others (unpriced)';
-    return (
-      sub2ApiDisplayName(id, $sub2ApiUpstreams[id], settings.providerNames[id]) ??
-      catalog.displayName(id, settings.providerNames)
-    );
+    return catalog.resolvedDisplayName(id, settings.providerNames);
   };
   const renderedScopes = $derived(
     viewMode === 'all' ? (['localDevice', 'account'] as const) : [viewMode],
