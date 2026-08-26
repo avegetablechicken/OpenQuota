@@ -251,6 +251,13 @@ impl Sub2ApiUpstream {
             Self::Claude => "Claude",
         }
     }
+
+    fn provider_id(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
 }
 
 fn default_display_name_for_slot(provider_id: &str) -> String {
@@ -1012,6 +1019,13 @@ impl UsageProvider for Sub2ApiProvider {
 
     fn supports_connection_configuration(&self) -> bool {
         true
+    }
+
+    fn upstream_provider_id(&self) -> Option<&'static str> {
+        self.load_config()
+            .ok()
+            .flatten()
+            .map(|config| config.upstream.provider_id())
     }
 
     fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {

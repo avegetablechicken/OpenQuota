@@ -128,6 +128,12 @@ impl ProviderRegistry {
             .is_some_and(|runtime| runtime.supports_account_names())
     }
 
+    pub fn upstream_provider_id(&self, id: &str) -> Option<&'static str> {
+        self.runtimes
+            .get(id)
+            .and_then(|runtime| runtime.upstream_provider_id())
+    }
+
     pub fn observed_account_provider_ids(&self) -> Vec<String> {
         self.catalog
             .providers

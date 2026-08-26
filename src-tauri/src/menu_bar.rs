@@ -2,9 +2,11 @@ use std::sync::OnceLock;
 
 use fontdue::{Font, FontSettings};
 use roxmltree::Document;
-use svgtypes::{PathParser, PathSegment};
+use svgtypes::{SimplePathSegment, SimplifyingPathParser};
 use tauri::image::Image;
-use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Transform};
+use tiny_skia::{
+    BlendMode, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
+};
 
 const ICON_SIZE: u32 = 36;
 const ICON_POINTS: f32 = 18.0;
@@ -17,6 +19,15 @@ const GROUP_GAP: f32 = 22.0;
 const ICON_TEXT_GAP: f32 = 8.0;
 const PROVIDER_ICON_SIZE: f32 = 32.0;
 const PROVIDER_ICON_INSET: f32 = 1.0;
+const COMPOSITE_BASE_CENTER: f32 = 34.2;
+const COMPOSITE_BASE_SIZE: f32 = 42.0;
+const COMPOSITE_UPSTREAM_CENTER: f32 = 72.0;
+const COMPOSITE_UPSTREAM_SIZE: f32 = 64.0;
+const COMPOSITE_MOAT_RADIUS: f32 = 23.0;
+const _: () = {
+    assert!(COMPOSITE_UPSTREAM_SIZE > COMPOSITE_BASE_SIZE * 1.35);
+    assert!(COMPOSITE_UPSTREAM_SIZE > COMPOSITE_MOAT_RADIUS * 2.0);
+};
 const SINGLE_VALUE_SIZE: f32 = 23.0;
 const STACKED_VALUE_SIZE: f32 = 17.0;
 const STACKED_BASELINES: [f32; 2] = [15.0, 32.0];
@@ -34,10 +45,12 @@ const OPENROUTER_ICON: &str = include_str!("../../src/assets/provider-icons/open
 const ZAI_ICON: &str = include_str!("../../src/assets/provider-icons/zai.svg");
 const KIMI_ICON: &str = include_str!("../../src/assets/provider-icons/kimi.svg");
 const MINIMAX_ICON: &str = include_str!("../../src/assets/provider-icons/minimax.svg");
+const SUB2API_ICON: &str = include_str!("../../src/assets/provider-icons/sub2api.svg");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextGroup {
     pub provider_id: String,
+    pub upstream_provider_id: Option<String>,
     pub values: Vec<String>,
 }
 
@@ -101,7 +114,7 @@ fn render_text_strip(groups: &[TextGroup]) -> Option<RenderedStrip> {
     let mut x = OUTER_PADDING;
 
     for layout in groups {
-        draw_provider_icon(&mut pixmap, &layout.group.provider_id, x);
+        draw_provider_icon(&mut pixmap, layout.group, x);
         let text_x = x + PROVIDER_ICON_SIZE + ICON_TEXT_GAP;
         if layout.group.values.len() == 1 {
             let value = &layout.group.values[0];
@@ -221,27 +234,34 @@ fn blend_alpha_mask(
     }
 }
 
-fn draw_provider_icon(pixmap: &mut Pixmap, provider_id: &str, x: f32) {
+fn draw_provider_icon(pixmap: &mut Pixmap, group: &TextGroup, x: f32) {
     let mut paint = Paint::default();
     paint.set_color_rgba8(0, 0, 0, 255);
     paint.anti_alias = true;
     let icon_top = (TEXT_HEIGHT as f32 - PROVIDER_ICON_SIZE) / 2.0;
 
-    if let Some(path) = provider_path(provider_id) {
-        let bounds = path.bounds();
-        let target = PROVIDER_ICON_SIZE - PROVIDER_ICON_INSET * 2.0;
-        let scale = (target / bounds.width()).min(target / bounds.height());
-        let tx = x + PROVIDER_ICON_INSET + (target - bounds.width() * scale) / 2.0
-            - bounds.left() * scale;
-        let ty = icon_top + PROVIDER_ICON_INSET + (target - bounds.height() * scale) / 2.0
-            - bounds.top() * scale;
-        pixmap.fill_path(
-            path,
-            &paint,
-            FillRule::Winding,
-            Transform::from_row(scale, 0.0, 0.0, scale, tx, ty),
-            None,
-        );
+    if let Some(path) = provider_path(&group.provider_id) {
+        let style = provider_mark_style(&group.provider_id);
+        if let Some((upstream_path, upstream_style)) = group
+            .upstream_provider_id
+            .as_deref()
+            .and_then(|provider_id| {
+                provider_path(provider_id).map(|path| (path, provider_mark_style(provider_id)))
+            })
+        {
+            draw_composite_provider_icon(
+                pixmap,
+                path,
+                style,
+                upstream_path,
+                upstream_style,
+                x,
+                icon_top,
+                &paint,
+            );
+        } else {
+            draw_standalone_provider_icon(pixmap, path, style, x, icon_top, &paint);
+        }
     } else {
         let mut fallback = PathBuilder::new();
         fallback.push_circle(
@@ -259,6 +279,149 @@ fn draw_provider_icon(pixmap: &mut Pixmap, provider_id: &str, x: f32) {
             );
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderMarkStyle {
+    Fill,
+    Outline,
+}
+
+fn provider_mark_style(provider_id: &str) -> ProviderMarkStyle {
+    match crate::providers::provider_family(provider_id) {
+        "sub2api" => ProviderMarkStyle::Outline,
+        _ => ProviderMarkStyle::Fill,
+    }
+}
+
+fn provider_outline_stroke() -> Stroke {
+    Stroke {
+        width: 2.7,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    }
+}
+
+fn draw_provider_mark(
+    pixmap: &mut Pixmap,
+    path: &Path,
+    style: ProviderMarkStyle,
+    paint: &Paint,
+    transform: Transform,
+) {
+    match style {
+        ProviderMarkStyle::Fill => {
+            pixmap.fill_path(path, paint, FillRule::Winding, transform, None)
+        }
+        ProviderMarkStyle::Outline => {
+            pixmap.stroke_path(path, paint, &provider_outline_stroke(), transform, None)
+        }
+    }
+}
+
+fn centered_path_transform(
+    path: &Path,
+    center_x: f32,
+    center_y: f32,
+    target_size: f32,
+    unit: f32,
+    origin_x: f32,
+    origin_y: f32,
+) -> Transform {
+    let bounds = path.bounds();
+    let scale = (target_size / bounds.width()).min(target_size / bounds.height()) * unit;
+    let tx = origin_x + center_x * unit - (bounds.left() + bounds.width() / 2.0) * scale;
+    let ty = origin_y + center_y * unit - (bounds.top() + bounds.height() / 2.0) * scale;
+    Transform::from_row(scale, 0.0, 0.0, scale, tx, ty)
+}
+
+fn draw_standalone_provider_icon(
+    pixmap: &mut Pixmap,
+    path: &Path,
+    style: ProviderMarkStyle,
+    x: f32,
+    icon_top: f32,
+    paint: &Paint,
+) {
+    let target_size = match style {
+        ProviderMarkStyle::Fill => PROVIDER_ICON_SIZE - PROVIDER_ICON_INSET * 2.0,
+        ProviderMarkStyle::Outline => PROVIDER_ICON_SIZE * 0.68,
+    };
+    let transform = centered_path_transform(
+        path,
+        PROVIDER_ICON_SIZE / 2.0,
+        PROVIDER_ICON_SIZE / 2.0,
+        target_size,
+        1.0,
+        x,
+        icon_top,
+    );
+    draw_provider_mark(pixmap, path, style, paint, transform);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_composite_provider_icon(
+    pixmap: &mut Pixmap,
+    base_path: &Path,
+    base_style: ProviderMarkStyle,
+    upstream_path: &Path,
+    upstream_style: ProviderMarkStyle,
+    x: f32,
+    icon_top: f32,
+    paint: &Paint,
+) {
+    // Keep both visual centers stable while letting the larger upstream mark overlap the smaller
+    // unofficial-provider base. The narrow moat prevents monochrome interiors from merging.
+    let unit = PROVIDER_ICON_SIZE / 100.0;
+    let base_transform = centered_path_transform(
+        base_path,
+        COMPOSITE_BASE_CENTER,
+        COMPOSITE_BASE_CENTER,
+        COMPOSITE_BASE_SIZE,
+        unit,
+        x,
+        icon_top,
+    );
+    draw_provider_mark(pixmap, base_path, base_style, paint, base_transform);
+
+    let mut moat = PathBuilder::new();
+    moat.push_circle(
+        x + COMPOSITE_UPSTREAM_CENTER * unit,
+        icon_top + COMPOSITE_UPSTREAM_CENTER * unit,
+        COMPOSITE_MOAT_RADIUS * unit,
+    );
+    if let Some(moat) = moat.finish() {
+        let clear = Paint {
+            anti_alias: true,
+            blend_mode: BlendMode::Clear,
+            ..Paint::default()
+        };
+        pixmap.fill_path(
+            &moat,
+            &clear,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    let upstream_transform = centered_path_transform(
+        upstream_path,
+        COMPOSITE_UPSTREAM_CENTER,
+        COMPOSITE_UPSTREAM_CENTER,
+        COMPOSITE_UPSTREAM_SIZE,
+        unit,
+        x,
+        icon_top,
+    );
+    draw_provider_mark(
+        pixmap,
+        upstream_path,
+        upstream_style,
+        paint,
+        upstream_transform,
+    );
 }
 
 fn provider_path(provider_id: &str) -> Option<&'static Path> {
@@ -281,6 +444,7 @@ fn provider_path(provider_id: &str) -> Option<&'static Path> {
     static ZAI: OnceLock<Path> = OnceLock::new();
     static KIMI: OnceLock<Path> = OnceLock::new();
     static MINIMAX: OnceLock<Path> = OnceLock::new();
+    static SUB2API: OnceLock<Path> = OnceLock::new();
     match crate::providers::provider_family(provider_id) {
         "claude" => Some(parsed(CLAUDE_ICON, &CLAUDE)),
         "codex" => Some(parsed(CODEX_ICON, &CODEX)),
@@ -294,6 +458,7 @@ fn provider_path(provider_id: &str) -> Option<&'static Path> {
         "zai" => Some(parsed(ZAI_ICON, &ZAI)),
         "kimi" => Some(parsed(KIMI_ICON, &KIMI)),
         "minimax" => Some(parsed(MINIMAX_ICON, &MINIMAX)),
+        "sub2api" => Some(parsed(SUB2API_ICON, &SUB2API)),
         _ => None,
     }
 }
@@ -311,52 +476,15 @@ fn parse_svg_path(source: &str) -> Result<Path, String> {
 
     let mut builder = PathBuilder::new();
     for data in path_data {
-        let mut current = None;
-        let mut subpath_start = None;
-        let mut previous_cubic_control = None;
-        for segment in PathParser::from(data) {
+        for segment in SimplifyingPathParser::from(data) {
             match segment.map_err(|error| error.to_string())? {
-                PathSegment::MoveTo { abs, x, y } => {
-                    let origin = if abs {
-                        (0.0, 0.0)
-                    } else {
-                        current.unwrap_or((0.0, 0.0))
-                    };
-                    let point = (origin.0 + x as f32, origin.1 + y as f32);
-                    builder.move_to(point.0, point.1);
-                    current = Some(point);
-                    subpath_start = Some(point);
-                    previous_cubic_control = None;
+                SimplePathSegment::MoveTo { x, y } => {
+                    builder.move_to(x as f32, y as f32);
                 }
-                PathSegment::LineTo { abs, x, y } => {
-                    let origin = if abs {
-                        (0.0, 0.0)
-                    } else {
-                        current.ok_or_else(|| "relative line has no current point".to_owned())?
-                    };
-                    let point = (origin.0 + x as f32, origin.1 + y as f32);
-                    builder.line_to(point.0, point.1);
-                    current = Some(point);
-                    previous_cubic_control = None;
+                SimplePathSegment::LineTo { x, y } => {
+                    builder.line_to(x as f32, y as f32);
                 }
-                PathSegment::HorizontalLineTo { abs, x } => {
-                    let (current_x, current_y) =
-                        current.ok_or_else(|| "horizontal line has no current point".to_owned())?;
-                    let point = (if abs { x as f32 } else { current_x + x as f32 }, current_y);
-                    builder.line_to(point.0, point.1);
-                    current = Some(point);
-                    previous_cubic_control = None;
-                }
-                PathSegment::VerticalLineTo { abs, y } => {
-                    let (current_x, current_y) =
-                        current.ok_or_else(|| "vertical line has no current point".to_owned())?;
-                    let point = (current_x, if abs { y as f32 } else { current_y + y as f32 });
-                    builder.line_to(point.0, point.1);
-                    current = Some(point);
-                    previous_cubic_control = None;
-                }
-                PathSegment::CurveTo {
-                    abs,
+                SimplePathSegment::CurveTo {
                     x1,
                     y1,
                     x2,
@@ -364,48 +492,16 @@ fn parse_svg_path(source: &str) -> Result<Path, String> {
                     x,
                     y,
                 } => {
-                    let origin = if abs {
-                        (0.0, 0.0)
-                    } else {
-                        current.ok_or_else(|| "relative curve has no current point".to_owned())?
-                    };
-                    let end = (origin.0 + x as f32, origin.1 + y as f32);
                     builder.cubic_to(
-                        origin.0 + x1 as f32,
-                        origin.1 + y1 as f32,
-                        origin.0 + x2 as f32,
-                        origin.1 + y2 as f32,
-                        end.0,
-                        end.1,
+                        x1 as f32, y1 as f32, x2 as f32, y2 as f32, x as f32, y as f32,
                     );
-                    current = Some(end);
-                    previous_cubic_control = Some((origin.0 + x2 as f32, origin.1 + y2 as f32));
                 }
-                PathSegment::SmoothCurveTo { abs, x2, y2, x, y } => {
-                    let origin =
-                        current.ok_or_else(|| "smooth curve has no current point".to_owned())?;
-                    let first = previous_cubic_control
-                        .map(|control| (origin.0 * 2.0 - control.0, origin.1 * 2.0 - control.1))
-                        .unwrap_or(origin);
-                    let coordinate_origin = if abs { (0.0, 0.0) } else { origin };
-                    let second = (
-                        coordinate_origin.0 + x2 as f32,
-                        coordinate_origin.1 + y2 as f32,
-                    );
-                    let end = (
-                        coordinate_origin.0 + x as f32,
-                        coordinate_origin.1 + y as f32,
-                    );
-                    builder.cubic_to(first.0, first.1, second.0, second.1, end.0, end.1);
-                    current = Some(end);
-                    previous_cubic_control = Some(second);
+                SimplePathSegment::Quadratic { x1, y1, x, y } => {
+                    builder.quad_to(x1 as f32, y1 as f32, x as f32, y as f32);
                 }
-                PathSegment::ClosePath { .. } => {
+                SimplePathSegment::ClosePath => {
                     builder.close();
-                    current = subpath_start;
-                    previous_cubic_control = None;
                 }
-                _ => return Err("only M, L, H, V, C, S and Z path commands are supported".into()),
             }
         }
     }
@@ -573,15 +669,26 @@ fn fill_rounded_bar(
 #[cfg(test)]
 mod tests {
     use super::{
-        bar_fill, bar_icon, parse_svg_path, provider_path, render_bar_rgba, render_text_strip,
-        text_icon, visual_bar_fraction, TextGroup, ICON_SIZE, MAX_BARS, TEXT_HEIGHT,
+        bar_fill, bar_icon, draw_provider_icon, parse_svg_path, provider_path, render_bar_rgba,
+        render_text_strip, text_icon, visual_bar_fraction, TextGroup, COMPOSITE_UPSTREAM_CENTER,
+        COMPOSITE_UPSTREAM_SIZE, ICON_SIZE, MAX_BARS, PROVIDER_ICON_SIZE, TEXT_HEIGHT,
     };
 
     fn text_group(provider_id: &str, values: &[&str]) -> TextGroup {
         TextGroup {
             provider_id: provider_id.into(),
+            upstream_provider_id: None,
             values: values.iter().map(|value| (*value).into()).collect(),
         }
+    }
+
+    fn provider_icon_rgba(provider_id: &str, upstream_provider_id: Option<&str>) -> Vec<u8> {
+        let mut pixmap = tiny_skia::Pixmap::new(PROVIDER_ICON_SIZE as u32, TEXT_HEIGHT)
+            .expect("provider icon dimensions should be valid");
+        let mut group = text_group(provider_id, &["50%"]);
+        group.upstream_provider_id = upstream_provider_id.map(str::to_owned);
+        draw_provider_icon(&mut pixmap, &group, 0.0);
+        pixmap.take_demultiplied()
     }
 
     #[test]
@@ -599,6 +706,7 @@ mod tests {
             "zai",
             "kimi",
             "minimax",
+            "sub2api",
         ] {
             let path = provider_path(provider).expect("known provider mark should exist");
             assert!(path.bounds().width() > 0.0);
@@ -623,6 +731,61 @@ mod tests {
             .expect("public text renderer should return an image");
         assert_eq!(icon.height(), TEXT_HEIGHT);
         assert!(icon.width() > TEXT_HEIGHT);
+    }
+
+    #[test]
+    fn sub2api_text_marks_are_outlined_and_keep_upstream_silhouettes_distinct() {
+        let outline = provider_icon_rgba("sub2api", None);
+        let codex = provider_icon_rgba("sub2api", Some("codex"));
+        let claude = provider_icon_rgba("sub2api@2", Some("claude"));
+        let opaque_pixels = |rgba: &[u8]| {
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[3] >= 192)
+                .count()
+        };
+
+        for mark in [&outline, &codex, &claude] {
+            let opaque = opaque_pixels(mark);
+            assert!(opaque > 80, "the provider mark should remain visible");
+            assert!(
+                opaque < 500,
+                "the Sub2API outline must not collapse into a solid disk"
+            );
+        }
+        assert_ne!(
+            codex, claude,
+            "each upstream should keep its own silhouette"
+        );
+
+        let fully_opaque_center = (10..26).all(|y| {
+            (8..24).all(|x| {
+                let alpha = outline[((y * PROVIDER_ICON_SIZE as usize + x) * 4) + 3];
+                alpha == 255
+            })
+        });
+        assert!(!fully_opaque_center);
+    }
+
+    #[test]
+    fn composite_makes_the_upstream_mark_dominant_without_vertical_clipping() {
+        let unit = PROVIDER_ICON_SIZE / 100.0;
+        let icon_top = (TEXT_HEIGHT as f32 - PROVIDER_ICON_SIZE) / 2.0;
+        let bottom_limit = (TEXT_HEIGHT as f32 - icon_top) / unit;
+        assert!(COMPOSITE_UPSTREAM_CENTER + COMPOSITE_UPSTREAM_SIZE / 2.0 <= bottom_limit);
+    }
+
+    #[test]
+    fn upstream_metadata_applies_composite_geometry_to_any_provider_mark() {
+        let standalone = provider_icon_rgba("cursor", None);
+        let composite = provider_icon_rgba("cursor", Some("claude"));
+        assert_ne!(standalone, composite);
+        assert!(composite
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[3] == 255));
     }
 
     #[test]

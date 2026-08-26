@@ -147,6 +147,10 @@ pub trait UsageProvider: Send + Sync {
         false
     }
 
+    fn upstream_provider_id(&self) -> Option<&'static str> {
+        None
+    }
+
     fn account_identity(&self) -> Option<&str> {
         None
     }

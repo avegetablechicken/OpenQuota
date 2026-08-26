@@ -24,6 +24,8 @@ struct TrayMetric {
 struct TrayGroup {
     #[cfg(any(target_os = "macos", test))]
     provider_id: String,
+    #[cfg(any(target_os = "macos", test))]
+    upstream_provider_id: Option<String>,
     metrics: Vec<TrayMetric>,
 }
 
@@ -195,6 +197,7 @@ fn text_groups(groups: &[TrayGroup]) -> Vec<crate::menu_bar::TextGroup> {
         .iter()
         .map(|group| crate::menu_bar::TextGroup {
             provider_id: group.provider_id.clone(),
+            upstream_provider_id: group.upstream_provider_id.clone(),
             values: group
                 .metrics
                 .iter()
@@ -239,6 +242,10 @@ fn resolved_groups(
             (!metrics.is_empty()).then_some(TrayGroup {
                 #[cfg(any(target_os = "macos", test))]
                 provider_id: definition.id.clone(),
+                #[cfg(any(target_os = "macos", test))]
+                upstream_provider_id: registry
+                    .upstream_provider_id(&definition.id)
+                    .map(str::to_owned),
                 metrics,
             })
         })
@@ -492,11 +499,18 @@ mod tests {
         let groups = vec![
             TrayGroup {
                 provider_id: "claude".into(),
+                upstream_provider_id: None,
                 metrics: vec![metric("75%"), metric("40%")],
             },
             TrayGroup {
                 provider_id: "codex".into(),
+                upstream_provider_id: None,
                 metrics: vec![metric("90%")],
+            },
+            TrayGroup {
+                provider_id: "sub2api@2".into(),
+                upstream_provider_id: Some("claude".into()),
+                metrics: vec![metric("65%")],
             },
         ];
 
@@ -505,11 +519,18 @@ mod tests {
             vec![
                 crate::menu_bar::TextGroup {
                     provider_id: "claude".into(),
+                    upstream_provider_id: None,
                     values: vec!["75%".into(), "40%".into()],
                 },
                 crate::menu_bar::TextGroup {
                     provider_id: "codex".into(),
+                    upstream_provider_id: None,
                     values: vec!["90%".into()],
+                },
+                crate::menu_bar::TextGroup {
+                    provider_id: "sub2api@2".into(),
+                    upstream_provider_id: Some("claude".into()),
+                    values: vec!["65%".into()],
                 },
             ]
         );
@@ -520,6 +541,7 @@ mod tests {
     fn mac_text_to_bars_transition_explicitly_clears_the_native_title() {
         let groups = vec![TrayGroup {
             provider_id: "codex".into(),
+            upstream_provider_id: None,
             metrics: vec![TrayMetric {
                 value: "75%".into(),
                 detail: String::new(),
@@ -535,6 +557,7 @@ mod tests {
             MacMenuBarPresentation {
                 icon: MacMenuBarIcon::Text(vec![crate::menu_bar::TextGroup {
                     provider_id: "codex".into(),
+                    upstream_provider_id: None,
                     values: vec!["75%".into()],
                 }]),
             }
@@ -551,6 +574,7 @@ mod tests {
     fn mac_icon_style_always_uses_the_openquota_mark() {
         let groups = vec![TrayGroup {
             provider_id: "codex".into(),
+            upstream_provider_id: None,
             metrics: vec![TrayMetric {
                 value: "75%".into(),
                 detail: String::new(),
@@ -578,6 +602,7 @@ mod tests {
     fn mac_empty_and_unbounded_bar_states_fall_back_without_stale_text() {
         let unbounded = vec![TrayGroup {
             provider_id: "codex".into(),
+            upstream_provider_id: None,
             metrics: vec![TrayMetric {
                 value: "$4".into(),
                 detail: String::new(),
@@ -615,6 +640,7 @@ mod tests {
         let groups = vec![
             TrayGroup {
                 provider_id: "claude".into(),
+                upstream_provider_id: None,
                 metrics: vec![
                     metric(10.0),
                     TrayMetric {
@@ -627,6 +653,7 @@ mod tests {
             },
             TrayGroup {
                 provider_id: "codex".into(),
+                upstream_provider_id: None,
                 metrics: vec![metric(30.0), metric(40.0), metric(50.0)],
             },
         ];
@@ -698,6 +725,7 @@ mod tests {
             text_groups(&groups),
             vec![crate::menu_bar::TextGroup {
                 provider_id: "codex".into(),
+                upstream_provider_id: None,
                 values: vec!["75%".into(), "40%".into()],
             }]
         );
@@ -850,6 +878,7 @@ mod tests {
     fn gauge_uses_the_first_pinned_quota_metric() {
         let groups = vec![TrayGroup {
             provider_id: "codex".into(),
+            upstream_provider_id: None,
             metrics: vec![
                 TrayMetric {
                     value: "10".into(),
@@ -963,6 +992,7 @@ mod tests {
         assert_eq!(metric.gauge, None);
         assert!(bar_fractions(&[TrayGroup {
             provider_id: "grok".into(),
+            upstream_provider_id: None,
             metrics: vec![metric],
         }])
         .is_empty());
