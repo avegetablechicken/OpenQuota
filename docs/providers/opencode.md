@@ -17,7 +17,9 @@ shown when OpenCode has been used without that plan.
 
 The Go meters come from OpenCode's account usage endpoint, so they include usage from all devices
 and reflect the limits enforced by OpenCode. Local usage history remains separate and is read from
-the OpenCode data directory.
+the OpenCode data directory. OpenCode-hosted requests remain on the OpenCode card; direct Anthropic
+requests are attributed to Claude, while direct OpenAI and OpenAI Codex requests are attributed to
+Codex.
 
 ## Sign-in and local data
 

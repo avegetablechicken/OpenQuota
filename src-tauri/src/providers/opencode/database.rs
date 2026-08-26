@@ -34,6 +34,7 @@ pub(crate) fn read_database(
     path: &Path,
     cutoff_ms: i64,
     pricing: &ModelPricing,
+    card_id: &str,
 ) -> Result<DatabaseRead, ()> {
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
@@ -46,7 +47,7 @@ pub(crate) fn read_database(
 
     let connection = open_read_only(path)?;
     let schema = inspect_schema(&connection)?;
-    let mut messages = load_messages(&connection, &schema, cutoff_ms)?;
+    let mut messages = load_messages(&connection, &schema, cutoff_ms, card_id)?;
     let parts = load_parts(&connection, &schema, cutoff_ms, &messages)?;
 
     let mut records = Vec::with_capacity(messages.len());
@@ -187,6 +188,7 @@ fn load_messages(
     connection: &Connection,
     schema: &DatabaseSchema,
     cutoff_ms: i64,
+    card_id: &str,
 ) -> Result<Vec<ParsedMessage>, ()> {
     let time = if schema.message_time_created {
         "m.time_created"
@@ -227,7 +229,9 @@ fn load_messages(
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
-        let Some(message) = parse_message(session_id, message_id, column_timestamp, &value) else {
+        let Some(message) =
+            parse_message(session_id, message_id, column_timestamp, &value, card_id)
+        else {
             continue;
         };
         if message.timestamp.timestamp_millis() >= cutoff_ms {

@@ -5,8 +5,16 @@ use crate::pricing::{ModelPricing, TokenBreakdown};
 
 pub(crate) const GO_PROVIDER_ID: &str = "opencode-go";
 pub(super) const EPOCH_MILLISECONDS_THRESHOLD: i64 = 100_000_000_000;
-const HOSTED_PROVIDER_IDS: [&str; 2] = [GO_PROVIDER_ID, "opencode"];
 const MAX_TOKEN_VALUE: f64 = 1_000_000_000_000_000.0;
+
+pub(super) fn usage_card(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        GO_PROVIDER_ID | "opencode" => Some("opencode"),
+        "anthropic" => Some("claude"),
+        "openai" | "openai-codex" => Some("codex"),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CostProvenance {
@@ -122,12 +130,13 @@ pub(super) fn parse_message(
     message_id: String,
     column_timestamp: Option<i64>,
     value: &Value,
+    card_id: &str,
 ) -> Option<ParsedMessage> {
     if value.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
     let provider_id = provider_id(value)?;
-    if !HOSTED_PROVIDER_IDS.contains(&provider_id.as_str()) {
+    if usage_card(&provider_id) != Some(card_id) {
         return None;
     }
     let timestamp = column_timestamp

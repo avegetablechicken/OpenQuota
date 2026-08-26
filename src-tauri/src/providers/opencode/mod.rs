@@ -15,7 +15,7 @@ use crate::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind, ProviderLink,
         ProviderSnapshot, UsageHistories, UsageHistory, UsagePeriodSelection,
     },
-    pricing::PricingStore,
+    pricing::{ModelPricing, PricingStore},
 };
 
 use self::{
@@ -26,6 +26,15 @@ use self::{
 };
 
 use super::{ProviderError, UsageProvider};
+
+pub(crate) fn scan_routed_usage_into(
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut super::daily_usage::DailyUsageAccumulator,
+) -> Result<bool, OpenCodeError> {
+    OpenCodeUsageScanner::new(OpenCodePaths::new()).scan_into(now, pricing, card_id, accumulator)
+}
 
 pub(crate) fn definition() -> ProviderDefinition {
     ProviderDefinition {

@@ -132,7 +132,7 @@ use self::{
         ClaudeCredentialScope,
     },
     client::ClaudeClient,
-    local_usage::scan_local_usage,
+    local_usage::{scan_local_usage, SharedUsageSources},
     mapper::map_usage,
 };
 use crate::providers::log_usage::scan_or_cached_usage;
@@ -176,6 +176,7 @@ pub struct ClaudeProvider {
     log_roots: Vec<PathBuf>,
     include_standard_logs: bool,
     include_pi: bool,
+    include_opencode: bool,
     storage: Arc<Storage>,
     pricing: Arc<PricingStore>,
     client: ClaudeClient,
@@ -191,6 +192,7 @@ struct ClaudeRuntimeConfig {
     log_roots: Vec<PathBuf>,
     include_standard_logs: bool,
     include_pi: bool,
+    include_opencode: bool,
 }
 
 pub(crate) fn runtimes(
@@ -228,6 +230,7 @@ fn runtime_configs(discovery: accounts::ClaudeAccountDiscovery) -> Vec<ClaudeRun
             log_roots: account.log_roots,
             include_standard_logs: true,
             include_pi: true,
+            include_opencode: true,
         });
     } else if !has_bare_scoped_account {
         configs.push(ClaudeRuntimeConfig {
@@ -237,6 +240,7 @@ fn runtime_configs(discovery: accounts::ClaudeAccountDiscovery) -> Vec<ClaudeRun
             log_roots: Vec::new(),
             include_standard_logs: true,
             include_pi: true,
+            include_opencode: true,
         });
     }
     for account in discovery.accounts {
@@ -247,6 +251,7 @@ fn runtime_configs(discovery: accounts::ClaudeAccountDiscovery) -> Vec<ClaudeRun
             log_roots: account.log_roots,
             include_standard_logs: false,
             include_pi: false,
+            include_opencode: false,
         });
     }
     configs
@@ -263,6 +268,7 @@ impl ClaudeProvider {
                 log_roots: Vec::new(),
                 include_standard_logs: true,
                 include_pi: true,
+                include_opencode: true,
             },
             storage,
             pricing,
@@ -283,6 +289,7 @@ impl ClaudeProvider {
             log_roots: config.log_roots,
             include_standard_logs: config.include_standard_logs,
             include_pi: config.include_pi,
+            include_opencode: config.include_opencode,
             storage,
             pricing,
             client,
@@ -400,7 +407,10 @@ impl ClaudeProvider {
                     self.provider_id(),
                     &self.log_roots,
                     self.include_standard_logs,
-                    self.include_pi,
+                    SharedUsageSources {
+                        include_pi: self.include_pi,
+                        include_opencode: self.include_opencode,
+                    },
                 )
             },
             &mut warnings,
@@ -960,6 +970,7 @@ mod tests {
                 log_roots: vec![account_root],
                 include_standard_logs: false,
                 include_pi: false,
+                include_opencode: false,
             },
             storage,
             pricing,

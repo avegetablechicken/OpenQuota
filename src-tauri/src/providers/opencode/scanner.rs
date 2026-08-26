@@ -69,48 +69,27 @@ impl OpenCodeUsageScanner {
         now: DateTime<Utc>,
         pricing: &ModelPricing,
     ) -> Result<Option<OpenCodeUsageScan>, OpenCodeError> {
-        if paths.is_empty() {
+        let Some(scan) = scan_records(paths, now, pricing, "opencode")? else {
             return Ok(None);
-        }
-
-        let cutoff_ms = (now - chrono::Duration::days(SCAN_DAYS)).timestamp_millis();
-        let mut records = Vec::new();
-        let mut usable_databases = 0_usize;
-        let mut failed_databases = 0_usize;
-        for path in paths {
-            match read_database(&path, cutoff_ms, pricing) {
-                Ok(DatabaseRead::Missing) => {}
-                Ok(DatabaseRead::Usable(database)) => {
-                    usable_databases += 1;
-                    records.extend(database.records);
-                }
-                Err(()) => failed_databases += 1,
-            }
-        }
-        if usable_databases == 0 {
-            return if failed_databases == 0 {
-                Ok(None)
-            } else {
-                Err(OpenCodeError::DatabaseUnreadable)
-            };
-        }
-
-        let records = deduplicate(records);
-        let mut warnings = Vec::new();
-        if failed_databases > 0 {
-            crate::app_warn!(
-                "plugin:opencode",
-                "{failed_databases} local database(s) could not be read; usable sources remain"
-            );
-            warnings.push(
-                "Some OpenCode databases could not be read; available local usage is shown.".into(),
-            );
-        }
-
+        };
         Ok(Some(OpenCodeUsageScan {
-            usage: aggregate_history(&records, now),
-            warnings,
+            usage: aggregate_history(&scan.records, now),
+            warnings: scan.warnings,
         }))
+    }
+
+    pub(crate) fn scan_into(
+        &self,
+        now: DateTime<Utc>,
+        pricing: &ModelPricing,
+        card_id: &str,
+        accumulator: &mut DailyUsageAccumulator,
+    ) -> Result<bool, OpenCodeError> {
+        let paths = self.paths.database_files()?;
+        let Some(scan) = scan_records(paths, now, pricing, card_id)? else {
+            return Ok(false);
+        };
+        Ok(aggregate_into(&scan.records, now, accumulator))
     }
 
     pub(crate) fn has_hosted_usage(&self) -> bool {
@@ -135,6 +114,60 @@ impl OpenCodeUsageScanner {
             }
         })
     }
+}
+
+struct OpenCodeRecordScan {
+    records: Vec<UsageRecord>,
+    warnings: Vec<String>,
+}
+
+fn scan_records(
+    mut paths: Vec<PathBuf>,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+) -> Result<Option<OpenCodeRecordScan>, OpenCodeError> {
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+
+    let cutoff_ms = (now - chrono::Duration::days(SCAN_DAYS)).timestamp_millis();
+    let mut records = Vec::new();
+    let mut usable_databases = 0_usize;
+    let mut failed_databases = 0_usize;
+    for path in paths {
+        match read_database(&path, cutoff_ms, pricing, card_id) {
+            Ok(DatabaseRead::Missing) => {}
+            Ok(DatabaseRead::Usable(database)) => {
+                usable_databases += 1;
+                records.extend(database.records);
+            }
+            Err(()) => failed_databases += 1,
+        }
+    }
+    if usable_databases == 0 {
+        return if failed_databases == 0 {
+            Ok(None)
+        } else {
+            Err(OpenCodeError::DatabaseUnreadable)
+        };
+    }
+
+    let records = deduplicate(records);
+    let mut warnings = Vec::new();
+    if failed_databases > 0 {
+        crate::app_warn!(
+            "plugin:opencode",
+            "{failed_databases} local database(s) could not be read; usable sources remain"
+        );
+        warnings.push(
+            "Some OpenCode databases could not be read; available local usage is shown.".into(),
+        );
+    }
+
+    Ok(Some(OpenCodeRecordScan { records, warnings }))
 }
 
 fn deduplicate(records: Vec<UsageRecord>) -> Vec<UsageRecord> {
@@ -175,9 +208,19 @@ fn better_record(candidate: &UsageRecord, current: &UsageRecord) -> bool {
 }
 
 fn aggregate_history(records: &[UsageRecord], now: DateTime<Utc>) -> UsageHistory {
+    let mut accumulator = DailyUsageAccumulator::default();
+    aggregate_into(records, now, &mut accumulator);
+    accumulator.build(now, USAGE_SOURCE_NOTE)
+}
+
+fn aggregate_into(
+    records: &[UsageRecord],
+    now: DateTime<Utc>,
+    accumulator: &mut DailyUsageAccumulator,
+) -> bool {
     let today = now.with_timezone(&Local).date_naive();
     let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
-    let mut accumulator = DailyUsageAccumulator::default();
+    let mut contributed = false;
     for record in records {
         if record.timestamp > now {
             continue;
@@ -195,12 +238,14 @@ fn aggregate_history(records: &[UsageRecord], now: DateTime<Utc>) -> UsageHistor
                     accumulator.add(date, record.tokens, cost, &record.model)
                 }
             }
+            contributed = true;
         }
         if record.incomplete_cost || (record.cost.is_none() && record.tokens > 0) {
             accumulator.add_unknown_model(date, &record.model);
+            contributed = true;
         }
     }
-    accumulator.build(now, USAGE_SOURCE_NOTE)
+    contributed
 }
 
 #[cfg(test)]

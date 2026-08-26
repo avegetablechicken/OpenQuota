@@ -21,7 +21,7 @@ use crate::providers::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
     model_scope::model_belongs_to_card,
-    pi_usage,
+    opencode, pi_usage,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,10 +65,22 @@ pub fn scan_local_usage(
             false
         }
     };
-    let source_note = if includes_pi {
-        "From your Codex logs and pi (estimated)"
-    } else {
-        "From your Codex logs (estimated)"
+    let includes_opencode =
+        match opencode::scan_routed_usage_into(now, pricing, "codex", &mut accumulator) {
+            Ok(includes_opencode) => includes_opencode,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:opencode",
+                    "OpenCode usage history could not be folded into Codex"
+                );
+                false
+            }
+        };
+    let source_note = match (includes_pi, includes_opencode) {
+        (true, true) => "From your Codex logs, pi, and OpenCode (estimated)",
+        (true, false) => "From your Codex logs and pi (estimated)",
+        (false, true) => "From your Codex logs and OpenCode (estimated)",
+        (false, false) => "From your Codex logs (estimated)",
     };
     Ok(accumulator.build(now, source_note))
 }

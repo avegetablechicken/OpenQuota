@@ -20,7 +20,7 @@ use crate::providers::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp},
     model_scope::is_model_obviously_foreign_to_card,
-    pi_usage,
+    opencode, pi_usage,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -44,6 +44,12 @@ pub struct ClaudeTokenEvent {
 
 const LOG_CACHE_SCHEMA_VERSION: u8 = 3;
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SharedUsageSources {
+    pub include_pi: bool,
+    pub include_opencode: bool,
+}
+
 impl ClaudeTokenEvent {
     fn total_tokens(&self) -> u64 {
         self.input + self.cache_write_5m + self.cache_write_1h + self.cache_read + self.output
@@ -57,7 +63,7 @@ pub fn scan_local_usage(
     provider_id: &str,
     configured_roots: &[PathBuf],
     include_standard_roots: bool,
-    include_pi: bool,
+    shared_sources: SharedUsageSources,
 ) -> Result<UsageHistory, ClaudeError> {
     let since_date = now
         .with_timezone(&Local)
@@ -91,7 +97,7 @@ pub fn scan_local_usage(
         .map_err(|_| ClaudeError::LocalUsage)?;
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(deduplicate(events), now, pricing, &mut accumulator);
-    let includes_pi = if include_pi {
+    let includes_pi = if shared_sources.include_pi {
         match pi_usage::scan_into(storage, now, pricing, provider_id, &mut accumulator) {
             Ok(includes_pi) => includes_pi,
             Err(_) => {
@@ -105,10 +111,25 @@ pub fn scan_local_usage(
     } else {
         false
     };
-    let source_note = if includes_pi {
-        "From your Claude usage history and pi (estimated)"
+    let includes_opencode = if shared_sources.include_opencode {
+        match opencode::scan_routed_usage_into(now, pricing, "claude", &mut accumulator) {
+            Ok(includes_opencode) => includes_opencode,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:opencode",
+                    "OpenCode usage history could not be folded into Claude"
+                );
+                false
+            }
+        }
     } else {
-        "From your Claude usage history (estimated)"
+        false
+    };
+    let source_note = match (includes_pi, includes_opencode) {
+        (true, true) => "From your Claude usage history, pi, and OpenCode (estimated)",
+        (true, false) => "From your Claude usage history and pi (estimated)",
+        (false, true) => "From your Claude usage history and OpenCode (estimated)",
+        (false, false) => "From your Claude usage history (estimated)",
     };
     Ok(accumulator.build(now, source_note))
 }

@@ -13,7 +13,7 @@ use tempfile::tempdir;
 use crate::{
     models::{MetricSection, ProviderErrorKind},
     pricing::{ModelPricing, ModelRates, PricingCatalog, PricingStore, PricingSupplement},
-    providers::UsageProvider,
+    providers::{daily_usage::DailyUsageAccumulator, UsageProvider},
 };
 
 use super::{
@@ -151,6 +151,15 @@ fn scan(paths: Vec<PathBuf>) -> super::scanner::OpenCodeUsageScan {
         .unwrap()
 }
 
+fn scan_card(path: &Path, card_id: &str) -> crate::models::UsageHistory {
+    let scanner = OpenCodeUsageScanner::for_paths(vec![path.to_path_buf()]);
+    let mut accumulator = DailyUsageAccumulator::default();
+    assert!(scanner
+        .scan_into(now(), &pricing(), card_id, &mut accumulator)
+        .unwrap());
+    accumulator.build(now(), "test")
+}
+
 #[test]
 fn definition_exposes_the_complete_metric_contract() {
     let definition = definition();
@@ -222,6 +231,41 @@ fn multiple_databases_are_merged_and_duplicate_messages_count_once() {
     assert_eq!(today.tokens, 500);
     assert_eq!(today.estimated_cost_usd, Some(5.0));
     assert!(!today.cost_estimated);
+}
+
+#[test]
+fn provider_ids_route_direct_usage_without_leaking_into_opencode() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("opencode.db");
+    let connection = create_database(&path, false);
+    for (message, provider, cost, tokens) in [
+        ("hosted", "opencode-go", 1.0, 100),
+        ("claude", "anthropic", 2.0, 200),
+        ("openai", "openai", 3.0, 300),
+        ("codex", "openai-codex", 4.0, 400),
+        ("unsupported", "google", 5.0, 500),
+    ] {
+        insert_message(
+            &connection,
+            "session",
+            message,
+            timestamp(),
+            &exact_message(provider, "priced-model", cost, tokens, 0),
+        );
+    }
+    drop(connection);
+
+    let hosted = scan(vec![path.clone()]).usage.today.unwrap();
+    assert_eq!(hosted.tokens, 100);
+    assert_eq!(hosted.estimated_cost_usd, Some(1.0));
+
+    let claude = scan_card(&path, "claude").today.unwrap();
+    assert_eq!(claude.tokens, 200);
+    assert_eq!(claude.estimated_cost_usd, Some(2.0));
+
+    let codex = scan_card(&path, "codex").today.unwrap();
+    assert_eq!(codex.tokens, 700);
+    assert_eq!(codex.estimated_cost_usd, Some(7.0));
 }
 
 #[test]

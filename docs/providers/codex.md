@@ -21,7 +21,8 @@ same authentication data and respects `CODEX_HOME` when it is set. API-key-only 
 local usage history, but they cannot provide ChatGPT subscription limits.
 
 Spend history is calculated locally from the Codex `sessions` and `archived_sessions` logs. Compatible
-Codex usage recorded by pi can also be included. OpenQuota does not upload these local records.
+Codex usage recorded by pi can also be included. OpenAI and OpenAI Codex usage recorded by local
+OpenCode sessions is included in the Codex history. OpenQuota does not upload these local records.
 
 ## Troubleshooting
 
