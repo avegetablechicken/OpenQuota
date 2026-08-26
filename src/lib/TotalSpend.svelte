@@ -597,7 +597,7 @@
 
     .total-card__empty {
       display: flex;
-      min-height: 76px;
+      min-height: 36px;
       align-items: center;
       justify-content: center;
       flex-direction: column;
@@ -605,10 +605,6 @@
       color: var(--secondary);
       font-size: 11px;
       text-align: center;
-    }
-
-    .total-card__scope--empty-history .total-card__empty {
-      min-height: 36px;
     }
 
     :root[data-density='compact'] .total-card {
@@ -636,7 +632,7 @@
     }
 
     :root[data-density='compact'] .total-card__empty {
-      min-height: 64px;
+      min-height: 32px;
     }
   }
 </style>

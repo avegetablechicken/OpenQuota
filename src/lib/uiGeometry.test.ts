@@ -60,6 +60,7 @@ describe('popover geometry contract', () => {
     expect(css).toMatch(
       /\.spend-scope-switcher\s*{[^}]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\) minmax\(0, 1\.2fr\);/s,
     );
+    expect(css).toMatch(/\.total-card__empty\s*{[^}]*min-height: 36px;/s);
     expect(css).toMatch(/\.app-top-bar\s*{[^}]*min-height: 44px;/s);
     expect(css).toMatch(/\.footer\s*{[^}]*min-height: 52px;/s);
   });
@@ -108,6 +109,9 @@ describe('popover geometry contract', () => {
     );
     expect(css).toMatch(
       /:root\[data-density='compact'\] \.spend-ring\s*{[^}]*width: 88px;[^}]*height: 88px;/s,
+    );
+    expect(css).toMatch(
+      /:root\[data-density='compact'\] \.total-card__empty\s*{[^}]*min-height: 32px;/s,
     );
   });
 

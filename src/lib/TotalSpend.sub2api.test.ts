@@ -139,6 +139,24 @@ describe('TotalSpend Sub2API labels', () => {
     expect(screen.getByText('No token data for this period')).toBeInTheDocument();
   });
 
+  it('uses the same compact empty state when history exists outside the selected period', () => {
+    render(TotalSpend, {
+      providers: [{ id: 'codex', usageHistories: scopedUsage(100, 'localDevice') }],
+      settings: { ...settings, totalSpendPeriod: 'today' },
+      catalog: new ProviderCatalogIndex(catalog),
+      viewMode: 'localDevice',
+      onViewModeChange: vi.fn(),
+      onChange: vi.fn(),
+      onShare: vi.fn(),
+    });
+
+    const scope = screen.getByRole('region', { name: 'Local Device Spend' });
+    expect(scope).not.toHaveClass('total-card__scope--empty-history');
+    expect(scope.querySelector('.total-card__empty')).toHaveTextContent(
+      'No token data for this period',
+    );
+  });
+
   it('keeps independent Sub2API accounts visually distinct in Accounts and All', async () => {
     rememberSub2ApiUpstream('sub2api', 'codex');
     rememberSub2ApiUpstream('sub2api@2', 'claude');
