@@ -706,14 +706,7 @@ impl Sub2ApiProvider {
         input: Sub2ApiConfigInput,
     ) -> Result<Sub2ApiConfigSaveOutcome, ProviderError> {
         let previous = self.load_config()?;
-        let password = if input.password.trim().is_empty() {
-            previous
-                .as_ref()
-                .map(|config| config.password.clone())
-                .ok_or(Sub2ApiError::InvalidConfig)?
-        } else {
-            input.password.trim().to_owned()
-        };
+        let password = password_for_save(&input, previous.as_ref())?;
         let apply_metric_template = should_apply_metric_template(previous.as_ref(), input.upstream);
         let (base_url, codex_provider, custom_base_url) = connection_target(
             &input,
@@ -1089,6 +1082,20 @@ fn connection_target(
     }
 }
 
+fn password_for_save(
+    input: &Sub2ApiConfigInput,
+    previous: Option<&StoredConfig>,
+) -> Result<String, Sub2ApiError> {
+    let password = input.password.trim();
+    if !password.is_empty() {
+        return Ok(password.to_owned());
+    }
+    previous
+        .filter(|config| config.upstream == input.upstream)
+        .map(|config| config.password.clone())
+        .ok_or(Sub2ApiError::InvalidConfig)
+}
+
 fn session_scope(config: &StoredConfig) -> String {
     let password_fingerprint = crate::hashing::sha256_hex(config.password.as_bytes());
     crate::hashing::sha256_hex(
@@ -1261,8 +1268,9 @@ mod tests {
     use super::{
         connection_target, default_display_name_for_slot, definition_for, map_stats,
         metric_template, normalize_base_url, normalized_codex_provider_base_url_text,
-        session_scope, should_apply_metric_template, AccountStats, AccountStatsDay, StoredConfig,
-        Sub2ApiClient, Sub2ApiConfigInput, Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
+        password_for_save, session_scope, should_apply_metric_template, AccountStats,
+        AccountStatsDay, StoredConfig, Sub2ApiClient, Sub2ApiConfigInput, Sub2ApiError,
+        Sub2ApiProvider, Sub2ApiProviders,
     };
     use crate::providers::{
         codex::{client::UsageResponse, mapper::map_usage},
@@ -1688,6 +1696,44 @@ mod tests {
         assert_eq!(
             connection_target(&input, |_| unreachable!(), || unreachable!()).unwrap_err(),
             Sub2ApiError::ProviderWithCustomBaseUrl
+        );
+    }
+
+    #[test]
+    fn saved_passwords_are_reused_only_for_the_same_upstream() {
+        let previous = StoredConfig {
+            base_url: "https://claude.example.com".into(),
+            codex_provider: String::new(),
+            custom_base_url: true,
+            email: "old@example.com".into(),
+            password: "old-password".into(),
+            upstream: super::Sub2ApiUpstream::Claude,
+            metric_template_version: super::METRIC_TEMPLATE_VERSION,
+        };
+        let same_upstream = Sub2ApiConfigInput {
+            base_url: "https://claude.example.com".into(),
+            codex_provider: String::new(),
+            custom_base_url: true,
+            email: "new@example.com".into(),
+            password: String::new(),
+            upstream: super::Sub2ApiUpstream::Claude,
+        };
+        assert_eq!(
+            password_for_save(&same_upstream, Some(&previous)).unwrap(),
+            "old-password"
+        );
+
+        let changed_upstream = Sub2ApiConfigInput {
+            base_url: "https://codex.example.com".into(),
+            codex_provider: String::new(),
+            custom_base_url: true,
+            email: "new@example.com".into(),
+            password: String::new(),
+            upstream: super::Sub2ApiUpstream::Codex,
+        };
+        assert_eq!(
+            password_for_save(&changed_upstream, Some(&previous)),
+            Err(Sub2ApiError::InvalidConfig)
         );
     }
 

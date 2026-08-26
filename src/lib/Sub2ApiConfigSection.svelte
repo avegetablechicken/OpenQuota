@@ -19,6 +19,26 @@
     onRemove?: () => void;
   }
 
+  interface ConnectionDraft {
+    baseUrl: string;
+    codexProvider: string;
+    customBaseUrl: boolean;
+    email: string;
+    password: string;
+    revealPassword: boolean;
+  }
+
+  function emptyConnectionDraft(): ConnectionDraft {
+    return {
+      baseUrl: '',
+      codexProvider: '',
+      customBaseUrl: false,
+      email: '',
+      password: '',
+      revealPassword: false,
+    };
+  }
+
   let { providerId, onRemove = () => {} }: Props = $props();
 
   let connectionState = $state<Sub2ApiConfigState>({
@@ -37,6 +57,10 @@
   let password = $state('');
   let upstream = $state<Sub2ApiUpstream>('codex');
   let revealPassword = $state(false);
+  let upstreamDrafts = $state<Record<Sub2ApiUpstream, ConnectionDraft>>({
+    codex: emptyConnectionDraft(),
+    claude: emptyConnectionDraft(),
+  });
   let saving = $state(false);
   let confirmingClear = $state(false);
   let confirmingItemRemoval = $state(false);
@@ -63,10 +87,11 @@
         : Boolean(baseUrl.trim() && !claudeBaseUrlError && !resolvingClaudeBaseUrl)
       : Boolean(baseUrl.trim()),
   );
+  const canReuseSavedPassword = $derived(
+    connectionState.configured && upstream === connectionState.upstream,
+  );
   const canSave = $derived(
-    Boolean(
-      endpointReady && email.trim() && (connectionState.configured || password.trim()) && !saving,
-    ),
+    Boolean(endpointReady && email.trim() && (canReuseSavedPassword || password.trim()) && !saving),
   );
 
   function errorMessage(cause: unknown, fallback: string) {
@@ -80,14 +105,35 @@
     providerResolutionTimer = undefined;
   }
 
+  function currentDraft(): ConnectionDraft {
+    return { baseUrl, codexProvider, customBaseUrl, email, password, revealPassword };
+  }
+
+  function applyDraft(draft: ConnectionDraft) {
+    baseUrl = draft.baseUrl;
+    codexProvider = draft.codexProvider;
+    customBaseUrl = draft.customBaseUrl;
+    email = draft.email;
+    password = draft.password;
+    revealPassword = draft.revealPassword;
+  }
+
   function resetEditor(next = connectionState) {
-    baseUrl = next.baseUrl;
-    codexProvider = next.codexProvider ?? '';
-    customBaseUrl = Boolean(next.customBaseUrl);
-    email = next.email;
+    const drafts: Record<Sub2ApiUpstream, ConnectionDraft> = {
+      codex: emptyConnectionDraft(),
+      claude: emptyConnectionDraft(),
+    };
+    drafts[next.upstream] = {
+      baseUrl: next.baseUrl,
+      codexProvider: next.codexProvider ?? '',
+      customBaseUrl: Boolean(next.customBaseUrl),
+      email: next.email,
+      password: '',
+      revealPassword: false,
+    };
+    upstreamDrafts = drafts;
     upstream = next.upstream;
-    password = '';
-    revealPassword = false;
+    applyDraft(drafts[next.upstream]);
     confirmingClear = false;
     error = null;
     providerError = null;
@@ -120,10 +166,9 @@
 
   function selectUpstream(next: Sub2ApiUpstream) {
     if (upstream === next) return;
+    upstreamDrafts[upstream] = currentDraft();
     upstream = next;
-    baseUrl = '';
-    codexProvider = '';
-    customBaseUrl = false;
+    applyDraft(upstreamDrafts[next]);
     providerError = null;
     resolvingProvider = false;
     cancelProviderResolution();
@@ -131,7 +176,10 @@
     claudeBaseUrlError = null;
     resolvingClaudeBaseUrl = false;
     claudeBaseUrlResolution += 1;
-    if (next === 'claude') resolveClaudeBaseUrl();
+    if (next === 'claude' && !customBaseUrl) resolveClaudeBaseUrl();
+    else if (next === 'codex' && !customBaseUrl && codexProvider.trim()) {
+      updateCodexProvider(codexProvider);
+    }
   }
 
   function setCustomBaseUrl(next: boolean) {
@@ -341,183 +389,185 @@
   });
 </script>
 
-<section class="sub2api-config-section" aria-label="Sub2API Connection">
+<section class="sub2api-config-section" aria-label="Connection">
   <h2>Connection</h2>
-  <div class="sub2api-config-card">
-    <div class="sub2api-config-summary">
-      <ProviderIcon
-        {providerId}
-        upstreamProvider={connectionState.configured ? connectionState.upstream : null}
-        size={20}
-      />
-      <span>
-        <b>Account</b>
-        <small>{connectionState.configured ? connectionState.email : 'Not configured'}</small>
-      </span>
-      <i class:missing={!connectionState.configured} aria-hidden="true"></i>
-      <button bind:this={toggleButton} type="button" onclick={toggleEditor}
-        >{open ? 'Done' : connectionState.configured ? 'Edit' : 'Add'}</button
-      >
-    </div>
-
-    {#if open}
-      <div class="sub2api-config-editor">
-        <fieldset class="upstream-field">
-          <legend>Upstream</legend>
-          <div class="upstream-options">
-            {#each upstreamOptions as option (option)}
-              <label class:active={upstream === option}>
-                <input
-                  type="radio"
-                  name={`${providerId}-upstream`}
-                  value={option}
-                  checked={upstream === option}
-                  disabled={saving}
-                  onchange={() => selectUpstream(option)}
-                />
-                <ProviderIcon providerId={option} size={15} />
-                <span>{option === 'claude' ? 'Claude' : 'Codex'}</span>
-              </label>
-            {/each}
-          </div>
-        </fieldset>
-        {#if upstream === 'codex'}
-          <label>
-            <span>Provider</span>
-            <input
-              type="text"
-              value={codexProvider}
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Provider or profile"
-              aria-label="Codex provider or profile"
-              disabled={saving || customBaseUrl}
-              oninput={(event) => updateCodexProvider(event.currentTarget.value)}
-            />
-          </label>
-          {#if providerError}<div class="config-error" role="alert">{providerError}</div>{/if}
-        {/if}
-        <div class="custom-base-url-row">
-          <span>Custom Base URL</span>
-          <label class="switch custom-base-url-switch">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label="Use custom Base URL"
-              checked={customBaseUrl}
-              disabled={saving}
-              onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
-            />
-            <span></span>
-          </label>
-        </div>
-        {#if upstream === 'claude' && claudeBaseUrlError}
-          <div class="config-error" role="alert">{claudeBaseUrlError}</div>
-        {/if}
-        <label>
-          <span>Base URL</span>
-          <input
-            type="url"
-            bind:value={baseUrl}
-            autocomplete="url"
-            spellcheck="false"
-            placeholder="https://sub2api.example.com"
-            aria-label="Base URL"
-            disabled={saving || !customBaseUrl}
-          />
-        </label>
-        <label>
-          <span>Email</span>
-          <input
-            type="email"
-            bind:value={email}
-            autocomplete="username"
-            spellcheck="false"
-            placeholder="admin@example.com"
-            aria-label="Sub2API administrator email"
-            disabled={saving}
-          />
-        </label>
-        <label>
-          <span>Password</span>
-          <div class="password-field">
-            <input
-              type={revealPassword ? 'text' : 'password'}
-              bind:value={password}
-              autocomplete="current-password"
-              placeholder={connectionState.configured
-                ? 'Leave blank to keep saved password'
-                : 'Password'}
-              aria-label="Sub2API administrator password"
-              disabled={saving}
-            />
-            <button
-              type="button"
-              aria-label={revealPassword ? 'Hide password' : 'Show password'}
-              onclick={() => (revealPassword = !revealPassword)}
-            >
-              <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
-            </button>
-          </div>
-        </label>
-
-        <div class="sub2api-config-actions">
-          <button
-            class="primary"
-            type="button"
-            disabled={!canSave}
-            use:saveShortcut={canSave}
-            onclick={() => void save()}>{saving ? 'Saving…' : 'Save'}</button
-          >
-          {#if connectionState.configured}
-            <button
-              bind:this={clearButton}
-              class="clear"
-              type="button"
-              disabled={saving || confirmingClear}
-              aria-label="Clear Sub2API connection"
-              title="Clear Sub2API connection"
-              onclick={() => void requestClear()}
-            >
-              <Icon name="clear-filled" size={15} />
-            </button>
-          {/if}
-        </div>
-
-        {#if confirmingClear}
-          <div
-            class="clear-confirm"
-            role="group"
-            aria-labelledby="clear-sub2api-title"
-            aria-describedby="clear-sub2api-message"
-          >
-            <strong id="clear-sub2api-title">Clear Sub2API connection?</strong>
-            <span id="clear-sub2api-message"
-              >The Base URL and saved login will be removed. This Sub2API item will remain.</span
-            >
-            <div>
-              <button
-                bind:this={clearCancelButton}
-                type="button"
-                disabled={saving}
-                onkeydown={handleClearKeydown}
-                onclick={() => void cancelClear()}>Cancel</button
-              >
-              <button
-                class="destructive"
-                type="button"
-                disabled={saving}
-                onkeydown={handleClearKeydown}
-                onclick={() => void clearConnection()}>{saving ? 'Clearing…' : 'Clear'}</button
-              >
-            </div>
-          </div>
-        {/if}
-        {#if error}<div class="config-error" role="alert">{error}</div>{/if}
+  <div class="sub2api-config-card" role="list" aria-label="Connection configurations">
+    <div class="sub2api-config-item" role="listitem" aria-label="Sub2API">
+      <div class="sub2api-config-summary">
+        <ProviderIcon
+          {providerId}
+          upstreamProvider={connectionState.configured ? connectionState.upstream : null}
+          size={20}
+        />
+        <span>
+          <b>Sub2API</b>
+          <small>{connectionState.configured ? connectionState.email : 'Not configured'}</small>
+        </span>
+        <i class:missing={!connectionState.configured} aria-hidden="true"></i>
+        <button bind:this={toggleButton} type="button" onclick={toggleEditor}
+          >{open ? 'Done' : connectionState.configured ? 'Edit' : 'Add'}</button
+        >
       </div>
-    {:else if error}
-      <div class="config-error summary-error" role="alert">{error}</div>
-    {/if}
+
+      {#if open}
+        <div class="sub2api-config-editor">
+          <fieldset class="upstream-field">
+            <legend>Upstream</legend>
+            <div class="upstream-options">
+              {#each upstreamOptions as option (option)}
+                <label class:active={upstream === option}>
+                  <input
+                    type="radio"
+                    name={`${providerId}-upstream`}
+                    value={option}
+                    checked={upstream === option}
+                    disabled={saving}
+                    onchange={() => selectUpstream(option)}
+                  />
+                  <ProviderIcon providerId={option} size={15} />
+                  <span>{option === 'claude' ? 'Claude' : 'Codex'}</span>
+                </label>
+              {/each}
+            </div>
+          </fieldset>
+          {#if upstream === 'codex'}
+            <label>
+              <span>Provider</span>
+              <input
+                type="text"
+                value={codexProvider}
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Provider or profile"
+                aria-label="Codex provider or profile"
+                disabled={saving || customBaseUrl}
+                oninput={(event) => updateCodexProvider(event.currentTarget.value)}
+              />
+            </label>
+            {#if providerError}<div class="config-error" role="alert">{providerError}</div>{/if}
+          {/if}
+          <div class="custom-base-url-row">
+            <span>Custom Base URL</span>
+            <label class="switch custom-base-url-switch">
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label="Use custom Base URL"
+                checked={customBaseUrl}
+                disabled={saving}
+                onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
+              />
+              <span></span>
+            </label>
+          </div>
+          {#if upstream === 'claude' && claudeBaseUrlError}
+            <div class="config-error" role="alert">{claudeBaseUrlError}</div>
+          {/if}
+          <label>
+            <span>Base URL</span>
+            <input
+              type="url"
+              bind:value={baseUrl}
+              autocomplete="url"
+              spellcheck="false"
+              placeholder="https://sub2api.example.com"
+              aria-label="Base URL"
+              disabled={saving || !customBaseUrl}
+            />
+          </label>
+          <label>
+            <span>Email</span>
+            <input
+              type="email"
+              bind:value={email}
+              autocomplete="username"
+              spellcheck="false"
+              placeholder="admin@example.com"
+              aria-label="Sub2API administrator email"
+              disabled={saving}
+            />
+          </label>
+          <label>
+            <span>Password</span>
+            <div class="password-field">
+              <input
+                type={revealPassword ? 'text' : 'password'}
+                bind:value={password}
+                autocomplete="current-password"
+                placeholder={canReuseSavedPassword
+                  ? 'Leave blank to keep saved password'
+                  : 'Password'}
+                aria-label="Sub2API administrator password"
+                disabled={saving}
+              />
+              <button
+                type="button"
+                aria-label={revealPassword ? 'Hide password' : 'Show password'}
+                onclick={() => (revealPassword = !revealPassword)}
+              >
+                <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
+              </button>
+            </div>
+          </label>
+
+          <div class="sub2api-config-actions">
+            <button
+              class="primary"
+              type="button"
+              disabled={!canSave}
+              use:saveShortcut={canSave}
+              onclick={() => void save()}>{saving ? 'Saving…' : 'Save'}</button
+            >
+            {#if connectionState.configured}
+              <button
+                bind:this={clearButton}
+                class="clear"
+                type="button"
+                disabled={saving || confirmingClear}
+                aria-label="Clear Sub2API connection"
+                title="Clear Sub2API connection"
+                onclick={() => void requestClear()}
+              >
+                <Icon name="clear-filled" size={15} />
+              </button>
+            {/if}
+          </div>
+
+          {#if confirmingClear}
+            <div
+              class="clear-confirm"
+              role="group"
+              aria-labelledby="clear-sub2api-title"
+              aria-describedby="clear-sub2api-message"
+            >
+              <strong id="clear-sub2api-title">Clear Sub2API connection?</strong>
+              <span id="clear-sub2api-message"
+                >The Base URL and saved login will be removed. This Sub2API item will remain.</span
+              >
+              <div>
+                <button
+                  bind:this={clearCancelButton}
+                  type="button"
+                  disabled={saving}
+                  onkeydown={handleClearKeydown}
+                  onclick={() => void cancelClear()}>Cancel</button
+                >
+                <button
+                  class="destructive"
+                  type="button"
+                  disabled={saving}
+                  onkeydown={handleClearKeydown}
+                  onclick={() => void clearConnection()}>{saving ? 'Clearing…' : 'Clear'}</button
+                >
+              </div>
+            </div>
+          {/if}
+          {#if error}<div class="config-error" role="alert">{error}</div>{/if}
+        </div>
+      {:else if error}
+        <div class="config-error summary-error" role="alert">{error}</div>
+      {/if}
+    </div>
   </div>
 </section>
 
@@ -586,6 +636,10 @@
     overflow: hidden;
     border-radius: 12px;
     background: var(--card);
+  }
+
+  :global(.sub2api-config-item + .sub2api-config-item) {
+    border-top: 1px solid var(--separator);
   }
 
   .sub2api-config-summary {

@@ -80,9 +80,8 @@ export class ProviderCatalogIndex {
     return this.#connectionConfigProviderIds.has(id);
   }
 
-  connectionConfigurationLabel(id: string) {
-    const family = id.split('@', 1)[0];
-    return this.provider(family)?.displayName ?? this.provider(id)?.displayName ?? id;
+  connectionConfigurationLabel() {
+    return 'Unofficial Configuration';
   }
 
   localUsageSourceNote(id: string, displayName?: string) {

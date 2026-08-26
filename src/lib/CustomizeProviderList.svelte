@@ -81,7 +81,7 @@
     ),
   );
   const addableProviderName = $derived(
-    addableProvider ? catalog.connectionConfigurationLabel(addableProvider.id) : '',
+    addableProvider ? catalog.connectionConfigurationLabel() : '',
   );
   function updateProvider(provider: ProviderLayout) {
     onChange({

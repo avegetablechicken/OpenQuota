@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import Sub2ApiConfigSection from './Sub2ApiConfigSection.svelte';
@@ -74,13 +74,15 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
 
     await screen.findByText('Not configured');
-    expect(screen.getByText('Account')).toBeInTheDocument();
+    const connections = screen.getByRole('list', { name: 'Connection configurations' });
+    expect(within(connections).getAllByRole('listitem')).toHaveLength(1);
+    expect(within(connections).getByText('Sub2API')).toBeInTheDocument();
     expect(get(sub2ApiUpstreams)['sub2api@2']).toBeUndefined();
   });
 
   it('saves a Claude upstream login without retaining the password in the UI', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api' });
-    expect(await screen.findByRole('region', { name: 'Sub2API Connection' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Connection' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
     const baseUrl = screen.getByLabelText('Base URL');
@@ -110,7 +112,7 @@ describe('Sub2ApiConfigSection', () => {
     );
     expect(screen.queryByDisplayValue('secret-password')).not.toBeInTheDocument();
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
-    expect(screen.getByText('Account')).toBeInTheDocument();
+    expect(screen.getByText('Sub2API')).toBeInTheDocument();
   });
 
   it('allows a custom Claude Base URL only after its switch is enabled', async () => {
@@ -157,6 +159,151 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByLabelText('Base URL')).toBeDisabled();
     await waitFor(() =>
       expect(screen.getByLabelText('Base URL')).toHaveValue('https://resolved-claude.example.com'),
+    );
+  });
+
+  it('restores a saved account while keeping new upstream drafts separate', async () => {
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === 'get_sub2api_config_state') {
+        return Promise.resolve({
+          configured: true,
+          baseUrl: 'https://claude.example.com',
+          codexProvider: '',
+          customBaseUrl: true,
+          email: 'old@example.com',
+          upstream: 'claude',
+        });
+      }
+      if (command === 'resolve_sub2api_codex_provider') {
+        return Promise.resolve('https://resolved.example.com');
+      }
+      if (command === 'resolve_sub2api_claude_base_url') {
+        return Promise.resolve('https://resolved-claude.example.com');
+      }
+      if (command === 'save_sub2api_config') {
+        return Promise.resolve({
+          configured: true,
+          baseUrl: 'https://new-codex.example.com',
+          codexProvider: '',
+          customBaseUrl: true,
+          email: 'new@example.com',
+          upstream: 'codex',
+        });
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`));
+    });
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('old@example.com');
+    await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('old@example.com');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveAttribute(
+      'placeholder',
+      'Leave blank to keep saved password',
+    );
+
+    await fireEvent.click(screen.getByRole('radio', { name: 'Codex' }));
+
+    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveAttribute(
+      'placeholder',
+      'Password',
+    );
+    expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).not.toBeChecked();
+    expect(screen.getByLabelText('Base URL')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
+    await fireEvent.input(screen.getByLabelText('Base URL'), {
+      target: { value: 'https://new-codex.example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'new@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'new-password' },
+    });
+    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+
+    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('old@example.com');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveAttribute(
+      'placeholder',
+      'Leave blank to keep saved password',
+    );
+    expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).toBeChecked();
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://claude.example.com');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+
+    await fireEvent.click(screen.getByRole('radio', { name: 'Codex' }));
+
+    expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).toBeChecked();
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://new-codex.example.com');
+    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('new@example.com');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('new-password');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', {
+        providerId: 'sub2api@2',
+        config: {
+          baseUrl: 'https://new-codex.example.com',
+          codexProvider: '',
+          customBaseUrl: true,
+          email: 'new@example.com',
+          password: 'new-password',
+          upstream: 'codex',
+        },
+      }),
+    );
+  });
+
+  it('keeps unsaved fields in independent drafts for a new connection', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
+    await fireEvent.input(screen.getByLabelText('Base URL'), {
+      target: { value: 'https://draft-codex.example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'codex-draft@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'codex-draft-password' },
+    });
+
+    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+
+    expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).not.toBeChecked();
+    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('');
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'claude-draft@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'claude-draft-password' },
+    });
+
+    await fireEvent.click(screen.getByRole('radio', { name: 'Codex' }));
+
+    expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).toBeChecked();
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://draft-codex.example.com');
+    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue(
+      'codex-draft@example.com',
+    );
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue(
+      'codex-draft-password',
+    );
+
+    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+
+    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue(
+      'claude-draft@example.com',
+    );
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue(
+      'claude-draft-password',
     );
   });
 
@@ -400,13 +547,13 @@ describe('Sub2ApiConfigSection', () => {
     );
     expect(mocks.invoke).not.toHaveBeenCalledWith('delete_sub2api_config', expect.anything());
     expect(screen.getByText('Not configured')).toBeInTheDocument();
-    expect(screen.getByText('Account')).toBeInTheDocument();
+    expect(screen.getByText('Sub2API')).toBeInTheDocument();
   });
 
   it('deletes an item from the separate bottom action row', async () => {
     const onRemove = vi.fn();
     render(Sub2ApiConfigSection, { providerId: 'sub2api@3', onRemove });
-    await screen.findByRole('region', { name: 'Sub2API Connection' });
+    await screen.findByRole('region', { name: 'Connection' });
     await fireEvent.click(screen.getByRole('button', { name: /^Delete Remove/ }));
 
     expect(
