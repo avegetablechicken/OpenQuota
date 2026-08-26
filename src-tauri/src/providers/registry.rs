@@ -128,6 +128,7 @@ impl ProviderRegistry {
             .is_some_and(|runtime| runtime.supports_account_names())
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub fn upstream_provider_id(&self, id: &str) -> Option<&'static str> {
         self.runtimes
             .get(id)

@@ -252,6 +252,7 @@ impl Sub2ApiUpstream {
         }
     }
 
+    #[cfg(any(target_os = "macos", test))]
     fn provider_id(self) -> &'static str {
         match self {
             Self::Codex => "codex",
@@ -1021,6 +1022,7 @@ impl UsageProvider for Sub2ApiProvider {
         true
     }
 
+    #[cfg(any(target_os = "macos", test))]
     fn upstream_provider_id(&self) -> Option<&'static str> {
         self.load_config()
             .ok()

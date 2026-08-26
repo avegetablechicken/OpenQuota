@@ -25,16 +25,8 @@
     usageScope?: UsageScope;
     onSettingsChange: (settings: AppSettings) => void;
   }
-  let {
-    layout,
-    snapshot,
-    settings,
-    now,
-    catalog,
-    viewMode,
-    usageScope,
-    onSettingsChange,
-  }: Props = $props();
+  let { layout, snapshot, settings, now, catalog, viewMode, usageScope, onSettingsChange }: Props =
+    $props();
   const definition = $derived(catalog.metric(layout.id));
   const providerDisplayName = $derived(
     catalog.resolvedDisplayName(snapshot.providerId, settings.providerNames),
@@ -130,10 +122,7 @@
   <StatusMetric label={definition.label} metric={statusMetric} />
 {:else if definition?.source.kind === 'usage'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
-    <UsageMetric
-      label={definition.label}
-      period={usagePeriod(scoped.history)}
-    />
+    <UsageMetric label={definition.label} period={usagePeriod(scoped.history)} />
   {/each}
 {:else if definition?.source.kind === 'value'}
   <ValueMetric

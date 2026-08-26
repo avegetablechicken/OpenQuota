@@ -251,14 +251,7 @@ describe('OpenQuota dashboard', () => {
         ),
         (label) => label.textContent?.trim(),
       ),
-    ).toEqual([
-      'Device',
-      'Yesterday',
-      'Last 30 Days',
-      'Account',
-      'Yesterday',
-      'Last 30 Days',
-    ]);
+    ).toEqual(['Device', 'Yesterday', 'Last 30 Days', 'Account', 'Yesterday', 'Last 30 Days']);
 
     await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
     expect(provider).toBeInTheDocument();
