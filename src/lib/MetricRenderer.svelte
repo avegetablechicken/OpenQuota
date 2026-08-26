@@ -22,9 +22,21 @@
     now: number;
     catalog: ProviderCatalogIndex;
     viewMode: UsageViewMode;
+    usageScope?: UsageScope;
+    showUsageScopeLabel?: boolean;
     onSettingsChange: (settings: AppSettings) => void;
   }
-  let { layout, snapshot, settings, now, catalog, viewMode, onSettingsChange }: Props = $props();
+  let {
+    layout,
+    snapshot,
+    settings,
+    now,
+    catalog,
+    viewMode,
+    usageScope,
+    showUsageScopeLabel = false,
+    onSettingsChange,
+  }: Props = $props();
   const definition = $derived(catalog.metric(layout.id));
   const providerDisplayName = $derived(
     catalog.resolvedDisplayName(snapshot.providerId, settings.providerNames),
@@ -38,7 +50,9 @@
     (definition?.source.kind === 'quota' || definition?.source.kind === 'quotaOrValue') &&
       definition.source.sessionWindow,
   );
-  const scopedUsageHistories = $derived(usageHistoriesForMode(snapshot.usageHistories, viewMode));
+  const scopedUsageHistories = $derived(
+    usageHistoriesForMode(snapshot.usageHistories, usageScope ?? viewMode),
+  );
   function usagePeriod(history: UsageHistory) {
     if (definition?.source.kind !== 'usage') return null;
     if (definition.source.period === 'today') return history.today;
@@ -46,7 +60,7 @@
     return history.last30Days;
   }
   function usageLabel(label: string, scope: UsageScope) {
-    return viewMode === 'all' ? `${USAGE_SCOPE_LABELS[scope]} ${label}` : label;
+    return showUsageScopeLabel ? `${USAGE_SCOPE_LABELS[scope]} ${label}` : label;
   }
   const valueMetric = $derived.by(() => {
     const source = definition?.source;
@@ -106,7 +120,7 @@
 {:else if definition?.source.kind === 'trend'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
     <UsageTrend
-      label={definition.label}
+      label={usageLabel(definition.label, scoped.scope)}
       daily={scoped.history.daily}
       sourceNote={usageSourceNote(
         catalog,

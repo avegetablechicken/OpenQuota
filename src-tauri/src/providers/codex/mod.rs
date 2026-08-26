@@ -1,3 +1,4 @@
+pub mod account_usage;
 pub mod auth;
 pub mod client;
 pub mod config;
@@ -15,14 +16,18 @@ use crate::{
     hashing::sha256_hex,
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderLink, ProviderSnapshot,
-        UsageHistories, UsagePeriodSelection,
+        UsageHistories, UsageHistory, UsagePeriodSelection,
     },
     pricing::PricingStore,
     storage::Storage,
 };
 
 use self::{
-    auth::CodexAuthState, client::CodexClient, local_usage::scan_local_usage, mapper::map_usage,
+    account_usage::{classify_account_usage, AccountUsageOutcome},
+    auth::CodexAuthState,
+    client::CodexClient,
+    local_usage::scan_local_usage,
+    mapper::map_usage,
 };
 use crate::providers::log_usage::scan_or_cached_usage;
 
@@ -277,6 +282,7 @@ impl CodexProvider {
             None
         };
         let mapped = map_usage(&response, reset_credits.as_ref(), now)?;
+        let account_usage = self.fetch_account_usage(auth, now, account_identity, &mut warnings);
         let pricing = self.pricing.current();
         let usage = scan_or_cached_usage(
             &self.storage,
@@ -296,10 +302,28 @@ impl CodexProvider {
             value_metrics: mapped.value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage_histories: UsageHistories::local_device(usage),
+            usage_histories: UsageHistories {
+                local_device: Some(usage),
+                account: account_usage,
+            },
             warnings,
             refreshed_at: now,
         })
+    }
+
+    fn fetch_account_usage(
+        &self,
+        auth: &CodexAuthState,
+        now: chrono::DateTime<Utc>,
+        account_identity: Option<&str>,
+        warnings: &mut Vec<String>,
+    ) -> Option<UsageHistory> {
+        let outcome = self
+            .client
+            .fetch_profile(&auth.access_token, auth.account_id.as_deref())
+            .map(|response| classify_account_usage(&response, now))
+            .unwrap_or(AccountUsageOutcome::Failed);
+        resolve_account_usage(&self.storage, account_identity, outcome, warnings)
     }
 
     fn refresh_access_token(
@@ -333,6 +357,42 @@ impl CodexProvider {
             );
         }
         Ok(())
+    }
+}
+
+fn resolve_account_usage(
+    storage: &Storage,
+    account_identity: Option<&str>,
+    outcome: AccountUsageOutcome,
+    warnings: &mut Vec<String>,
+) -> Option<UsageHistory> {
+    match outcome {
+        AccountUsageOutcome::Available(history) => Some(*history),
+        AccountUsageOutcome::Unavailable => {
+            crate::app_debug!(
+                "http",
+                "codex profile contract unavailable; using local history only"
+            );
+            None
+        }
+        AccountUsageOutcome::Failed => {
+            crate::app_warn!(
+                "http",
+                "codex account usage history could not be refreshed; using cached history when available"
+            );
+            warnings.push(
+                "Codex account usage history could not be refreshed; cached history is shown when available."
+                    .into(),
+            );
+            let identity = account_identity
+                .map(crate::providers::CacheIdentity::Resolved)
+                .unwrap_or(crate::providers::CacheIdentity::Unresolved);
+            storage
+                .load_snapshot_for_identity("codex", identity)
+                .ok()
+                .flatten()
+                .and_then(|snapshot| snapshot.usage_histories.account)
+        }
     }
 }
 
@@ -421,8 +481,12 @@ mod account_tests {
 
     use tempfile::tempdir;
 
-    use super::{validate_account_identity, CodexClient, CodexError, CodexProvider};
+    use super::{
+        resolve_account_usage, validate_account_identity, AccountUsageOutcome, CodexClient,
+        CodexError, CodexProvider,
+    };
     use crate::{
+        models::{ProviderSnapshot, UsageHistories, UsageHistory, UsagePeriod},
         pricing::PricingStore,
         providers::{CacheIdentity, UsageProvider},
         storage::Storage,
@@ -472,5 +536,70 @@ mod account_tests {
             UsageProvider::cache_identity(&unresolved),
             CacheIdentity::Unresolved
         );
+    }
+
+    #[test]
+    fn account_usage_fallback_distinguishes_contract_loss_from_access_failure() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        let cached = UsageHistory {
+            last_30_days: Some(UsagePeriod {
+                tokens: 123,
+                estimated_cost_usd: None,
+                cost_estimated: false,
+                estimate_complete: true,
+                model_breakdown: None,
+                unknown_models: Vec::new(),
+            }),
+            ..UsageHistory::default()
+        };
+        let snapshot = ProviderSnapshot {
+            provider_id: "codex".into(),
+            plan: Some("Plus".into()),
+            quotas: Vec::new(),
+            value_metrics: Vec::new(),
+            status_metrics: Vec::new(),
+            notices: Vec::new(),
+            usage_histories: UsageHistories {
+                local_device: Some(UsageHistory::default()),
+                account: Some(cached.clone()),
+            },
+            warnings: Vec::new(),
+            refreshed_at: chrono::Utc::now(),
+        };
+        storage
+            .save_snapshot_for_identity(&snapshot, Some("account-a"))
+            .unwrap();
+
+        let mut warnings = Vec::new();
+        assert!(resolve_account_usage(
+            &storage,
+            Some("account-a"),
+            AccountUsageOutcome::Unavailable,
+            &mut warnings,
+        )
+        .is_none());
+        assert!(warnings.is_empty());
+
+        assert_eq!(
+            resolve_account_usage(
+                &storage,
+                Some("account-a"),
+                AccountUsageOutcome::Failed,
+                &mut warnings,
+            ),
+            Some(cached)
+        );
+        assert_eq!(warnings.len(), 1);
+
+        warnings.clear();
+        assert!(resolve_account_usage(
+            &storage,
+            Some("account-b"),
+            AccountUsageOutcome::Failed,
+            &mut warnings,
+        )
+        .is_none());
+        assert_eq!(warnings.len(), 1);
     }
 }

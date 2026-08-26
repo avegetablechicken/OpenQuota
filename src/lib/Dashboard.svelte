@@ -13,7 +13,11 @@
   import type { SpendProjection } from './totalSpend';
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
-  import { shouldShowProviderForMode, usageHistoriesForMode } from './usageScopes';
+  import {
+    shouldShowProviderForMode,
+    USAGE_SCOPE_LABELS,
+    usageHistoriesForMode,
+  } from './usageScopes';
   import type {
     AppSettings,
     MetricLayout,
@@ -23,6 +27,8 @@
     UpdateFailure,
     UsageViewMode,
     UsageViewState,
+    UsageHistories,
+    UsageScope,
     UpdateStatus,
   } from './types';
 
@@ -79,6 +85,69 @@
     onOpenUpdatePage,
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
+  interface MetricRenderRow {
+    key: string;
+    metric: MetricLayout;
+    usageScope?: UsageScope;
+    showUsageScopeLabel: boolean;
+    reorderable: boolean;
+  }
+  function isHistoryMetric(metric: MetricLayout) {
+    const source = metricDefinition(metric.id)?.source.kind;
+    return source === 'usage' || source === 'trend';
+  }
+  function metricRenderRows(
+    metrics: MetricLayout[],
+    histories: UsageHistories,
+    viewMode: UsageViewMode,
+  ): MetricRenderRow[] {
+    const scopes = usageHistoriesForMode(histories, viewMode).map(({ scope }) => scope);
+    const groupScopes = viewMode === 'all' && scopes.length > 1;
+    if (!groupScopes) {
+      return metrics.map((metric) => ({
+        key: metric.id,
+        metric,
+        usageScope: isHistoryMetric(metric) ? scopes[0] : undefined,
+        showUsageScopeLabel: false,
+        reorderable: true,
+      }));
+    }
+
+    const rows: MetricRenderRow[] = [];
+    const historyMetrics = metrics.filter(isHistoryMetric);
+    let historyMetricsInserted = false;
+    for (const metric of metrics) {
+      if (isHistoryMetric(metric)) {
+        if (historyMetricsInserted) continue;
+        for (const [scopeIndex, usageScope] of scopes.entries()) {
+          for (const historyMetric of historyMetrics) {
+            rows.push({
+              key: `${historyMetric.id}:${usageScope}`,
+              metric: historyMetric,
+              usageScope,
+              showUsageScopeLabel: true,
+              reorderable: scopeIndex === 0,
+            });
+          }
+        }
+        historyMetricsInserted = true;
+      } else {
+        rows.push({
+          key: metric.id,
+          metric,
+          showUsageScopeLabel: false,
+          reorderable: true,
+        });
+      }
+    }
+    return rows;
+  }
+  function metricRowLabel(row: MetricRenderRow) {
+    const label = metricDefinition(row.metric.id)?.label ?? row.metric.id;
+    return row.showUsageScopeLabel && row.usageScope
+      ? `${USAGE_SCOPE_LABELS[row.usageScope]} ${label}`
+      : label;
+  }
   const providerDisplayName = (id: string) =>
     catalog.resolvedDisplayName(id, settings.providerNames);
   const providerMessage = (id: string, message: string) =>
@@ -540,43 +609,49 @@
             </span>
           </div>
         {/if}
-        {#each alwaysMetrics as metric (metric.id)}
+        {#each metricRenderRows(alwaysMetrics, snapshot.usageHistories, usageViewMode) as row (row.key)}
           <div
             class="metric-context-target"
             class:metric-context-target--content-morph={demandMorphing}
-            data-reorder-group={`dashboard-metrics:${provider.id}`}
-            data-reorder-id={metric.id}
+            data-reorder-group={row.reorderable ? `dashboard-metrics:${provider.id}` : undefined}
+            data-reorder-id={row.reorderable ? row.metric.id : undefined}
             role="group"
-            aria-label={`${metricDefinition(metric.id)?.label ?? metric.id} options`}
+            aria-label={`${metricRowLabel(row)} options`}
             use:pointerReorder={{
-              id: metric.id,
+              id: row.metric.id,
               group: `dashboard-metrics:${provider.id}`,
-              label: metricDefinition(metric.id)?.label ?? metric.id,
+              label: metricRowLabel(row),
+              disabled: !row.reorderable,
               touchGripOnly: true,
-              onReorder: (targetId) => reorderMetricToTarget(metric.id, provider.id, targetId),
+              onReorder: (targetId) =>
+                reorderMetricToTarget(row.metric.id, provider.id, targetId),
               onStart: onReorderStart,
               onEnd: onReorderEnd,
             }}
             animate:flip={reorderFlip(reducedMotion || demandMorphing)}
-            oncontextmenu={(event) => openMetricMenu(event, provider.id, metric.id)}
+            oncontextmenu={(event) => openMetricMenu(event, provider.id, row.metric.id)}
           >
-            <button
-              class="metric-reorder-handle"
-              data-reorder-handle
-              data-reorder-touch-handle
-              type="button"
-              aria-label={`Move ${metricDefinition(metric.id)?.label ?? metric.id}`}
-              aria-describedby="reorder-instructions"
-              aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
-              ><Icon name="grip-lines" size={13} strokeWidth={2} /></button
-            >
+            {#if row.reorderable}
+              <button
+                class="metric-reorder-handle"
+                data-reorder-handle
+                data-reorder-touch-handle
+                type="button"
+                aria-label={`Move ${metricDefinition(row.metric.id)?.label ?? row.metric.id}`}
+                aria-describedby="reorder-instructions"
+                aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                ><Icon name="grip-lines" size={13} strokeWidth={2} /></button
+              >
+            {/if}
             <MetricRenderer
-              layout={metric}
+              layout={row.metric}
               {snapshot}
               {settings}
               {now}
               {catalog}
               viewMode={usageViewMode}
+              usageScope={row.usageScope}
+              showUsageScopeLabel={row.showUsageScopeLabel}
               {onSettingsChange}
             />
           </div>
@@ -599,44 +674,51 @@
           </button>
           {#if provider.expanded}
             <div class="demand-metrics" transition:slide={springMotion(reducedMotion)}>
-              {#each demandMetrics as metric (metric.id)}
+              {#each metricRenderRows(demandMetrics, snapshot.usageHistories, usageViewMode) as row (row.key)}
                 <div
                   class="metric-context-target"
                   class:metric-context-target--content-morph={demandMorphing}
-                  data-reorder-group={`dashboard-metrics:${provider.id}`}
-                  data-reorder-id={metric.id}
+                  data-reorder-group={row.reorderable
+                    ? `dashboard-metrics:${provider.id}`
+                    : undefined}
+                  data-reorder-id={row.reorderable ? row.metric.id : undefined}
                   role="group"
-                  aria-label={`${metricDefinition(metric.id)?.label ?? metric.id} options`}
+                  aria-label={`${metricRowLabel(row)} options`}
                   use:pointerReorder={{
-                    id: metric.id,
+                    id: row.metric.id,
                     group: `dashboard-metrics:${provider.id}`,
-                    label: metricDefinition(metric.id)?.label ?? metric.id,
+                    label: metricRowLabel(row),
+                    disabled: !row.reorderable,
                     touchGripOnly: true,
                     onReorder: (targetId) =>
-                      reorderMetricToTarget(metric.id, provider.id, targetId),
+                      reorderMetricToTarget(row.metric.id, provider.id, targetId),
                     onStart: onReorderStart,
                     onEnd: onReorderEnd,
                   }}
                   animate:flip={reorderFlip(reducedMotion || demandMorphing)}
-                  oncontextmenu={(event) => openMetricMenu(event, provider.id, metric.id)}
+                  oncontextmenu={(event) => openMetricMenu(event, provider.id, row.metric.id)}
                 >
-                  <button
-                    class="metric-reorder-handle"
-                    data-reorder-handle
-                    data-reorder-touch-handle
-                    type="button"
-                    aria-label={`Move ${metricDefinition(metric.id)?.label ?? metric.id}`}
-                    aria-describedby="reorder-instructions"
-                    aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
-                    ><Icon name="grip-lines" size={13} strokeWidth={2} /></button
-                  >
+                  {#if row.reorderable}
+                    <button
+                      class="metric-reorder-handle"
+                      data-reorder-handle
+                      data-reorder-touch-handle
+                      type="button"
+                      aria-label={`Move ${metricDefinition(row.metric.id)?.label ?? row.metric.id}`}
+                      aria-describedby="reorder-instructions"
+                      aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                      ><Icon name="grip-lines" size={13} strokeWidth={2} /></button
+                    >
+                  {/if}
                   <MetricRenderer
-                    layout={metric}
+                    layout={row.metric}
                     {snapshot}
                     {settings}
                     {now}
                     {catalog}
                     viewMode={usageViewMode}
+                    usageScope={row.usageScope}
+                    showUsageScopeLabel={row.showUsageScopeLabel}
                     {onSettingsChange}
                   />
                 </div>

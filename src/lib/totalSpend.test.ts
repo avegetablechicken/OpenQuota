@@ -150,6 +150,35 @@ describe('Total Spend projection', () => {
     });
   });
 
+  it('adds token-only Codex account history to the Accounts pie projection', () => {
+    const providers: SpendProvider[] = [
+      {
+        id: 'codex',
+        usageHistories: {
+          localDevice: history({
+            tokens: 1_000,
+            estimatedCostUsd: 2,
+            costEstimated: true,
+            estimateComplete: true,
+          }),
+          account: history({
+            tokens: 9_000,
+            estimatedCostUsd: null,
+            costEstimated: false,
+            estimateComplete: true,
+          }),
+        },
+      },
+    ];
+
+    expect(projectSpend(providers, 'today', 'tokens', 'account')).toMatchObject({
+      scope: 'account',
+      centerValue: 9_000,
+      slices: [{ id: 'codex', value: 9_000 }],
+    });
+    expect(projectSpend(providers, 'today', 'cost', 'account').slices).toEqual([]);
+  });
+
   it('shows one aggregated Others slice for filtered token usage only on local device', () => {
     const otherUsage = {
       today: {

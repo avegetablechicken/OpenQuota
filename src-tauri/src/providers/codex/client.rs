@@ -9,6 +9,7 @@ use super::CodexError;
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const PROFILE_URL: &str = "https://chatgpt.com/backend-api/wham/profiles/me";
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const CONSUME_RESET_CREDIT_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
@@ -31,14 +32,17 @@ pub struct CodexClient {
     client: Client,
     refresh_url: String,
     usage_url: String,
+    profile_url: String,
     reset_credits_url: String,
     consume_reset_credit_url: String,
+    profile_timeout: Duration,
 }
 
 impl CodexClient {
     pub fn new() -> Result<Self, CodexError> {
         Self::with_endpoints(
             USAGE_URL,
+            PROFILE_URL,
             RESET_CREDITS_URL,
             CONSUME_RESET_CREDIT_URL,
             REFRESH_URL,
@@ -48,6 +52,7 @@ impl CodexClient {
 
     fn with_endpoints(
         usage_url: &str,
+        profile_url: &str,
         reset_credits_url: &str,
         consume_reset_credit_url: &str,
         refresh_url: &str,
@@ -63,8 +68,10 @@ impl CodexClient {
             client,
             refresh_url: refresh_url.to_owned(),
             usage_url: usage_url.to_owned(),
+            profile_url: profile_url.to_owned(),
             reset_credits_url: reset_credits_url.to_owned(),
             consume_reset_credit_url: consume_reset_credit_url.to_owned(),
+            profile_timeout: timeout.min(Duration::from_secs(10)),
         })
     }
 
@@ -99,6 +106,42 @@ impl CodexClient {
         if status.is_success() && body.is_null() {
             return Err(CodexError::InvalidResponse);
         }
+        Ok(UsageResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    pub fn fetch_profile(
+        &self,
+        access_token: &str,
+        account_id: Option<&str>,
+    ) -> Result<UsageResponse, CodexError> {
+        let started = std::time::Instant::now();
+        let mut request = self
+            .client
+            .get(&self.profile_url)
+            .timeout(self.profile_timeout)
+            .bearer_auth(access_token)
+            .header("Accept", "application/json");
+        if let Some(account_id) = account_id.filter(|value| !value.is_empty()) {
+            request = request.header("ChatGPT-Account-Id", account_id);
+        }
+        let response = request.send().map_err(|_| {
+            crate::app_debug!("http", "codex profile request failed (transport)");
+            CodexError::ConnectionFailed
+        })?;
+        let status = response.status();
+        crate::app_debug!(
+            "http",
+            "codex profile HTTP {} ({}ms)",
+            status.as_u16(),
+            started.elapsed().as_millis()
+        );
+        let headers = normalized_headers(response.headers());
+        let text = response.text().map_err(|_| CodexError::InvalidResponse)?;
+        let body = serde_json::from_str(&text).unwrap_or(Value::Null);
         Ok(UsageResponse {
             status,
             headers,
@@ -281,6 +324,7 @@ mod tests {
     fn client(base: &str) -> CodexClient {
         CodexClient::with_endpoints(
             &format!("{base}/usage"),
+            &format!("{base}/profile"),
             &format!("{base}/reset-credits"),
             &format!("{base}/reset-credits/consume"),
             &format!("{base}/token"),
@@ -355,6 +399,21 @@ mod tests {
     }
 
     #[test]
+    fn profile_request_uses_the_active_chatgpt_account() {
+        let (base, request) = capture_once(r#"{"stats":{"daily_usage_buckets":[]}}"#);
+        let response = client(&base)
+            .fetch_profile("secret-token", Some("account-id"))
+            .unwrap();
+        assert!(response.status.is_success());
+
+        let request = request.recv_timeout(Duration::from_secs(1)).unwrap();
+        let request = request.to_ascii_lowercase();
+        assert!(request.starts_with("get /profile http/1.1"));
+        assert!(request.contains("authorization: bearer secret-token"));
+        assert!(request.contains("chatgpt-account-id: account-id"));
+    }
+
+    #[test]
     fn reset_credit_consume_targets_one_credit_with_an_idempotency_key() {
         let (base, request) = capture_once(r#"{"code":"reset"}"#);
         let response = client(&base)
@@ -400,6 +459,7 @@ mod tests {
         );
         let client = CodexClient::with_endpoints(
             &format!("{base}/usage"),
+            &format!("{base}/profile"),
             &format!("{base}/reset-credits"),
             &format!("{base}/reset-credits/consume"),
             &format!("{base}/token"),

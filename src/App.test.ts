@@ -144,13 +144,48 @@ describe('OpenQuota dashboard', () => {
     expect(screen.getByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
   });
 
+  it('omits scope prefixes when a provider exposes only one history scope', async () => {
+    const expandedSettings: SettingsViewState = {
+      ...settingsState,
+      settings: {
+        ...settingsState.settings,
+        providers: settingsState.settings.providers.map((provider) =>
+          provider.id === 'codex' ? { ...provider, expanded: true } : provider,
+        ),
+      },
+    };
+    mockInvoke((command: string) => {
+      if (command === 'get_usage_state') return Promise.resolve(liveState);
+      if (command === 'get_app_settings') return Promise.resolve(expandedSettings);
+      if (command === 'check_for_updates')
+        return Promise.resolve({
+          available: false,
+          currentVersion: '0.1.0',
+          version: null,
+          body: null,
+          installable: true,
+          releaseUrl: 'https://github.com/deviffyy/OpenQuota/releases/latest',
+        });
+      return Promise.resolve();
+    });
+
+    render(App);
+    const provider = await screen.findByRole('group', { name: 'Codex provider' });
+    expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
+    expect(
+      Array.from(provider.querySelectorAll('.usage-row > span'), (label) =>
+        label.textContent?.trim(),
+      ),
+    ).toEqual(['Today', 'Yesterday', 'Last 30 Days']);
+  });
+
   it('filters only history metrics while keeping provider quotas visible', async () => {
     const dualScopeState = structuredClone(codexState);
     dualScopeState.snapshot!.usageHistories.account = {
       ...structuredClone(dualScopeState.snapshot!.usageHistories.localDevice!),
       today: {
         tokens: 900_000,
-        estimatedCostUsd: 1.5,
+        estimatedCostUsd: null,
         costEstimated: false,
         estimateComplete: true,
       },
@@ -159,6 +194,7 @@ describe('OpenQuota dashboard', () => {
       ...settingsState,
       settings: {
         ...settingsState.settings,
+        totalSpendMetric: 'tokens',
         providers: settingsState.settings.providers.map((provider) =>
           provider.id === 'codex' ? { ...provider, expanded: true } : provider,
         ),
@@ -183,12 +219,31 @@ describe('OpenQuota dashboard', () => {
     render(App);
     const provider = await screen.findByRole('group', { name: 'Codex provider' });
     expect(screen.getByRole('region', { name: 'Local Device Spend' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Accounts Spend' })).toBeInTheDocument();
-    expect(within(provider).getAllByRole('region', { name: 'Usage Trend' })).toHaveLength(2);
+    const accountSpend = screen.getByRole('region', { name: 'Accounts Spend' });
+    expect(accountSpend).toBeInTheDocument();
+    expect(within(accountSpend).getByText('Codex')).toBeInTheDocument();
+    expect(accountSpend.querySelectorAll('.spend-ring__segment')).toHaveLength(1);
+    expect(within(provider).getByRole('region', { name: 'Device Usage Trend' })).toBeInTheDocument();
+    expect(
+      within(provider).getByRole('region', { name: 'Accounts Usage Trend' }),
+    ).toBeInTheDocument();
     expect(within(provider).getByText('Device Today')).toBeInTheDocument();
     expect(within(provider).getByText('Accounts Today')).toBeInTheDocument();
+    expect(
+      Array.from(provider.querySelectorAll('.usage-row > span'), (label) =>
+        label.textContent?.trim(),
+      ),
+    ).toEqual([
+      'Device Today',
+      'Device Yesterday',
+      'Device Last 30 Days',
+      'Accounts Today',
+      'Accounts Yesterday',
+      'Accounts Last 30 Days',
+    ]);
 
     await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    expect(provider).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Session used' })).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
     expect(within(provider).getAllByRole('region', { name: 'Usage Trend' })).toHaveLength(1);
@@ -197,6 +252,7 @@ describe('OpenQuota dashboard', () => {
     expect(within(provider).getByText('Today')).toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Device' }));
+    expect(provider).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
     expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
     expect(within(provider).getByText('Today')).toBeInTheDocument();
