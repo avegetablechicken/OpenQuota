@@ -15,16 +15,15 @@ OpenQuota tracks quota information for the Z.ai GLM Coding Plan.
 ## Setup
 
 Add a Z.ai API key from **Customize** in OpenQuota. Saved keys are kept in the operating system's
-credential store. OpenQuota also checks `ZAI_API_KEY`, `GLM_API_KEY`,
+credential store. OpenQuota also checks `ZAI_API_KEY`, `ZHIPUAI_API_KEY`, `GLM_API_KEY`,
 `~/.config/openquota/zai.json`, and `~/.config/zai/key.json`; a key saved in the app takes priority.
 
 The key must belong to an account with an active GLM Coding Plan.
 
 OpenQuota reads account usage history with the same API key. Legacy token plans use Z.ai's model
 usage history, while newer credit-based plans use the credit usage history with cached input,
-uncached input, output-token, and model breakdowns. If the international endpoint has no history,
-OpenQuota checks the BigModel endpoint without combining the two sources, so mirrored data is not
-counted twice. Credits remain a provider-specific unit and are never presented as US dollars.
+uncached input, output-token, and model breakdowns. OpenQuota uses the `api.z.ai` service for quota
+and account history. Credits remain a provider-specific unit and are never presented as US dollars.
 
 ## Troubleshooting
 

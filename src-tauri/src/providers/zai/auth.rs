@@ -6,7 +6,7 @@ use crate::{
 use super::ZaiError;
 
 const CONFIG_PATHS: &[&str] = &["~/.config/openquota/zai.json", "~/.config/zai/key.json"];
-const ENVIRONMENT_NAMES: &[&str] = &["ZAI_API_KEY", "GLM_API_KEY"];
+const ENVIRONMENT_NAMES: &[&str] = &["ZAI_API_KEY", "ZHIPUAI_API_KEY", "GLM_API_KEY"];
 
 #[derive(Clone)]
 pub struct ZaiAuthStore {
@@ -199,12 +199,25 @@ mod tests {
         );
         assert_eq!(primary_env.load().unwrap().unwrap().as_str(), "primary-env");
 
-        let legacy_env = store(
+        let secondary_env = store(
             Arc::new(MemorySecrets::default()),
             &[(ENVIRONMENT_NAMES[1], " legacy-env ")],
             &[],
         );
-        assert_eq!(legacy_env.load().unwrap().unwrap().as_str(), "legacy-env");
+        assert_eq!(
+            secondary_env.load().unwrap().unwrap().as_str(),
+            "legacy-env"
+        );
+
+        let compatibility_env = store(
+            Arc::new(MemorySecrets::default()),
+            &[(ENVIRONMENT_NAMES[2], " compatibility-env ")],
+            &[],
+        );
+        assert_eq!(
+            compatibility_env.load().unwrap().unwrap().as_str(),
+            "compatibility-env"
+        );
     }
 
     #[test]

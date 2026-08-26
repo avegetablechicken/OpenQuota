@@ -9,19 +9,11 @@ const SUBSCRIPTION_URL: &str = "https://api.z.ai/api/biz/subscription/list";
 const QUOTA_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
 const ZAI_LEGACY_USAGE_URL: &str = "https://api.z.ai/api/monitor/usage/model-usage";
 const ZAI_CREDIT_USAGE_URL: &str = "https://api.z.ai/api/monitor/credit-usage/usage-detail";
-const BIGMODEL_LEGACY_USAGE_URL: &str = "https://bigmodel.cn/api/monitor/usage/model-usage";
-const BIGMODEL_CREDIT_USAGE_URL: &str = "https://bigmodel.cn/api/monitor/credit-usage/usage-detail";
 
 #[derive(Debug, Clone, Copy)]
 pub enum AccountUsageKind {
     Legacy,
     Credits,
-}
-
-#[derive(Debug, Clone)]
-struct AccountUsageEndpoints {
-    legacy: String,
-    credits: String,
 }
 
 #[derive(Debug)]
@@ -34,7 +26,8 @@ pub struct ZaiClient {
     client: Client,
     subscription_url: String,
     quota_url: String,
-    account_usage_endpoints: Vec<AccountUsageEndpoints>,
+    legacy_usage_url: String,
+    credit_usage_url: String,
 }
 
 impl ZaiClient {
@@ -42,10 +35,8 @@ impl ZaiClient {
         Self::with_endpoints(
             SUBSCRIPTION_URL,
             QUOTA_URL,
-            &[
-                (ZAI_LEGACY_USAGE_URL, ZAI_CREDIT_USAGE_URL),
-                (BIGMODEL_LEGACY_USAGE_URL, BIGMODEL_CREDIT_USAGE_URL),
-            ],
+            ZAI_LEGACY_USAGE_URL,
+            ZAI_CREDIT_USAGE_URL,
             Duration::from_secs(15),
         )
     }
@@ -53,7 +44,8 @@ impl ZaiClient {
     fn with_endpoints(
         subscription_url: &str,
         quota_url: &str,
-        account_usage_endpoints: &[(&str, &str)],
+        legacy_usage_url: &str,
+        credit_usage_url: &str,
         timeout: Duration,
     ) -> Result<Self, ZaiError> {
         let client = crate::http_client::blocking_client_builder()
@@ -66,13 +58,8 @@ impl ZaiClient {
             client,
             subscription_url: subscription_url.to_owned(),
             quota_url: quota_url.to_owned(),
-            account_usage_endpoints: account_usage_endpoints
-                .iter()
-                .map(|(legacy, credits)| AccountUsageEndpoints {
-                    legacy: (*legacy).to_owned(),
-                    credits: (*credits).to_owned(),
-                })
-                .collect(),
+            legacy_usage_url: legacy_usage_url.to_owned(),
+            credit_usage_url: credit_usage_url.to_owned(),
         })
     }
 
@@ -84,25 +71,16 @@ impl ZaiClient {
         self.fetch(&self.subscription_url, api_key, "subscription")
     }
 
-    pub fn account_usage_source_count(&self) -> usize {
-        self.account_usage_endpoints.len()
-    }
-
     pub fn fetch_account_usage(
         &self,
-        source_index: usize,
         kind: AccountUsageKind,
         api_key: &str,
         start_time: &str,
         end_time: &str,
     ) -> Result<ZaiResponse, ZaiError> {
-        let endpoints = self
-            .account_usage_endpoints
-            .get(source_index)
-            .ok_or(ZaiError::InvalidResponse)?;
         let (url, endpoint) = match kind {
-            AccountUsageKind::Legacy => (&endpoints.legacy, "legacy account usage"),
-            AccountUsageKind::Credits => (&endpoints.credits, "credit account usage"),
+            AccountUsageKind::Legacy => (&self.legacy_usage_url, "legacy account usage"),
+            AccountUsageKind::Credits => (&self.credit_usage_url, "credit account usage"),
         };
         let mut url = Url::parse(url).map_err(|_| ZaiError::InvalidResponse)?;
         {
@@ -167,7 +145,8 @@ impl ZaiClient {
         Self::with_endpoints(
             subscription_url,
             quota_url,
-            &[(legacy_usage_url, credit_usage_url)],
+            legacy_usage_url,
+            credit_usage_url,
             timeout,
         )
         .unwrap()

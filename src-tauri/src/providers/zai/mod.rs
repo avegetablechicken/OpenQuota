@@ -107,7 +107,7 @@ pub(crate) fn definition() -> ProviderDefinition {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(super) enum ZaiError {
     #[error(
-        "Add a Z.ai API key in Customize, set ZAI_API_KEY, or configure ~/.config/openquota/zai.json."
+        "Add a Z.ai API key in Customize, set ZAI_API_KEY, ZHIPUAI_API_KEY, or GLM_API_KEY, or configure ~/.config/openquota/zai.json."
     )]
     MissingKey,
     #[error("The Z.ai API key is invalid. Check it at z.ai/manage-apikey/apikey-list.")]
@@ -233,31 +233,18 @@ impl ZaiProvider {
         now: DateTime<Utc>,
     ) -> Option<ZaiAccountUsage> {
         let (start_time, end_time) = account_usage_range(now);
-        let mut empty = None;
-        for source_index in 0..self.client.account_usage_source_count() {
-            let response = required_response(self.client.fetch_account_usage(
-                source_index,
-                kind,
-                api_key,
-                &start_time,
-                &end_time,
-            ));
-            let Ok(response) = response else {
-                continue;
-            };
-            let mapped = match kind {
-                AccountUsageKind::Legacy => map_legacy_usage(&response.body, now),
-                AccountUsageKind::Credits => map_credit_usage(&response.body, now),
-            };
-            let Ok(mapped) = mapped else {
-                continue;
-            };
-            if mapped.has_activity() {
-                return Some(mapped);
-            }
-            empty.get_or_insert(mapped);
+        let response = required_response(self.client.fetch_account_usage(
+            kind,
+            api_key,
+            &start_time,
+            &end_time,
+        ))
+        .ok()?;
+        match kind {
+            AccountUsageKind::Legacy => map_legacy_usage(&response.body, now),
+            AccountUsageKind::Credits => map_credit_usage(&response.body, now),
         }
-        empty
+        .ok()
     }
 }
 

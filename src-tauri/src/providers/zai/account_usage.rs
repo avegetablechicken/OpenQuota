@@ -21,10 +21,6 @@ pub struct ZaiAccountUsage {
 }
 
 impl ZaiAccountUsage {
-    pub fn has_activity(&self) -> bool {
-        self.history.last_30_days.is_some() || self.credits.is_some_and(|value| value > 0.0)
-    }
-
     pub fn credits_metric(&self) -> Option<ValueMetric> {
         self.credits.map(|credits| ValueMetric {
             id: CREDITS_METRIC_ID.into(),
