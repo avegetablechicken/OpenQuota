@@ -5,7 +5,7 @@
   import UsageMetric from './UsageMetric.svelte';
   import UsageTrend from './UsageTrend.svelte';
   import ValueMetric from './ValueMetric.svelte';
-  import { USAGE_SCOPE_LABELS, usageHistoriesForMode } from './usageScopes';
+  import { usageHistoriesForMode } from './usageScopes';
   import type {
     AppSettings,
     MetricLayout,
@@ -23,7 +23,6 @@
     catalog: ProviderCatalogIndex;
     viewMode: UsageViewMode;
     usageScope?: UsageScope;
-    showUsageScopeLabel?: boolean;
     onSettingsChange: (settings: AppSettings) => void;
   }
   let {
@@ -34,7 +33,6 @@
     catalog,
     viewMode,
     usageScope,
-    showUsageScopeLabel = false,
     onSettingsChange,
   }: Props = $props();
   const definition = $derived(catalog.metric(layout.id));
@@ -58,9 +56,6 @@
     if (definition.source.period === 'today') return history.today;
     if (definition.source.period === 'yesterday') return history.yesterday;
     return history.last30Days;
-  }
-  function usageLabel(label: string, scope: UsageScope) {
-    return showUsageScopeLabel ? `${USAGE_SCOPE_LABELS[scope]} ${label}` : label;
   }
   const valueMetric = $derived.by(() => {
     const source = definition?.source;
@@ -120,7 +115,7 @@
 {:else if definition?.source.kind === 'trend'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
     <UsageTrend
-      label={usageLabel(definition.label, scoped.scope)}
+      label={definition.label}
       daily={scoped.history.daily}
       sourceNote={usageSourceNote(
         catalog,
@@ -136,7 +131,7 @@
 {:else if definition?.source.kind === 'usage'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
     <UsageMetric
-      label={usageLabel(definition.label, scoped.scope)}
+      label={definition.label}
       period={usagePeriod(scoped.history)}
     />
   {/each}

@@ -1,8 +1,8 @@
 import type { UsageHistories, UsageHistory, UsageScope, UsageViewMode } from './types';
 
-export const USAGE_SCOPE_LABELS: Record<UsageScope, string> = {
+export const PROVIDER_USAGE_SCOPE_LABELS: Record<UsageScope, string> = {
   localDevice: 'Device',
-  account: 'Accounts',
+  account: 'Account',
 };
 
 export interface ScopedUsageHistory {

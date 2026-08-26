@@ -196,7 +196,17 @@ describe('OpenQuota dashboard', () => {
         ...settingsState.settings,
         totalSpendMetric: 'tokens',
         providers: settingsState.settings.providers.map((provider) =>
-          provider.id === 'codex' ? { ...provider, expanded: true } : provider,
+          provider.id === 'codex'
+            ? {
+                ...provider,
+                expanded: true,
+                metrics: provider.metrics.map((metric) =>
+                  metric.id === 'codex.today'
+                    ? { ...metric, section: 'alwaysVisible' as const }
+                    : metric,
+                ),
+              }
+            : provider,
         ),
       },
     };
@@ -223,23 +233,31 @@ describe('OpenQuota dashboard', () => {
     expect(accountSpend).toBeInTheDocument();
     expect(within(accountSpend).getByText('Codex')).toBeInTheDocument();
     expect(accountSpend.querySelectorAll('.spend-ring__segment')).toHaveLength(1);
-    expect(within(provider).getByRole('region', { name: 'Device Usage Trend' })).toBeInTheDocument();
+    expect(within(provider).getAllByRole('region', { name: 'Usage Trend' })).toHaveLength(2);
+    expect(within(provider).getAllByRole('heading', { name: 'Device' })).toHaveLength(2);
+    expect(within(provider).getAllByRole('heading', { name: 'Account' })).toHaveLength(2);
     expect(
-      within(provider).getByRole('region', { name: 'Accounts Usage Trend' }),
-    ).toBeInTheDocument();
-    expect(within(provider).getByText('Device Today')).toBeInTheDocument();
-    expect(within(provider).getByText('Accounts Today')).toBeInTheDocument();
+      Array.from(
+        provider.querySelectorAll(
+          '.provider-card > .metric-render-block .usage-scope-heading span, .provider-card > .metric-render-block .trend-row > strong, .provider-card > .metric-render-block .usage-row > span',
+        ),
+        (label) => label.textContent?.trim(),
+      ),
+    ).toEqual(['Device', 'Usage Trend', 'Today', 'Account', 'Usage Trend', 'Today']);
     expect(
-      Array.from(provider.querySelectorAll('.usage-row > span'), (label) =>
-        label.textContent?.trim(),
+      Array.from(
+        provider.querySelectorAll(
+          '.demand-metrics .usage-scope-heading span, .demand-metrics .usage-row > span',
+        ),
+        (label) => label.textContent?.trim(),
       ),
     ).toEqual([
-      'Device Today',
-      'Device Yesterday',
-      'Device Last 30 Days',
-      'Accounts Today',
-      'Accounts Yesterday',
-      'Accounts Last 30 Days',
+      'Device',
+      'Yesterday',
+      'Last 30 Days',
+      'Account',
+      'Yesterday',
+      'Last 30 Days',
     ]);
 
     await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
@@ -248,7 +266,6 @@ describe('OpenQuota dashboard', () => {
     expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
     expect(within(provider).getAllByRole('region', { name: 'Usage Trend' })).toHaveLength(1);
     expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
-    expect(within(provider).queryByText('Device Today')).not.toBeInTheDocument();
     expect(within(provider).getByText('Today')).toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Device' }));

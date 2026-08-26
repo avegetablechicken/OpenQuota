@@ -16,7 +16,7 @@ import {
 } from './providerIconPaths';
 import { fillRingSector, spendRingArcs } from './spendRing';
 import { SPEND_SCOPE_LABELS, type SpendProjection } from './totalSpend';
-import { USAGE_SCOPE_LABELS, usageHistoriesForMode } from './usageScopes';
+import { PROVIDER_USAGE_SCOPE_LABELS, usageHistoriesForMode } from './usageScopes';
 import type {
   AppSettings,
   DailyUsage,
@@ -163,12 +163,13 @@ export function buildProviderShareRows(
       continue;
     }
     if (source.kind === 'trend') {
-      for (const scoped of usageHistoriesForMode(snapshot.usageHistories, viewMode)) {
+      const scopedHistories = usageHistoriesForMode(snapshot.usageHistories, viewMode);
+      for (const scoped of scopedHistories) {
         rows.push({
           kind: 'trend',
           label:
-            viewMode === 'all'
-              ? `${USAGE_SCOPE_LABELS[scoped.scope]} ${definition.label}`
+            scopedHistories.length > 1
+              ? `${definition.label} · ${PROVIDER_USAGE_SCOPE_LABELS[scoped.scope]}`
               : definition.label,
           daily: scoped.history.daily,
         });
@@ -208,13 +209,14 @@ export function buildProviderShareRows(
     }
 
     if (source.kind !== 'usage') continue;
-    for (const scoped of usageHistoriesForMode(snapshot.usageHistories, viewMode)) {
+    const scopedHistories = usageHistoriesForMode(snapshot.usageHistories, viewMode);
+    for (const scoped of scopedHistories) {
       const period = usagePeriod(scoped.history, source.period);
       rows.push({
         kind: 'text',
         label:
-          viewMode === 'all'
-            ? `${USAGE_SCOPE_LABELS[scoped.scope]} ${definition.label}`
+          scopedHistories.length > 1
+            ? `${definition.label} · ${PROVIDER_USAGE_SCOPE_LABELS[scoped.scope]}`
             : definition.label,
         value: usageReading(period),
         condensed: previousTextSection === metric.section,
