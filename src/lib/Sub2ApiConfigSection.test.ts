@@ -202,12 +202,13 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByLabelText('Base URL')).toHaveValue('');
   });
 
-  it('registers Ctrl+S only while the Save button is enabled', async () => {
+  it('registers Enter only while the Save button is enabled', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
 
-    await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+    const email = screen.getByLabelText('Sub2API administrator email');
+    await fireEvent.keyDown(email, { key: 'Enter' });
     expect(mocks.invoke).not.toHaveBeenCalledWith('save_sub2api_config', expect.anything());
 
     await fireEvent.input(screen.getByLabelText('Codex provider or profile'), {
@@ -216,15 +217,20 @@ describe('Sub2ApiConfigSection', () => {
     await waitFor(() =>
       expect(screen.getByLabelText('Base URL')).toHaveValue('https://resolved.example.com'),
     );
-    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+    await fireEvent.input(email, {
       target: { value: 'shortcut@example.com' },
     });
-    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+    const password = screen.getByLabelText('Sub2API administrator password');
+    await fireEvent.input(password, {
       target: { value: 'shortcut-password' },
     });
     const saveButton = screen.getByRole('button', { name: 'Save' });
-    expect(saveButton).toHaveAttribute('aria-keyshortcuts', 'Control+S');
-    await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+    expect(saveButton).toHaveAttribute('aria-keyshortcuts', 'Enter');
+    await fireEvent.keyDown(screen.getByRole('switch', { name: 'Use custom Base URL' }), {
+      key: 'Enter',
+    });
+    expect(mocks.invoke).not.toHaveBeenCalledWith('save_sub2api_config', expect.anything());
+    await fireEvent.keyDown(password, { key: 'Enter' });
 
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', {

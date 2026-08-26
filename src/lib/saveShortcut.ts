@@ -1,25 +1,37 @@
-import { desktopPlatform } from './platform';
-
-function matchesSaveShortcut(event: KeyboardEvent, platform = desktopPlatform()) {
+function matchesSaveShortcut(event: KeyboardEvent) {
   if (
     event.defaultPrevented ||
     event.isComposing ||
     event.repeat ||
+    event.ctrlKey ||
+    event.metaKey ||
     event.altKey ||
     event.shiftKey ||
-    (event.key.toLowerCase() !== 's' && event.code !== 'KeyS')
+    event.key !== 'Enter'
   ) {
     return false;
   }
-  return platform === 'macos' ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  if (!(event.target instanceof Element)) return true;
+  const input = event.target.closest<HTMLInputElement>('input');
+  if (input) {
+    return (
+      ['email', 'number', 'password', 'search', 'tel', 'text', 'url'].includes(input.type) &&
+      !input.disabled &&
+      !input.readOnly
+    );
+  }
+  return (
+    event.target.closest(
+      'button, a, select, textarea, summary, [contenteditable], [role="button"], [role="menuitem"], [role="option"], [role="combobox"], [role="switch"]',
+    ) === null
+  );
 }
 
 export function saveShortcut(node: HTMLButtonElement, enabled: boolean) {
-  const platform = desktopPlatform();
   let listening = false;
 
   function handleKeydown(event: KeyboardEvent) {
-    if (!matchesSaveShortcut(event, platform) || node.disabled || !node.isConnected) return;
+    if (!matchesSaveShortcut(event) || node.disabled || !node.isConnected) return;
     event.preventDefault();
     node.click();
   }
@@ -29,7 +41,7 @@ export function saveShortcut(node: HTMLButtonElement, enabled: boolean) {
     listening = next;
     if (listening) {
       document.addEventListener('keydown', handleKeydown);
-      node.setAttribute('aria-keyshortcuts', platform === 'macos' ? 'Meta+S' : 'Control+S');
+      node.setAttribute('aria-keyshortcuts', 'Enter');
     } else {
       document.removeEventListener('keydown', handleKeydown);
       node.removeAttribute('aria-keyshortcuts');

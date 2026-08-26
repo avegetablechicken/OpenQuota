@@ -49,7 +49,7 @@ describe('ProviderApiKeySection', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Done' })).toHaveFocus());
   });
 
-  it('registers Ctrl+S only while the Save button is enabled', async () => {
+  it('registers Enter only while the Save button is enabled', async () => {
     render(ProviderApiKeySection, {
       providerId: 'openrouter',
       providerName: 'OpenRouter',
@@ -57,15 +57,18 @@ describe('ProviderApiKeySection', () => {
     await screen.findByRole('region', { name: 'OpenRouter API Key' });
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
 
-    await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+    const input = screen.getByLabelText('OpenRouter API key');
+    await fireEvent.keyDown(input, { key: 'Enter' });
     expect(mocks.invoke).not.toHaveBeenCalledWith('save_provider_api_key', expect.anything());
 
-    await fireEvent.input(screen.getByLabelText('OpenRouter API key'), {
+    await fireEvent.input(input, {
       target: { value: 'shortcut-secret' },
     });
     const saveButton = screen.getByRole('button', { name: 'Save' });
-    expect(saveButton).toHaveAttribute('aria-keyshortcuts', 'Control+S');
-    await fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+    expect(saveButton).toHaveAttribute('aria-keyshortcuts', 'Enter');
+    await fireEvent.keyDown(screen.getByRole('button', { name: 'Show API key' }), { key: 'Enter' });
+    expect(mocks.invoke).not.toHaveBeenCalledWith('save_provider_api_key', expect.anything());
+    await fireEvent.keyDown(input, { key: 'Enter' });
 
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith('save_provider_api_key', {
