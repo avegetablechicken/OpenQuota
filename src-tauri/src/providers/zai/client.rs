@@ -1,12 +1,28 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode};
+use reqwest::{blocking::Client, StatusCode, Url};
 use serde_json::Value;
 
 use super::ZaiError;
 
 const SUBSCRIPTION_URL: &str = "https://api.z.ai/api/biz/subscription/list";
 const QUOTA_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
+const ZAI_LEGACY_USAGE_URL: &str = "https://api.z.ai/api/monitor/usage/model-usage";
+const ZAI_CREDIT_USAGE_URL: &str = "https://api.z.ai/api/monitor/credit-usage/usage-detail";
+const BIGMODEL_LEGACY_USAGE_URL: &str = "https://bigmodel.cn/api/monitor/usage/model-usage";
+const BIGMODEL_CREDIT_USAGE_URL: &str = "https://bigmodel.cn/api/monitor/credit-usage/usage-detail";
+
+#[derive(Debug, Clone, Copy)]
+pub enum AccountUsageKind {
+    Legacy,
+    Credits,
+}
+
+#[derive(Debug, Clone)]
+struct AccountUsageEndpoints {
+    legacy: String,
+    credits: String,
+}
 
 #[derive(Debug)]
 pub struct ZaiResponse {
@@ -18,16 +34,26 @@ pub struct ZaiClient {
     client: Client,
     subscription_url: String,
     quota_url: String,
+    account_usage_endpoints: Vec<AccountUsageEndpoints>,
 }
 
 impl ZaiClient {
     pub fn new() -> Result<Self, ZaiError> {
-        Self::with_endpoints(SUBSCRIPTION_URL, QUOTA_URL, Duration::from_secs(15))
+        Self::with_endpoints(
+            SUBSCRIPTION_URL,
+            QUOTA_URL,
+            &[
+                (ZAI_LEGACY_USAGE_URL, ZAI_CREDIT_USAGE_URL),
+                (BIGMODEL_LEGACY_USAGE_URL, BIGMODEL_CREDIT_USAGE_URL),
+            ],
+            Duration::from_secs(15),
+        )
     }
 
     fn with_endpoints(
         subscription_url: &str,
         quota_url: &str,
+        account_usage_endpoints: &[(&str, &str)],
         timeout: Duration,
     ) -> Result<Self, ZaiError> {
         let client = crate::http_client::blocking_client_builder()
@@ -40,6 +66,13 @@ impl ZaiClient {
             client,
             subscription_url: subscription_url.to_owned(),
             quota_url: quota_url.to_owned(),
+            account_usage_endpoints: account_usage_endpoints
+                .iter()
+                .map(|(legacy, credits)| AccountUsageEndpoints {
+                    legacy: (*legacy).to_owned(),
+                    credits: (*credits).to_owned(),
+                })
+                .collect(),
         })
     }
 
@@ -51,18 +84,64 @@ impl ZaiClient {
         self.fetch(&self.subscription_url, api_key, "subscription")
     }
 
-    fn fetch(&self, url: &str, api_key: &str, endpoint: &str) -> Result<ZaiResponse, ZaiError> {
-        let started = std::time::Instant::now();
-        let response = self
+    pub fn account_usage_source_count(&self) -> usize {
+        self.account_usage_endpoints.len()
+    }
+
+    pub fn fetch_account_usage(
+        &self,
+        source_index: usize,
+        kind: AccountUsageKind,
+        api_key: &str,
+        start_time: &str,
+        end_time: &str,
+    ) -> Result<ZaiResponse, ZaiError> {
+        let endpoints = self
+            .account_usage_endpoints
+            .get(source_index)
+            .ok_or(ZaiError::InvalidResponse)?;
+        let (url, endpoint) = match kind {
+            AccountUsageKind::Legacy => (&endpoints.legacy, "legacy account usage"),
+            AccountUsageKind::Credits => (&endpoints.credits, "credit account usage"),
+        };
+        let mut url = Url::parse(url).map_err(|_| ZaiError::InvalidResponse)?;
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("startTime", start_time)
+                .append_pair("endTime", end_time)
+                .append_pair("type", "1");
+            if matches!(kind, AccountUsageKind::Credits) {
+                query.append_pair("usageType", "MODEL");
+            }
+        }
+        let request = self
             .client
             .get(url)
             .bearer_auth(api_key)
-            .header("Accept", "application/json")
-            .send()
-            .map_err(|_| {
-                crate::app_warn!("http", "zai {endpoint} request failed (transport)");
-                ZaiError::ConnectionFailed
-            })?;
+            .header("Accept", "application/json");
+        self.send(request, endpoint)
+    }
+
+    fn fetch(&self, url: &str, api_key: &str, endpoint: &str) -> Result<ZaiResponse, ZaiError> {
+        let request = self
+            .client
+            .get(url)
+            .bearer_auth(api_key)
+            .header("Accept", "application/json");
+        self.send(request, endpoint)
+    }
+
+    fn send(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        endpoint: &str,
+    ) -> Result<ZaiResponse, ZaiError> {
+        let started = std::time::Instant::now();
+        let response = request.send().map_err(|_| {
+            crate::app_warn!("http", "zai {endpoint} request failed (transport)");
+            ZaiError::ConnectionFailed
+        })?;
         let status = response.status();
         crate::app_debug!(
             "http",
@@ -78,7 +157,19 @@ impl ZaiClient {
 
 #[cfg(test)]
 impl ZaiClient {
-    pub fn for_test(subscription_url: &str, quota_url: &str, timeout: Duration) -> Self {
-        Self::with_endpoints(subscription_url, quota_url, timeout).unwrap()
+    pub fn for_test(
+        subscription_url: &str,
+        quota_url: &str,
+        legacy_usage_url: &str,
+        credit_usage_url: &str,
+        timeout: Duration,
+    ) -> Self {
+        Self::with_endpoints(
+            subscription_url,
+            quota_url,
+            &[(legacy_usage_url, credit_usage_url)],
+            timeout,
+        )
+        .unwrap()
     }
 }

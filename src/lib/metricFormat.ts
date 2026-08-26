@@ -15,6 +15,10 @@ const fullNumberFormatter = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 0,
   maximumFractionDigits: 1,
 });
+const preciseCreditFormatter = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 4,
+});
 const currencyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -51,7 +55,14 @@ export function formatMetricValue(
   style: MetricNumberStyle,
   label?: string,
 ) {
-  const formatted = formatMetricNumber(value, kind, style);
+  const preciseCredits =
+    kind === 'count' &&
+    label?.toLowerCase() === 'credits' &&
+    style !== 'tray' &&
+    Math.abs(value) < 1000;
+  const formatted = preciseCredits
+    ? preciseCreditFormatter.format(value)
+    : formatMetricNumber(value, kind, style);
   return label ? `${formatted} ${label}` : formatted;
 }
 

@@ -14,6 +14,7 @@ describe('shared metric formatting', () => {
     expect(formatMetricValue(1_506_025_363, 'count', 'full', 'tokens')).toBe(
       '1,506,025,363 tokens',
     );
+    expect(formatMetricValue(1.2345, 'count', 'row', 'credits')).toBe('1.2345 credits');
   });
 
   it('formats total spend consistently across its surfaces', () => {

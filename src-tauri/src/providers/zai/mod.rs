@@ -1,21 +1,23 @@
+mod account_usage;
 mod auth;
 mod client;
 mod mapper;
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Days, Local, Utc};
 use reqwest::StatusCode;
 use thiserror::Error;
 
 use crate::models::{
     ApiKeyStatus, MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind,
-    ProviderLink, ProviderSnapshot, UsageHistories,
+    ProviderLink, ProviderSnapshot, UsageHistories, UsagePeriodSelection,
 };
 
 use self::{
+    account_usage::{map_credit_usage, map_legacy_usage, ZaiAccountUsage, HISTORY_DAYS},
     auth::ZaiAuthStore,
-    client::{ZaiClient, ZaiResponse},
+    client::{AccountUsageKind, ZaiClient, ZaiResponse},
     mapper::{is_no_coding_plan, map_usage},
 };
 
@@ -65,6 +67,38 @@ pub(crate) fn definition() -> ProviderDefinition {
                 MetricSection::OnDemand,
                 false,
                 "Search",
+            ),
+            MetricDefinition::trend("zai.trend"),
+            MetricDefinition::usage(
+                "zai.today",
+                "Today",
+                UsagePeriodSelection::Today,
+                MetricSection::OnDemand,
+                "T",
+            ),
+            MetricDefinition::usage(
+                "zai.yesterday",
+                "Yesterday",
+                UsagePeriodSelection::Yesterday,
+                MetricSection::OnDemand,
+                "Y",
+            ),
+            MetricDefinition::usage(
+                "zai.last30",
+                "Last 30 Days",
+                UsagePeriodSelection::Last30Days,
+                MetricSection::OnDemand,
+                "30",
+            ),
+            MetricDefinition::value(
+                "zai.credits30",
+                "Last 30 Days Credits",
+                "credits30",
+                true,
+                MetricSection::OnDemand,
+                false,
+                "Cr",
+                None,
             ),
         ],
     }
@@ -129,6 +163,7 @@ impl ZaiProvider {
     }
 
     fn refresh_snapshot(&self, api_key: &str) -> Result<ProviderSnapshot, ProviderError> {
+        let now = Utc::now();
         let quota = required_response(self.client.fetch_quota(api_key))?;
         if is_no_coding_plan(&quota.body) {
             return Err(ZaiError::NoCodingPlan.into());
@@ -142,18 +177,102 @@ impl ZaiProvider {
             &quota.body,
             subscription.as_ref().map(|response| &response.body),
         )?;
+        let mut warnings = Vec::new();
+        let account_usage = self.fetch_account_usage(api_key, mapped.uses_credits, now);
+        if account_usage.is_none() {
+            warnings.push("Z.ai account usage history is temporarily unavailable.".into());
+        }
+        let value_metrics = account_usage
+            .as_ref()
+            .and_then(ZaiAccountUsage::credits_metric)
+            .into_iter()
+            .collect();
+        let usage_histories = account_usage
+            .map(|usage| UsageHistories::account(usage.history))
+            .unwrap_or_default();
         Ok(ProviderSnapshot {
             provider_id: "zai".into(),
             plan: mapped.plan,
             quotas: mapped.quotas,
-            value_metrics: Vec::new(),
+            value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage_histories: UsageHistories::default(),
-            warnings: Vec::new(),
-            refreshed_at: Utc::now(),
+            usage_histories,
+            warnings,
+            refreshed_at: now,
         })
     }
+
+    fn fetch_account_usage(
+        &self,
+        api_key: &str,
+        uses_credits: bool,
+        now: DateTime<Utc>,
+    ) -> Option<ZaiAccountUsage> {
+        let primary = if uses_credits {
+            AccountUsageKind::Credits
+        } else {
+            AccountUsageKind::Legacy
+        };
+        let fallback = if uses_credits {
+            AccountUsageKind::Legacy
+        } else {
+            AccountUsageKind::Credits
+        };
+        let primary_usage = self.fetch_account_usage_kind(api_key, primary, now);
+        if primary_usage.is_some() {
+            return primary_usage;
+        }
+        self.fetch_account_usage_kind(api_key, fallback, now)
+    }
+
+    fn fetch_account_usage_kind(
+        &self,
+        api_key: &str,
+        kind: AccountUsageKind,
+        now: DateTime<Utc>,
+    ) -> Option<ZaiAccountUsage> {
+        let (start_time, end_time) = account_usage_range(now);
+        let mut empty = None;
+        for source_index in 0..self.client.account_usage_source_count() {
+            let response = required_response(self.client.fetch_account_usage(
+                source_index,
+                kind,
+                api_key,
+                &start_time,
+                &end_time,
+            ));
+            let Ok(response) = response else {
+                continue;
+            };
+            let mapped = match kind {
+                AccountUsageKind::Legacy => map_legacy_usage(&response.body, now),
+                AccountUsageKind::Credits => map_credit_usage(&response.body, now),
+            };
+            let Ok(mapped) = mapped else {
+                continue;
+            };
+            if mapped.has_activity() {
+                return Some(mapped);
+            }
+            empty.get_or_insert(mapped);
+        }
+        empty
+    }
+}
+
+fn account_usage_range(now: DateTime<Utc>) -> (String, String) {
+    let local_now = now.with_timezone(&Local);
+    let start = local_now
+        .date_naive()
+        .checked_sub_days(Days::new(HISTORY_DAYS.saturating_sub(1)))
+        .unwrap_or(local_now.date_naive())
+        .and_hms_opt(0, 0, 0)
+        .unwrap_or(local_now.naive_local());
+    (
+        start.format("%Y-%m-%d %H:%M:%S").to_string(),
+        local_now.format("%Y-%m-%d %H:%M:%S").to_string(),
+    )
 }
 
 impl UsageProvider for ZaiProvider {
@@ -213,6 +332,8 @@ mod tests {
         time::Duration,
     };
 
+    use chrono::{Local, NaiveDate, TimeZone, Utc};
+
     use crate::{
         models::{ApiKeyStatus, MetricSection, ProviderErrorKind, QuotaFormat},
         providers::{
@@ -221,7 +342,9 @@ mod tests {
         },
     };
 
-    use super::{auth::ZaiAuthStore, client::ZaiClient, definition, ZaiProvider};
+    use super::{
+        account_usage_range, auth::ZaiAuthStore, client::ZaiClient, definition, ZaiProvider,
+    };
 
     #[derive(Default)]
     struct MemorySecrets(Mutex<HashMap<String, Vec<u8>>>);
@@ -280,9 +403,47 @@ mod tests {
     ) -> ZaiProvider {
         let quota_url = test_http::serve_once(quota_status, &[], quota_body);
         let subscription_url = test_http::serve_once(subscription_status, &[], subscription_body);
+        let legacy_usage_url = test_http::serve_once(
+            200,
+            &[],
+            r#"{"success":true,"data":{"x_time":[],"modelDataList":[]}}"#,
+        );
+        let credit_usage_url = test_http::serve_once(
+            200,
+            &[],
+            r#"{"success":true,"data":{"summary":{"totalCredits":{"value":"0"}},"modelUsage":{"xTime":[],"modelDataList":[]}}}"#,
+        );
         ZaiProvider::with_dependencies(
             auth(key),
-            ZaiClient::for_test(&subscription_url, &quota_url, Duration::from_secs(1)),
+            ZaiClient::for_test(
+                &subscription_url,
+                &quota_url,
+                &legacy_usage_url,
+                &credit_usage_url,
+                Duration::from_secs(1),
+            ),
+        )
+    }
+
+    fn provider_with_history(
+        quota_body: &str,
+        legacy_usage_body: &str,
+        credit_usage_body: &str,
+    ) -> ZaiProvider {
+        let quota_url = test_http::serve_once(200, &[], quota_body);
+        let subscription_url =
+            test_http::serve_once(200, &[], include_str!("fixtures/subscription.json"));
+        let legacy_usage_url = test_http::serve_once(200, &[], legacy_usage_body);
+        let credit_usage_url = test_http::serve_once(200, &[], credit_usage_body);
+        ZaiProvider::with_dependencies(
+            auth(Some("secret")),
+            ZaiClient::for_test(
+                &subscription_url,
+                &quota_url,
+                &legacy_usage_url,
+                &credit_usage_url,
+                Duration::from_secs(1),
+            ),
         )
     }
 
@@ -311,6 +472,75 @@ mod tests {
         assert_eq!(snapshot.quotas[2].unit.as_deref(), Some("searches"));
         assert!(snapshot.status_metrics.is_empty());
         assert!(snapshot.warnings.is_empty());
+    }
+
+    #[test]
+    fn credit_plan_populates_account_history_and_exact_credit_metric() {
+        let today = chrono::Local::now().date_naive().to_string();
+        let credit_usage = serde_json::json!({
+            "success": true,
+            "data": {
+                "summary": {"totalCredits": {"value": "1.2345"}},
+                "modelUsage": {
+                    "xTime": [format!("{today} 00:00")],
+                    "modelDataList": [{
+                        "modelCode": "glm-5.3-flash",
+                        "modelName": "GLM-5.3-Flash",
+                        "cachedInputTokensUsage": ["100"],
+                        "uncachedInputTokensUsage": ["20"],
+                        "outputTokensUsage": ["5"],
+                        "totalTokensUsage": ["125"],
+                        "cachedInputCreditsUsage": ["0.6000"],
+                        "uncachedInputCreditsUsage": ["0.4000"],
+                        "outputCreditsUsage": ["0.2345"],
+                        "totalCreditsUsage": ["1.2345"]
+                    }]
+                }
+            }
+        })
+        .to_string();
+        let snapshot = provider_with_history(
+            r#"{"success":true,"data":{"limits":[
+                {"type":"CREDIT_LIMIT","unit":3,"number":5,"percentage":25},
+                {"type":"CREDIT_LIMIT","unit":6,"number":1,"percentage":10}
+            ]}}"#,
+            r#"{"success":true,"data":{"x_time":[],"modelDataList":[]}}"#,
+            &credit_usage,
+        )
+        .refresh()
+        .unwrap();
+
+        assert_eq!(snapshot.quotas[0].used_percent, 25.0);
+        let account = snapshot.usage_histories.account.unwrap();
+        let today = account.today.unwrap();
+        assert_eq!(today.tokens, 125);
+        assert_eq!(today.estimated_cost_usd, None);
+        assert_eq!(
+            today.model_breakdown.unwrap().models[0].model,
+            "GLM-5.3-Flash"
+        );
+        let credits = &snapshot.value_metrics[0];
+        assert_eq!(credits.id, "credits30");
+        assert!((credits.values[0].number - 1.2345).abs() < 0.000_001);
+        assert_eq!(credits.values[0].label.as_deref(), Some("credits"));
+        assert!(snapshot.warnings.is_empty());
+    }
+
+    #[test]
+    fn account_history_request_covers_exactly_thirty_calendar_days() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 27, 12, 34, 56).unwrap();
+        let (start, end) = account_usage_range(now);
+        let start_date = NaiveDate::parse_from_str(&start[..10], "%Y-%m-%d").unwrap();
+        let end_date = NaiveDate::parse_from_str(&end[..10], "%Y-%m-%d").unwrap();
+
+        assert_eq!(end_date.signed_duration_since(start_date).num_days(), 29);
+        assert!(start.ends_with("00:00:00"));
+        assert_eq!(
+            end,
+            now.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        );
     }
 
     #[test]
@@ -384,6 +614,8 @@ mod tests {
             ZaiClient::for_test(
                 &subscription_url,
                 "http://127.0.0.1:1",
+                "http://127.0.0.1:1",
+                "http://127.0.0.1:1",
                 Duration::from_millis(100),
             ),
         );
@@ -403,6 +635,8 @@ mod tests {
             ZaiClient::for_test(
                 &subscription_url,
                 &delayed,
+                "http://127.0.0.1:1",
+                "http://127.0.0.1:1",
                 test_http::TIMEOUT_TEST_CLIENT_LIMIT,
             ),
         )
@@ -476,5 +710,17 @@ mod tests {
             MetricSection::OnDemand
         );
         assert!(!metric("zai.webSearches").default_pinned);
+        assert_eq!(
+            metric("zai.credits30").default_section,
+            MetricSection::OnDemand
+        );
+        assert_eq!(
+            definition
+                .metrics
+                .iter()
+                .filter(|metric| matches!(metric.source, crate::models::MetricSource::Usage { .. }))
+                .count(),
+            3
+        );
     }
 }

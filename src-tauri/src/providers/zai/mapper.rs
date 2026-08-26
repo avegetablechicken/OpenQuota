@@ -11,15 +11,18 @@ pub const MONTHLY_PERIOD_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub struct ZaiMappedUsage {
     pub plan: Option<String>,
     pub quotas: Vec<QuotaWindow>,
+    pub uses_credits: bool,
 }
 
 pub fn map_usage(
     quota_body: &Value,
     subscription_body: Option<&Value>,
 ) -> Result<ZaiMappedUsage, ZaiError> {
+    let (quotas, uses_credits) = map_quota_with_kind(quota_body)?;
     Ok(ZaiMappedUsage {
         plan: subscription_body.and_then(plan_name),
-        quotas: map_quota(quota_body)?,
+        quotas,
+        uses_credits,
     })
 }
 
@@ -42,7 +45,12 @@ pub fn plan_name(body: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+#[cfg(test)]
 pub fn map_quota(body: &Value) -> Result<Vec<QuotaWindow>, ZaiError> {
+    map_quota_with_kind(body).map(|(quotas, _)| quotas)
+}
+
+fn map_quota_with_kind(body: &Value) -> Result<(Vec<QuotaWindow>, bool), ZaiError> {
     let root = body.as_object().ok_or(ZaiError::InvalidResponse)?;
     let container = match root.get("data") {
         Some(data) => data.as_object().ok_or(ZaiError::InvalidResponse)?,
@@ -53,19 +61,27 @@ pub fn map_quota(body: &Value) -> Result<Vec<QuotaWindow>, ZaiError> {
         .and_then(Value::as_array)
         .ok_or(ZaiError::InvalidResponse)?;
     if limits.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let limits = limits
         .iter()
         .map(|entry| entry.as_object().ok_or(ZaiError::InvalidResponse))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let uses_credits = limits
+        .iter()
+        .any(|entry| matches_limit(entry, "CREDIT_LIMIT"));
+    let plan_limit_type = if uses_credits {
+        "CREDIT_LIMIT"
+    } else {
+        "TOKENS_LIMIT"
+    };
     let mut session = None;
     let mut weekly = None;
     for entry in limits
         .iter()
         .copied()
-        .filter(|entry| matches_limit(entry, "TOKENS_LIMIT"))
+        .filter(|entry| matches_limit(entry, plan_limit_type))
     {
         let Some(window) = classify_token_window(entry)? else {
             continue;
@@ -87,11 +103,14 @@ pub fn map_quota(body: &Value) -> Result<Vec<QuotaWindow>, ZaiError> {
         .map(web_search_quota)
         .transpose()?;
 
-    Ok(session
-        .into_iter()
-        .chain(weekly)
-        .chain(web_searches)
-        .collect())
+    Ok((
+        session
+            .into_iter()
+            .chain(weekly)
+            .chain(web_searches)
+            .collect(),
+        uses_credits,
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -231,6 +250,7 @@ mod tests {
         let mapped = map_usage(&captured_quota(), Some(&captured_subscription())).unwrap();
 
         assert_eq!(mapped.plan.as_deref(), Some("GLM Coding Pro"));
+        assert!(!mapped.uses_credits);
         assert_eq!(
             mapped
                 .quotas
@@ -257,6 +277,30 @@ mod tests {
         assert_eq!(web.period_seconds, MONTHLY_PERIOD_SECONDS);
         assert!(!web.estimated);
         assert_eq!(web.source_note, None);
+    }
+
+    #[test]
+    fn credit_limits_replace_legacy_token_windows_without_duplication() {
+        let mapped = map_usage(
+            &json!({"data":{"limits":[
+                {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":99},
+                {"type":"CREDIT_LIMIT","unit":3,"number":5,"percentage":25},
+                {"type":"CREDIT_LIMIT","unit":6,"number":1,"percentage":10},
+                {"type":"TIME_LIMIT","unit":5,"number":1,"currentValue":2,"usage":100}
+            ]}}),
+            None,
+        )
+        .unwrap();
+
+        assert!(mapped.uses_credits);
+        assert_eq!(
+            mapped
+                .quotas
+                .iter()
+                .map(|quota| (quota.id.as_str(), quota.used_percent))
+                .collect::<Vec<_>>(),
+            [("session", 25.0), ("weekly", 10.0), ("webSearches", 2.0)]
+        );
     }
 
     #[test]
