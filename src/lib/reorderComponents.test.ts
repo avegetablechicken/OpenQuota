@@ -314,8 +314,11 @@ describe('pointer reorder integrations', () => {
     });
 
     expect(screen.queryByRole('checkbox', { name: 'Enable sub2api' })).not.toBeInTheDocument();
+    const addButton = screen.getByRole('button', { name: 'Add Unofficial' });
+    expect(addButton).toHaveTextContent('Add Unofficial');
+    expect(addButton.querySelector('circle')).not.toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    await fireEvent.click(screen.getByRole('button', { name: 'Add Unofficial Configuration' }));
+    await fireEvent.click(addButton);
 
     const changed = onChange.mock.calls[0][0] as AppSettings;
     expect(changed.providers.find((provider) => provider.id === 'sub2api')?.enabled).toBe(true);
@@ -378,10 +381,8 @@ describe('pointer reorder integrations', () => {
     });
 
     expect(screen.getByRole('checkbox', { name: 'Enable sub2api' })).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: 'Add Unofficial Configuration' }),
-    ).toBeInTheDocument();
-    await fireEvent.click(screen.getByRole('button', { name: 'Add Unofficial Configuration' }));
+    expect(screen.getByRole('button', { name: 'Add Unofficial' })).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Add Unofficial' }));
 
     const changed = onChange.mock.calls[0][0] as AppSettings;
     expect(changed.providers.find((provider) => provider.id === 'sub2api@2')?.enabled).toBe(true);

@@ -81,7 +81,7 @@ export class ProviderCatalogIndex {
   }
 
   connectionConfigurationLabel() {
-    return 'Unofficial Configuration';
+    return 'Unofficial';
   }
 
   localUsageSourceNote(id: string, displayName?: string) {

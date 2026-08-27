@@ -187,8 +187,8 @@
           aria-label={`Add ${addableProviderName}`}
           onclick={() => addProvider(addableProvider)}
         >
-          <span class="provider-add-icon"><Icon name="plus" size={17} strokeWidth={2} /></span>
-          <span>{addableProviderName}</span>
+          <span class="provider-add-icon"><Icon name="plus" size={18} strokeWidth={1.8} /></span>
+          <span>Add {addableProviderName}</span>
         </button>
       </div>
     {/if}
@@ -248,9 +248,6 @@
       width: 18px;
       height: 18px;
       place-items: center;
-      border-radius: 50%;
-      color: var(--tray);
-      background: var(--meter-fill);
     }
 
     .reorder-grip {
