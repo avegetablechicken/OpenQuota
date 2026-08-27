@@ -21,6 +21,7 @@ pub mod sub2api;
 #[cfg(test)]
 pub mod test_http;
 pub mod zai;
+mod zcode_usage;
 
 pub use detection::{detect_local_credentials, CredentialProbeResults, CredentialProbeStatus};
 pub use registry::ProviderRegistry;

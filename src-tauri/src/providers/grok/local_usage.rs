@@ -14,6 +14,7 @@ use crate::{
     providers::{
         daily_usage::DailyUsageAccumulator,
         log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+        zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
     },
     storage::Storage,
 };
@@ -26,6 +27,7 @@ const SOURCE_NOTE: &str = "From your Grok logs (estimated)";
 #[derive(Debug, Clone)]
 pub struct GrokLogUsageScanner {
     path: PathBuf,
+    zcode: ZCodeUsageScanner,
 }
 
 impl GrokLogUsageScanner {
@@ -39,12 +41,19 @@ impl GrokLogUsageScanner {
                     .filter(|value| !value.is_empty())
                     .as_deref(),
             ),
+            zcode: ZCodeUsageScanner::new(),
         }
     }
 
     #[cfg(test)]
     pub fn for_path(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            zcode: ZCodeUsageScanner::for_paths(
+                path.with_extension("missing-zcode.sqlite"),
+                path.with_extension("missing-zcode.json"),
+            ),
+            path,
+        }
     }
 
     pub fn scan(
@@ -53,7 +62,7 @@ impl GrokLogUsageScanner {
         now: DateTime<Utc>,
         pricing: &ModelPricing,
     ) -> Result<UsageHistory, GrokError> {
-        scan_path(storage, &self.path, now, pricing)
+        scan_path(storage, &self.path, &self.zcode, now, pricing)
     }
 }
 
@@ -70,33 +79,51 @@ struct TokenEvent {
 fn scan_path(
     storage: &Storage,
     path: &Path,
+    zcode: &ZCodeUsageScanner,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
 ) -> Result<UsageHistory, GrokError> {
-    match fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => {}
+    let (events, seen_paths) = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => (
+            load_or_parse_log(storage, "grok", path, LOG_CACHE_SCHEMA_VERSION, parse_jsonl)
+                .map_err(|error| match error {
+                    LogCacheError::Storage(_) => GrokError::Storage,
+                    LogCacheError::Encode(_) => GrokError::LocalUsage,
+                })?
+                .ok_or(GrokError::LocalUsage)?,
+            HashSet::from([path.to_path_buf()]),
+        ),
         Ok(_) => {
             crate::app_warn!("plugin:grok", "local usage log path is not a file");
             return Err(GrokError::LocalUsage);
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            storage.prune_log_events("grok", &HashSet::new())?;
-            return Ok(UsageHistory::default());
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Vec::new(), HashSet::new()),
         Err(_) => {
             crate::app_warn!("plugin:grok", "local usage log metadata could not be read");
             return Err(GrokError::LocalUsage);
         }
-    }
+    };
+    storage.prune_log_events("grok", &seen_paths)?;
 
-    let events = load_or_parse_log(storage, "grok", path, LOG_CACHE_SCHEMA_VERSION, parse_jsonl)
-        .map_err(|error| match error {
-            LogCacheError::Storage(_) => GrokError::Storage,
-            LogCacheError::Encode(_) => GrokError::LocalUsage,
-        })?
-        .ok_or(GrokError::LocalUsage)?;
-    storage.prune_log_events("grok", &HashSet::from([path.to_path_buf()]))?;
-    Ok(aggregate(events, now, pricing))
+    let mut accumulator = DailyUsageAccumulator::default();
+    aggregate_into(events, now, pricing, &mut accumulator);
+    let includes_zcode = match zcode.scan_into(now, pricing, ZCodeProvider::Grok, &mut accumulator)
+    {
+        Ok(includes_zcode) => includes_zcode,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:zcode",
+                "ZCode usage history could not be folded into Grok"
+            );
+            false
+        }
+    };
+    let source_note = if includes_zcode {
+        "From your Grok logs and ZCode history (estimated)"
+    } else {
+        SOURCE_NOTE
+    };
+    Ok(accumulator.build(now, source_note))
 }
 
 fn log_path(home: &Path, configured_home: Option<&str>) -> PathBuf {
@@ -195,10 +222,21 @@ fn model_id(message: &str, context: &Map<String, Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+#[cfg(test)]
 fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
+    let mut accumulator = DailyUsageAccumulator::default();
+    aggregate_into(events, now, pricing, &mut accumulator);
+    accumulator.build(now, SOURCE_NOTE)
+}
+
+fn aggregate_into(
+    events: Vec<TokenEvent>,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    accumulator: &mut DailyUsageAccumulator,
+) {
     let today = now.with_timezone(&Local).date_naive();
     let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
-    let mut accumulator = DailyUsageAccumulator::default();
 
     for event in events {
         let date = event.timestamp.with_timezone(&Local).date_naive();
@@ -224,7 +262,6 @@ fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing
             accumulator.add_unknown_model(date, model);
         }
     }
-    accumulator.build(now, SOURCE_NOTE)
 }
 
 fn integer_u64(value: &Value) -> Option<u64> {

@@ -10,9 +10,11 @@ use thiserror::Error;
 use crate::{
     models::{
         ApiKeyStatus, MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind,
-        ProviderLink, ProviderSnapshot, UsageHistories,
+        ProviderLink, ProviderSnapshot, UsageHistories, UsagePeriodSelection,
     },
+    pricing::PricingStore,
     providers::api_key::ApiKeyStore,
+    storage::Storage,
 };
 
 use self::{
@@ -20,7 +22,10 @@ use self::{
     mapper::{data_object, map_credits, map_key},
 };
 
-use super::{ProviderError, UsageProvider};
+use super::{
+    zcode_usage::{ZCodeLocalUsage, ZCodeProvider},
+    ProviderError, UsageProvider,
+};
 
 const ENVIRONMENT_NAMES: &[&str] = &["OPENROUTER_API_KEY", "OPENROUTER_KEY"];
 const CONFIG_PATHS: &[&str] = &["~/.config/openrouter/key.json"];
@@ -31,7 +36,7 @@ pub(crate) fn definition() -> ProviderDefinition {
         display_name: "OpenRouter".into(),
         short_name: "OR".into(),
         fallback_enabled: false,
-        local_usage_source_note: None,
+        local_usage_source_note: Some("From your ZCode history (estimated)".into()),
         links: vec![
             ProviderLink::new("Activity", "https://openrouter.ai/activity"),
             ProviderLink::new("Credits", "https://openrouter.ai/settings/credits"),
@@ -97,6 +102,28 @@ pub(crate) fn definition() -> ProviderDefinition {
                 false,
                 "K",
             ),
+            MetricDefinition::trend("openrouter.trend"),
+            MetricDefinition::usage(
+                "openrouter.localToday",
+                "Local Today",
+                UsagePeriodSelection::Today,
+                MetricSection::OnDemand,
+                "LT",
+            ),
+            MetricDefinition::usage(
+                "openrouter.localYesterday",
+                "Local Yesterday",
+                UsagePeriodSelection::Yesterday,
+                MetricSection::OnDemand,
+                "LY",
+            ),
+            MetricDefinition::usage(
+                "openrouter.local30",
+                "Local 30 Days",
+                UsagePeriodSelection::Last30Days,
+                MetricSection::OnDemand,
+                "L30",
+            ),
         ],
     }
 }
@@ -138,13 +165,15 @@ impl From<OpenRouterError> for ProviderError {
 pub struct OpenRouterProvider {
     auth: ApiKeyStore,
     client: Arc<OpenRouterClient>,
+    local_usage: Option<ZCodeLocalUsage>,
 }
 
 impl OpenRouterProvider {
-    pub fn new() -> Result<Self, ProviderError> {
+    pub fn new(storage: Arc<Storage>, pricing: Arc<PricingStore>) -> Result<Self, ProviderError> {
         Ok(Self {
             auth: ApiKeyStore::new_with_sources("openrouter", ENVIRONMENT_NAMES, CONFIG_PATHS),
             client: Arc::new(OpenRouterClient::new().map_err(ProviderError::from)?),
+            local_usage: Some(ZCodeLocalUsage::new(storage, pricing)),
         })
     }
 
@@ -153,6 +182,7 @@ impl OpenRouterProvider {
         Self {
             auth,
             client: Arc::new(client),
+            local_usage: None,
         }
     }
 
@@ -185,6 +215,21 @@ impl OpenRouterProvider {
             values.extend(mapped.values);
         }
         if !quotas.is_empty() || !values.is_empty() {
+            let now = Utc::now();
+            let mut warnings = Vec::new();
+            let usage = self
+                .local_usage
+                .as_ref()
+                .map(|local| {
+                    local.history(
+                        "openrouter",
+                        "OpenRouter",
+                        ZCodeProvider::OpenRouter,
+                        now,
+                        &mut warnings,
+                    )
+                })
+                .unwrap_or_default();
             return Ok(ProviderSnapshot {
                 provider_id: "openrouter".into(),
                 plan,
@@ -192,9 +237,9 @@ impl OpenRouterProvider {
                 value_metrics: values,
                 status_metrics: Vec::new(),
                 notices: Vec::new(),
-                usage_histories: UsageHistories::default(),
-                warnings: Vec::new(),
-                refreshed_at: Utc::now(),
+                usage_histories: UsageHistories::local_device(usage),
+                warnings,
+                refreshed_at: now,
             });
         }
         if credits.is_auth_failure() && key.is_auth_failure() {
@@ -393,6 +438,10 @@ mod tests {
         .refresh()
         .unwrap();
         assert_eq!(snapshot.plan.as_deref(), Some("Pay as you go"));
+        assert_eq!(
+            snapshot.usage_histories.local_device,
+            Some(crate::models::UsageHistory::default())
+        );
         assert!(snapshot.quotas.iter().any(|quota| quota.id == "credits"));
         assert_eq!(
             snapshot
@@ -470,6 +519,10 @@ mod tests {
     #[test]
     fn default_layout_matches_the_reference_provider() {
         let definition = definition();
+        assert_eq!(
+            definition.local_usage_source_note.as_deref(),
+            Some("From your ZCode history (estimated)")
+        );
         let metric = |id: &str| {
             definition
                 .metrics

@@ -110,6 +110,8 @@ mod bundled_resource_tests {
         );
         assert_rates("claude-sonnet-5", [2.0, 2.5, 0.2, 10.0]);
         assert_rates("kimi-k3-code-max", [3.0, 3.0, 0.3, 15.0]);
+        assert_rates("GLM-5.3-Flash-max", [0.15, 0.15, 0.03, 0.5]);
+        assert_rates("glm-5.3-high", [1.4, 1.4, 0.26, 4.4]);
         assert_rates("cursor-grok-4.5-high-fast", [4.0, 4.0, 1.0, 12.0]);
         assert_rates("cursor-grok-4.6-medium", [2.0, 2.0, 0.5, 6.0]);
         assert_rates("grok-4.6-fast-high", [4.0, 4.0, 1.0, 12.0]);

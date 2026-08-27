@@ -8,9 +8,13 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use thiserror::Error;
 
-use crate::models::{
-    ApiKeyStatus, MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind,
-    ProviderLink, ProviderSnapshot, UsageHistories,
+use crate::{
+    models::{
+        ApiKeyStatus, MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind,
+        ProviderLink, ProviderSnapshot, UsageHistories, UsagePeriodSelection,
+    },
+    pricing::PricingStore,
+    storage::Storage,
 };
 
 use self::{
@@ -19,7 +23,10 @@ use self::{
     mapper::map_usage,
 };
 
-use super::{ProviderError, UsageProvider};
+use super::{
+    zcode_usage::{ZCodeLocalUsage, ZCodeProvider},
+    ProviderError, UsageProvider,
+};
 
 pub(crate) fn definition() -> ProviderDefinition {
     ProviderDefinition {
@@ -27,7 +34,7 @@ pub(crate) fn definition() -> ProviderDefinition {
         display_name: "Kimi".into(),
         short_name: "K".into(),
         fallback_enabled: false,
-        local_usage_source_note: None,
+        local_usage_source_note: Some("From your ZCode history (estimated)".into()),
         links: vec![
             ProviderLink::new("Dashboard", "https://www.kimi.com/code/console"),
             ProviderLink::new("API Keys", "https://www.kimi.com/code/console"),
@@ -52,6 +59,28 @@ pub(crate) fn definition() -> ProviderDefinition {
                 MetricSection::AlwaysVisible,
                 true,
                 "W",
+            ),
+            MetricDefinition::trend("kimi.trend"),
+            MetricDefinition::usage(
+                "kimi.today",
+                "Today",
+                UsagePeriodSelection::Today,
+                MetricSection::OnDemand,
+                "T",
+            ),
+            MetricDefinition::usage(
+                "kimi.yesterday",
+                "Yesterday",
+                UsagePeriodSelection::Yesterday,
+                MetricSection::OnDemand,
+                "Y",
+            ),
+            MetricDefinition::usage(
+                "kimi.last30",
+                "Last 30 Days",
+                UsagePeriodSelection::Last30Days,
+                MetricSection::OnDemand,
+                "30",
             ),
         ],
     }
@@ -93,13 +122,15 @@ impl From<KimiError> for ProviderError {
 pub struct KimiProvider {
     auth: KimiAuthStore,
     client: Arc<KimiClient>,
+    local_usage: Option<ZCodeLocalUsage>,
 }
 
 impl KimiProvider {
-    pub fn new() -> Result<Self, ProviderError> {
+    pub fn new(storage: Arc<Storage>, pricing: Arc<PricingStore>) -> Result<Self, ProviderError> {
         Ok(Self {
             auth: KimiAuthStore::new(),
             client: Arc::new(KimiClient::new().map_err(ProviderError::from)?),
+            local_usage: Some(ZCodeLocalUsage::new(storage, pricing)),
         })
     }
 
@@ -108,12 +139,20 @@ impl KimiProvider {
         Self {
             auth,
             client: Arc::new(client),
+            local_usage: None,
         }
     }
 
     fn refresh_snapshot(&self, api_key: &str) -> Result<ProviderSnapshot, ProviderError> {
         let response = required_response(self.client.fetch(api_key))?;
         let mapped = map_usage(&response.body)?;
+        let now = Utc::now();
+        let mut warnings = Vec::new();
+        let usage = self
+            .local_usage
+            .as_ref()
+            .map(|local| local.history("kimi", "Kimi", ZCodeProvider::Kimi, now, &mut warnings))
+            .unwrap_or_default();
         Ok(ProviderSnapshot {
             provider_id: "kimi".into(),
             plan: mapped.plan,
@@ -121,9 +160,9 @@ impl KimiProvider {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage_histories: UsageHistories::default(),
-            warnings: Vec::new(),
-            refreshed_at: Utc::now(),
+            usage_histories: UsageHistories::local_device(usage),
+            warnings,
+            refreshed_at: now,
         })
     }
 }
@@ -253,6 +292,10 @@ mod tests {
         assert_eq!(snapshot.provider_id, "kimi");
         assert_eq!(snapshot.plan.as_deref(), Some("Basic"));
         assert_eq!(
+            snapshot.usage_histories.local_device,
+            Some(crate::models::UsageHistory::default())
+        );
+        assert_eq!(
             snapshot
                 .quotas
                 .iter()
@@ -315,6 +358,10 @@ mod tests {
         let definition = definition();
         assert_eq!(definition.id, "kimi");
         assert_eq!(definition.display_name, "Kimi");
+        assert_eq!(
+            definition.local_usage_source_note.as_deref(),
+            Some("From your ZCode history (estimated)")
+        );
         assert_eq!(
             definition
                 .links

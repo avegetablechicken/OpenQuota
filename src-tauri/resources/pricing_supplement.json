@@ -1,6 +1,6 @@
 {
   "$comment": "OpenQuota pricing supplement. Prices models that no public catalog carries, supplies fast-variant multipliers the catalogs omit, and maps provider log model slugs to canonical pricing keys (LiteLLM keys, models.dev ids, or entries in this file). The raw main-branch file is refreshed by installed apps, so merged corrections arrive without an app release. Rates are USD per million tokens.",
-  "updated_at": "2026-08-12T22:41:05Z",
+  "updated_at": "2026-08-27T03:27:36Z",
   "pricing": {
     "auto": {
       "input_per_million": 1.25,
@@ -89,6 +89,20 @@
       "cache_write_per_million": 3.0,
       "cache_read_per_million": 0.3,
       "output_per_million": 15.0
+    },
+    "glm-5.3": {
+      "$comment": "Z.ai's published GLM-5.3 API list price. Cached-input storage is separate and currently free; cache creation keeps the normal input token rate.",
+      "input_per_million": 1.4,
+      "cache_write_per_million": 1.4,
+      "cache_read_per_million": 0.26,
+      "output_per_million": 4.4
+    },
+    "glm-5.3-flash": {
+      "$comment": "Z.ai's published GLM-5.3-Flash API list price. The temporary 50% launch discount is intentionally excluded; cached-input storage is separate and currently free.",
+      "input_per_million": 0.15,
+      "cache_write_per_million": 0.15,
+      "cache_read_per_million": 0.03,
+      "output_per_million": 0.5
     },
     "claude-opus-4-7-fast": {
       "$comment": "Cursor bills Opus 4.7 fast mode at these rates; the models.dev entry carries higher (stale) numbers, so this override wins.",
@@ -252,6 +266,8 @@
     { "pattern": "^gpt-5\\.6-luna(?:-(?:none|low|medium|high|xhigh|max))?$", "canonical": "gpt-5.6-luna" },
     { "pattern": "^kimi-k2\\.5$", "canonical": "moonshot/kimi-k2.5" },
     { "pattern": "^kimi-k2p5$", "canonical": "moonshot/kimi-k2.5" },
+    { "pattern": "(?i)^glm-5\\.3-flash(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "glm-5.3-flash" },
+    { "pattern": "(?i)^glm-5\\.3(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "glm-5.3" },
     { "pattern": "^glm-5\\.2(?:-(?:high|max))?$", "canonical": "glm-5.2" },
     { "pattern": "^[Pp]remium \\((?:[Gg][Pp][Tt]-5\\.3-[Cc]odex|[Cc]odex 5\\.3)\\)$", "canonical": "gpt-5.3-codex" },
     { "pattern": "(?i)^Composer 2\\.5 Fast \\(Auto[^)]*\\)$", "canonical": "composer-2.5-fast" },

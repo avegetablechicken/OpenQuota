@@ -10,6 +10,7 @@ const SNAPSHOT_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    "ZCODE_HOME",
     "XDG_CONFIG_HOME",
     "USER_TYPE",
     "USE_LOCAL_OAUTH",

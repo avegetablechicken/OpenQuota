@@ -13,6 +13,7 @@ use crate::models::{
     ApiKeyStatus, MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind,
     ProviderLink, ProviderSnapshot, UsageHistories, UsagePeriodSelection,
 };
+use crate::{pricing::PricingStore, storage::Storage};
 
 use self::{
     account_usage::{map_credit_usage, map_legacy_usage, ZaiAccountUsage, HISTORY_DAYS},
@@ -21,7 +22,10 @@ use self::{
     mapper::{is_no_coding_plan, map_usage},
 };
 
-use super::{ProviderError, UsageProvider};
+use super::{
+    zcode_usage::{ZCodeLocalUsage, ZCodeProvider},
+    ProviderError, UsageProvider,
+};
 
 pub(crate) fn definition() -> ProviderDefinition {
     ProviderDefinition {
@@ -29,7 +33,7 @@ pub(crate) fn definition() -> ProviderDefinition {
         display_name: "Z.ai".into(),
         short_name: "Z".into(),
         fallback_enabled: false,
-        local_usage_source_note: None,
+        local_usage_source_note: Some("From your ZCode history (estimated)".into()),
         links: vec![
             ProviderLink::new(
                 "Dashboard",
@@ -144,13 +148,15 @@ impl From<ZaiError> for ProviderError {
 pub struct ZaiProvider {
     auth: ZaiAuthStore,
     client: Arc<ZaiClient>,
+    local_usage: Option<ZCodeLocalUsage>,
 }
 
 impl ZaiProvider {
-    pub fn new() -> Result<Self, ProviderError> {
+    pub fn new(storage: Arc<Storage>, pricing: Arc<PricingStore>) -> Result<Self, ProviderError> {
         Ok(Self {
             auth: ZaiAuthStore::new(),
             client: Arc::new(ZaiClient::new().map_err(ProviderError::from)?),
+            local_usage: Some(ZCodeLocalUsage::new(storage, pricing)),
         })
     }
 
@@ -159,6 +165,7 @@ impl ZaiProvider {
         Self {
             auth,
             client: Arc::new(client),
+            local_usage: None,
         }
     }
 
@@ -182,14 +189,20 @@ impl ZaiProvider {
         if account_usage.is_none() {
             warnings.push("Z.ai account usage history is temporarily unavailable.".into());
         }
+        let local_usage = self
+            .local_usage
+            .as_ref()
+            .map(|local| local.history("zai", "Z.ai", ZCodeProvider::Zai, now, &mut warnings))
+            .unwrap_or_default();
         let value_metrics = account_usage
             .as_ref()
             .and_then(ZaiAccountUsage::credits_metric)
             .into_iter()
             .collect();
-        let usage_histories = account_usage
-            .map(|usage| UsageHistories::account(usage.history))
-            .unwrap_or_default();
+        let usage_histories = UsageHistories {
+            local_device: Some(local_usage),
+            account: account_usage.map(|usage| usage.history),
+        };
         Ok(ProviderSnapshot {
             provider_id: "zai".into(),
             plan: mapped.plan,
@@ -457,6 +470,10 @@ mod tests {
         );
         assert_eq!(snapshot.quotas[2].format, QuotaFormat::Count);
         assert_eq!(snapshot.quotas[2].unit.as_deref(), Some("searches"));
+        assert_eq!(
+            snapshot.usage_histories.local_device,
+            Some(crate::models::UsageHistory::default())
+        );
         assert!(snapshot.status_metrics.is_empty());
         assert!(snapshot.warnings.is_empty());
     }

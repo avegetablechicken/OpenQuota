@@ -21,6 +21,7 @@ use crate::providers::{
     log_usage::{load_or_parse_log, parse_log_timestamp},
     model_scope::is_model_obviously_foreign_to_card,
     opencode, pi_usage,
+    zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -125,11 +126,34 @@ pub fn scan_local_usage(
     } else {
         false
     };
-    let source_note = match (includes_pi, includes_opencode) {
-        (true, true) => "From your Claude usage history, pi, and OpenCode (estimated)",
-        (true, false) => "From your Claude usage history and pi (estimated)",
-        (false, true) => "From your Claude usage history and OpenCode (estimated)",
-        (false, false) => "From your Claude usage history (estimated)",
+    let includes_zcode = if provider_id == "claude" {
+        match ZCodeUsageScanner::new().scan_into(
+            now,
+            pricing,
+            ZCodeProvider::Claude,
+            &mut accumulator,
+        ) {
+            Ok(includes_zcode) => includes_zcode,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:zcode",
+                    "ZCode usage history could not be folded into Claude"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let source_note = match (includes_pi, includes_opencode, includes_zcode) {
+        (true, true, true) => "From your Claude usage history, pi, OpenCode, and ZCode (estimated)",
+        (true, true, false) => "From your Claude usage history, pi, and OpenCode (estimated)",
+        (true, false, true) => "From your Claude usage history, pi, and ZCode (estimated)",
+        (true, false, false) => "From your Claude usage history and pi (estimated)",
+        (false, true, true) => "From your Claude usage history, OpenCode, and ZCode (estimated)",
+        (false, true, false) => "From your Claude usage history and OpenCode (estimated)",
+        (false, false, true) => "From your Claude usage history and ZCode (estimated)",
+        (false, false, false) => "From your Claude usage history (estimated)",
     };
     Ok(accumulator.build(now, source_note))
 }

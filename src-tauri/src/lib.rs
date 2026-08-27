@@ -384,10 +384,14 @@ pub fn run() {
                 Arc::new(GrokProvider::new(storage.clone(), pricing.clone())?)
                     as Arc<dyn UsageProvider>,
                 Arc::new(OpenCodeProvider::new(pricing.clone())) as Arc<dyn UsageProvider>,
-                Arc::new(OpenRouterProvider::new()?) as Arc<dyn UsageProvider>,
-                Arc::new(ZaiProvider::new()?) as Arc<dyn UsageProvider>,
-                Arc::new(KimiProvider::new()?) as Arc<dyn UsageProvider>,
-                Arc::new(MiniMaxProvider::new()?) as Arc<dyn UsageProvider>,
+                Arc::new(OpenRouterProvider::new(storage.clone(), pricing.clone())?)
+                    as Arc<dyn UsageProvider>,
+                Arc::new(ZaiProvider::new(storage.clone(), pricing.clone())?)
+                    as Arc<dyn UsageProvider>,
+                Arc::new(KimiProvider::new(storage.clone(), pricing.clone())?)
+                    as Arc<dyn UsageProvider>,
+                Arc::new(MiniMaxProvider::new(storage.clone(), pricing.clone())?)
+                    as Arc<dyn UsageProvider>,
             ]);
             providers.extend(sub2api.runtimes());
             let registry = Arc::new(ProviderRegistry::new(providers)?);

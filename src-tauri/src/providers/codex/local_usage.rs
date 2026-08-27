@@ -22,6 +22,7 @@ use crate::providers::{
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
     model_scope::model_belongs_to_card,
     opencode, pi_usage,
+    zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,11 +77,30 @@ pub fn scan_local_usage(
                 false
             }
         };
-    let source_note = match (includes_pi, includes_opencode) {
-        (true, true) => "From your Codex logs, pi, and OpenCode (estimated)",
-        (true, false) => "From your Codex logs and pi (estimated)",
-        (false, true) => "From your Codex logs and OpenCode (estimated)",
-        (false, false) => "From your Codex logs (estimated)",
+    let includes_zcode = match ZCodeUsageScanner::new().scan_into(
+        now,
+        pricing,
+        ZCodeProvider::Codex,
+        &mut accumulator,
+    ) {
+        Ok(includes_zcode) => includes_zcode,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:zcode",
+                "ZCode usage history could not be folded into Codex"
+            );
+            false
+        }
+    };
+    let source_note = match (includes_pi, includes_opencode, includes_zcode) {
+        (true, true, true) => "From your Codex logs, pi, OpenCode, and ZCode (estimated)",
+        (true, true, false) => "From your Codex logs, pi, and OpenCode (estimated)",
+        (true, false, true) => "From your Codex logs, pi, and ZCode (estimated)",
+        (true, false, false) => "From your Codex logs and pi (estimated)",
+        (false, true, true) => "From your Codex logs, OpenCode, and ZCode (estimated)",
+        (false, true, false) => "From your Codex logs and OpenCode (estimated)",
+        (false, false, true) => "From your Codex logs and ZCode (estimated)",
+        (false, false, false) => "From your Codex logs (estimated)",
     };
     Ok(accumulator.build(now, source_note))
 }

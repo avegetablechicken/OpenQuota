@@ -24,6 +24,7 @@ pub struct DailyUsageAccumulator {
 struct DayAccumulator {
     tokens: u64,
     cost: f64,
+    has_cost: bool,
     cost_estimated: bool,
     models: HashMap<String, ModelAccumulator>,
 }
@@ -50,18 +51,40 @@ impl Default for OtherDayAccumulator {
     }
 }
 
-#[derive(Default)]
 struct ModelAccumulator {
     tokens: u64,
     cost: f64,
+    cost_complete: bool,
     spellings: HashMap<String, u64>,
     variants: HashMap<String, VariantAccumulator>,
 }
 
-#[derive(Default)]
 struct VariantAccumulator {
     tokens: u64,
     cost: f64,
+    cost_complete: bool,
+}
+
+impl Default for ModelAccumulator {
+    fn default() -> Self {
+        Self {
+            tokens: 0,
+            cost: 0.0,
+            cost_complete: true,
+            spellings: HashMap::new(),
+            variants: HashMap::new(),
+        }
+    }
+}
+
+impl Default for VariantAccumulator {
+    fn default() -> Self {
+        Self {
+            tokens: 0,
+            cost: 0.0,
+            cost_complete: true,
+        }
+    }
 }
 
 impl ModelAccumulator {
@@ -79,6 +102,7 @@ impl ModelAccumulator {
     fn merge(&mut self, other: &Self) {
         self.tokens = self.tokens.saturating_add(other.tokens);
         self.cost += other.cost;
+        self.cost_complete &= other.cost_complete;
         for (spelling, weight) in &other.spellings {
             *self.spellings.entry(spelling.clone()).or_default() += weight;
         }
@@ -86,7 +110,14 @@ impl ModelAccumulator {
             let variant = self.variants.entry(name.clone()).or_default();
             variant.tokens = variant.tokens.saturating_add(other_variant.tokens);
             variant.cost += other_variant.cost;
+            variant.cost_complete &= other_variant.cost_complete;
         }
+    }
+
+    fn add_unpriced(&mut self, spelling: &str, tokens: u64) {
+        self.tokens = self.tokens.saturating_add(tokens);
+        self.cost_complete = false;
+        *self.spellings.entry(spelling.to_owned()).or_default() += tokens.max(1);
     }
 
     fn display_name(&self) -> String {
@@ -159,11 +190,28 @@ impl DailyUsageAccumulator {
         let day = self.days.entry(date).or_default();
         day.tokens = day.tokens.saturating_add(tokens);
         day.cost += cost;
+        day.has_cost = true;
         day.cost_estimated |= cost_estimated;
         day.models
             .entry(family.to_lowercase())
             .or_default()
             .add(family, variant, tokens, cost);
+    }
+
+    /// Keeps measured token history visible when the model has no usable pricing entry.
+    pub fn add_unpriced(&mut self, date: NaiveDate, tokens: u64, model: &str) {
+        if tokens == 0 {
+            self.add_unknown_model(date, model);
+            return;
+        }
+        let model = normalized_model_name(model);
+        let day = self.days.entry(date).or_default();
+        day.tokens = day.tokens.saturating_add(tokens);
+        day.models
+            .entry(model.to_lowercase())
+            .or_default()
+            .add_unpriced(model, tokens);
+        self.add_unknown_model(date, model);
     }
 
     pub fn add_unknown_model(&mut self, date: NaiveDate, model: &str) {
@@ -200,8 +248,8 @@ impl DailyUsageAccumulator {
         }
     }
 
-    /// Builds the three spend periods. Idle or unknown-only periods stay unbacked (`None`), while
-    /// the trend receives only active days and fills calendar gaps in the UI layer.
+    /// Builds the three spend periods. Idle or unknown-marker-only periods stay unbacked (`None`),
+    /// while measured unpriced tokens remain available with an absent cost.
     pub fn build(self, now: DateTime<Utc>, source_note: &str) -> UsageHistory {
         let today = now.with_timezone(&Local).date_naive();
         let yesterday = today.checked_sub_days(Days::new(1));
@@ -214,7 +262,7 @@ impl DailyUsageAccumulator {
             .map(|(date, day)| DailyUsage {
                 date: date.to_string(),
                 tokens: day.tokens,
-                estimated_cost_usd: Some(day.cost),
+                estimated_cost_usd: day.has_cost.then_some(day.cost),
                 estimate_complete: self
                     .unknown_models_by_day
                     .get(date)
@@ -305,6 +353,7 @@ impl DailyUsageAccumulator {
             if let Some(day) = self.days.get(date) {
                 total.tokens = total.tokens.saturating_add(day.tokens);
                 total.cost += day.cost;
+                total.has_cost |= day.has_cost;
                 total.cost_estimated |= day.cost_estimated;
                 for (key, model) in &day.models {
                     total.models.entry(key.clone()).or_default().merge(model);
@@ -321,7 +370,7 @@ impl DailyUsageAccumulator {
         unknown_models.sort();
         Some(UsagePeriod {
             tokens: total.tokens,
-            estimated_cost_usd: Some(total.cost),
+            estimated_cost_usd: total.has_cost.then_some(total.cost),
             cost_estimated: total.cost_estimated,
             estimate_complete: unknown_models.is_empty(),
             model_breakdown: model_breakdown(&total, source_note),
@@ -340,7 +389,7 @@ fn normalized_model_name(model: &str) -> &str {
 }
 
 fn has_usage(day: &DayAccumulator) -> bool {
-    day.tokens > 0 || day.cost > 0.0
+    day.tokens > 0 || day.has_cost
 }
 
 fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsageBreakdown> {
@@ -356,7 +405,7 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
                 .map(|(name, variant)| ModelUsageVariant {
                     model: name.clone(),
                     total_tokens: variant.tokens,
-                    cost_usd: Some(round_to_cents(variant.cost)),
+                    cost_usd: variant.cost_complete.then(|| round_to_cents(variant.cost)),
                 })
                 .collect::<Vec<_>>();
             variants.sort_by(variant_sort);
@@ -370,7 +419,7 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
             ModelUsageEntry {
                 model: display_name,
                 total_tokens: model.tokens,
-                cost_usd: Some(round_to_cents(model.cost)),
+                cost_usd: model.cost_complete.then(|| round_to_cents(model.cost)),
                 variants,
             }
         })
@@ -387,6 +436,7 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
         return None;
     }
 
+    let all_priced = entries.iter().all(|entry| entry.cost_usd.is_some());
     let total_cost = entries
         .iter()
         .filter_map(|entry| entry.cost_usd)
@@ -395,10 +445,11 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
     let mut visible = Vec::new();
     let mut other_tokens = 0_u64;
     let mut other_cost = 0.0;
+    let mut other_cost_complete = true;
     let mut other_variants = Vec::new();
     let mut named_count = 0;
     for entry in entries {
-        let share = if total_cost > 0.0 {
+        let share = if all_priced && total_cost > 0.0 {
             entry.cost_usd.unwrap_or_default() / total_cost
         } else if total_tokens > 0 {
             entry.total_tokens as f64 / total_tokens as f64
@@ -409,6 +460,7 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
         if unattributed || share < 0.05 || named_count >= 5 {
             other_tokens = other_tokens.saturating_add(entry.total_tokens);
             other_cost += entry.cost_usd.unwrap_or_default();
+            other_cost_complete &= entry.cost_usd.is_some();
             other_variants.push(ModelUsageVariant {
                 model: entry.model,
                 total_tokens: entry.total_tokens,
@@ -424,7 +476,7 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
         visible.push(ModelUsageEntry {
             model: "Other".to_owned(),
             total_tokens: other_tokens,
-            cost_usd: Some(round_to_cents(other_cost)),
+            cost_usd: other_cost_complete.then(|| round_to_cents(other_cost)),
             variants: Some(other_variants),
         });
     }
@@ -527,6 +579,23 @@ mod tests {
         assert!(history.last_30_days.is_none());
         assert!(history.daily.is_empty());
         assert_eq!(history.unknown_models, ["mystery"]);
+    }
+
+    #[test]
+    fn measured_unpriced_tokens_keep_history_without_inventing_cost() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 26, 12, 0, 0).unwrap();
+        let mut accumulator = DailyUsageAccumulator::default();
+        accumulator.add_unpriced(day(2026, 6, 26), 420, "future-model");
+
+        let history = accumulator.build(now, "From test logs");
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 420);
+        assert_eq!(today.estimated_cost_usd, None);
+        assert!(!today.estimate_complete);
+        assert_eq!(today.unknown_models, ["future-model"]);
+        assert_eq!(today.model_breakdown.unwrap().models[0].cost_usd, None);
+        assert_eq!(history.daily[0].tokens, 420);
+        assert_eq!(history.daily[0].estimated_cost_usd, None);
     }
 
     #[test]
