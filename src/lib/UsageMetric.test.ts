@@ -52,9 +52,7 @@ describe('UsageMetric model detail', () => {
         unknownModels: [],
         modelBreakdown: {
           sourceNote: 'From your ZCode history (estimated)',
-          models: [
-            { model: 'GLM-5.3-Flash', totalTokens: 30_570, costUsd: 0.00175659 },
-          ],
+          models: [{ model: 'GLM-5.3-Flash', totalTokens: 30_570, costUsd: 0.00175659 }],
         },
       },
     });
