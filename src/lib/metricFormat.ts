@@ -40,6 +40,7 @@ export function formatMetricNumber(
   if (!Number.isFinite(value)) return '—';
   if (kind === 'percent') return `${Math.round(Math.min(100, Math.max(0, value)))}%`;
   if (kind === 'dollars') {
+    if (value > 0 && value < 0.01) return '<$0.01';
     if (Math.abs(value) >= 1000 && style !== 'full') {
       return `$${compactFormatter.format(value)}`;
     }

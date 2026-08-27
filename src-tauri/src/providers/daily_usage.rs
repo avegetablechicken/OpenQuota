@@ -405,7 +405,7 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
                 .map(|(name, variant)| ModelUsageVariant {
                     model: name.clone(),
                     total_tokens: variant.tokens,
-                    cost_usd: variant.cost_complete.then(|| round_to_cents(variant.cost)),
+                    cost_usd: variant.cost_complete.then_some(variant.cost),
                 })
                 .collect::<Vec<_>>();
             variants.sort_by(variant_sort);
@@ -419,7 +419,7 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
             ModelUsageEntry {
                 model: display_name,
                 total_tokens: model.tokens,
-                cost_usd: model.cost_complete.then(|| round_to_cents(model.cost)),
+                cost_usd: model.cost_complete.then_some(model.cost),
                 variants,
             }
         })
@@ -476,7 +476,7 @@ fn model_breakdown(day: &DayAccumulator, source_note: &str) -> Option<ModelUsage
         visible.push(ModelUsageEntry {
             model: "Other".to_owned(),
             total_tokens: other_tokens,
-            cost_usd: other_cost_complete.then(|| round_to_cents(other_cost)),
+            cost_usd: other_cost_complete.then_some(other_cost),
             variants: Some(other_variants),
         });
     }
@@ -555,10 +555,6 @@ where
     digits
 }
 
-fn round_to_cents(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -596,6 +592,19 @@ mod tests {
         assert_eq!(today.model_breakdown.unwrap().models[0].cost_usd, None);
         assert_eq!(history.daily[0].tokens, 420);
         assert_eq!(history.daily[0].estimated_cost_usd, None);
+    }
+
+    #[test]
+    fn model_breakdown_preserves_positive_sub_cent_costs() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 26, 12, 0, 0).unwrap();
+        let mut accumulator = DailyUsageAccumulator::default();
+        accumulator.add(day(2026, 6, 26), 30_570, 0.001_756_59, "GLM-5.3-Flash");
+
+        let history = accumulator.build(now, "From test logs");
+        let model_cost = history.today.unwrap().model_breakdown.unwrap().models[0]
+            .cost_usd
+            .unwrap();
+        assert!((model_cost - 0.001_756_59).abs() < f64::EPSILON);
     }
 
     #[test]

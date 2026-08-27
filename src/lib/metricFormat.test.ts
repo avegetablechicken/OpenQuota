@@ -17,6 +17,18 @@ describe('shared metric formatting', () => {
     expect(formatMetricValue(1.2345, 'count', 'row', 'credits')).toBe('1.2345 credits');
   });
 
+  it('distinguishes positive sub-cent costs from a true zero everywhere', () => {
+    for (const style of ['tray', 'row', 'full'] as const) {
+      expect(formatMetricNumber(0.00175659, 'dollars', style)).toBe('<$0.01');
+    }
+    expect(formatMetricNumber(0, 'dollars', 'row')).toBe('$0.00');
+    expect(formatSpendValue(0.00175659, 'cost')).toBe('<$0.01');
+    expect(totalSpendRingCenter(0.00175659, 'cost')).toEqual({
+      primary: '<$0.01',
+      unit: 'dollars',
+    });
+  });
+
   it('formats total spend consistently across its surfaces', () => {
     expect(formatSpendValue(2059.07, 'cost')).toBe('$2.1K');
     expect(formatSpendValue(2059.07, 'cost', 'full')).toBe('$2,059.07');

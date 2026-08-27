@@ -40,6 +40,33 @@ describe('UsageMetric model detail', () => {
     expect(detail).toHaveTextContent('25%');
   });
 
+  it('shows positive sub-cent totals and model costs without rounding them to zero', async () => {
+    vi.useFakeTimers();
+    render(UsageMetric, {
+      label: 'Today',
+      period: {
+        tokens: 30_570,
+        estimatedCostUsd: 0.00175659,
+        costEstimated: true,
+        estimateComplete: true,
+        unknownModels: [],
+        modelBreakdown: {
+          sourceNote: 'From your ZCode history (estimated)',
+          models: [
+            { model: 'GLM-5.3-Flash', totalTokens: 30_570, costUsd: 0.00175659 },
+          ],
+        },
+      },
+    });
+
+    const reading = screen.getByRole('button', { name: '<$0.01 · 30.6K tokens' });
+    await fireEvent.mouseEnter(reading);
+    await vi.advanceTimersByTimeAsync(400);
+    const detail = screen.getByRole('tooltip', { name: 'Today model usage' });
+    expect(detail).toHaveTextContent('GLM-5.3-Flash');
+    expect(detail).toHaveTextContent('<$0.01');
+  });
+
   it('shows the unknown model warning without inventing a model breakdown', () => {
     render(UsageMetric, {
       label: 'Today',
