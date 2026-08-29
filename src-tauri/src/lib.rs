@@ -35,7 +35,7 @@ use settings::{CredentialDetectionPlan, SettingsService};
 #[cfg(not(target_os = "linux"))]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
     App, AppHandle, Emitter, Manager,
 };
@@ -45,6 +45,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::{
     desktop_integration::DesktopIntegration,
+    models::{AppSettings, MenuBarStyle, UpdateFrequency, UsageDisplay, WindowMode},
     pacing::NotificationEvaluator,
     pricing::PricingStore,
     providers::{
@@ -61,35 +62,245 @@ use crate::{
     },
 };
 
-fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+const TRAY_ID: &str = "openquota-tray";
+
+fn build_tray_menu(
+    app: &AppHandle,
+    settings: &AppSettings,
+) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+    let tray_popup = CheckMenuItem::with_id(
+        app,
+        "tray-mode-popup",
+        "Tray Popup",
+        true,
+        settings.window_mode == WindowMode::Popup,
+        None::<&str>,
+    )?;
+    let floating_window = CheckMenuItem::with_id(
+        app,
+        "tray-mode-floating",
+        "Floating Window",
+        true,
+        settings.window_mode == WindowMode::Floating,
+        None::<&str>,
+    )?;
+    let tray_mode = Submenu::with_id_and_items(
+        app,
+        "tray-mode",
+        "Tray Mode",
+        true,
+        &[&tray_popup, &floating_window],
+    )?;
+
+    let show_left = CheckMenuItem::with_id(
+        app,
+        "usage-display-left",
+        "Left",
+        true,
+        settings.usage_display == UsageDisplay::Left,
+        None::<&str>,
+    )?;
+    let show_used = CheckMenuItem::with_id(
+        app,
+        "usage-display-used",
+        "Used",
+        true,
+        settings.usage_display == UsageDisplay::Used,
+        None::<&str>,
+    )?;
+    let show_usage_as = Submenu::with_id_and_items(
+        app,
+        "usage-display",
+        "Show Usage as",
+        true,
+        &[&show_left, &show_used],
+    )?;
+    let one_minute = CheckMenuItem::with_id(
+        app,
+        "update-frequency-one-minute",
+        "1 minute",
+        true,
+        settings.update_frequency == UpdateFrequency::OneMinute,
+        None::<&str>,
+    )?;
+    let five_minutes = CheckMenuItem::with_id(
+        app,
+        "update-frequency-five-minutes",
+        "5 minutes",
+        true,
+        settings.update_frequency == UpdateFrequency::FiveMinutes,
+        None::<&str>,
+    )?;
+    let adaptive = CheckMenuItem::with_id(
+        app,
+        "update-frequency-adaptive",
+        "Adaptive",
+        true,
+        settings.update_frequency == UpdateFrequency::Adaptive,
+        None::<&str>,
+    )?;
+    let update_frequency = Submenu::with_id_and_items(
+        app,
+        "update-frequency",
+        "Update Frequency",
+        true,
+        &[&one_minute, &five_minutes, &adaptive],
+    )?;
+    let launch_at_login = CheckMenuItem::with_id(
+        app,
+        "launch-at-login",
+        "Launch at Login",
+        true,
+        settings.launch_at_login,
+        None::<&str>,
+    )?;
+
     #[cfg(target_os = "macos")]
-    let menu = {
+    {
+        let openquota_icon = CheckMenuItem::with_id(
+            app,
+            "icon-style-openquota",
+            "OpenQuota",
+            true,
+            settings.menu_bar_style == MenuBarStyle::Icon,
+            None::<&str>,
+        )?;
+        let text_icon = CheckMenuItem::with_id(
+            app,
+            "icon-style-text",
+            "Text",
+            true,
+            settings.menu_bar_style == MenuBarStyle::Text,
+            None::<&str>,
+        )?;
+        let bars_icon = CheckMenuItem::with_id(
+            app,
+            "icon-style-bars",
+            "Bars",
+            true,
+            settings.menu_bar_style == MenuBarStyle::Bars,
+            None::<&str>,
+        )?;
+        let icon_style = Submenu::with_id_and_items(
+            app,
+            "icon-style",
+            "Icon Style",
+            true,
+            &[&openquota_icon, &text_icon, &bars_icon],
+        )?;
         let settings_item =
-            MenuItem::with_id(app, "settings", "Settings", true, Some("CmdOrCtrl+,"))?;
-        let separator = PredefinedMenuItem::separator(app)?;
+            MenuItem::with_id(app, "settings", "More Settings…", true, Some("CmdOrCtrl+,"))?;
+        let second_separator = PredefinedMenuItem::separator(app)?;
         let quit = MenuItem::with_id(app, "quit", "Quit OpenQuota", true, Some("CmdOrCtrl+Q"))?;
-        Menu::with_items(app, &[&settings_item, &separator, &quit])?
-    };
+        Ok(Menu::with_items(
+            app,
+            &[
+                &icon_style,
+                &tray_mode,
+                &show_usage_as,
+                &update_frequency,
+                &settings_item,
+                &second_separator,
+                &launch_at_login,
+                &quit,
+            ],
+        )?)
+    }
+
     #[cfg(not(target_os = "macos"))]
-    let menu = {
+    {
         let open = MenuItem::with_id(app, "open", "Open OpenQuota", true, None::<&str>)?;
         let customize = MenuItem::with_id(app, "customize", "Customize…", true, None::<&str>)?;
-        let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-        let separator = PredefinedMenuItem::separator(app)?;
+        let settings_item =
+            MenuItem::with_id(app, "settings", "More Settings…", true, None::<&str>)?;
+        let second_separator = PredefinedMenuItem::separator(app)?;
         let quit = MenuItem::with_id(app, "quit", "Quit OpenQuota", true, None::<&str>)?;
-        Menu::with_items(app, &[&open, &customize, &settings_item, &separator, &quit])?
+        Ok(Menu::with_items(
+            app,
+            &[
+                &open,
+                &customize,
+                &tray_mode,
+                &show_usage_as,
+                &update_frequency,
+                &second_separator,
+                &settings_item,
+                &launch_at_login,
+                &quit,
+            ],
+        )?)
+    }
+}
+
+pub(crate) fn update_tray_menu(app: &AppHandle, settings: &AppSettings) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
     };
+    match build_tray_menu(app, settings) {
+        Ok(menu) => {
+            if tray.set_menu(Some(menu)).is_err() {
+                app_warn!("tray", "tray menu update failed");
+            }
+        }
+        Err(error) => app_warn!("tray", "tray menu could not be rebuilt: {error}"),
+    }
+}
+
+fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+    let menu = build_tray_menu(app.handle(), &app.state::<Arc<SettingsService>>().get())?;
 
     let icon = app
         .default_window_icon()
         .ok_or_else(|| std::io::Error::other("OpenQuota application icon is unavailable"))?
         .clone();
-    let tray = TrayIconBuilder::with_id("openquota-tray")
-        .icon(icon)
-        .menu(&menu);
+    let tray = TrayIconBuilder::with_id(TRAY_ID).icon(icon).menu(&menu);
     #[cfg(not(target_os = "linux"))]
     let tray = tray.tooltip("OpenQuota").show_menu_on_left_click(false);
     let tray = tray.on_menu_event(|app, event| match event.id.as_ref() {
+        "icon-style-openquota" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Icon),
+        ),
+        "icon-style-text" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Text),
+        ),
+        "icon-style-bars" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Bars),
+        ),
+        "tray-mode-popup" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::WindowMode(WindowMode::Popup),
+        ),
+        "tray-mode-floating" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::WindowMode(WindowMode::Floating),
+        ),
+        "usage-display-left" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::UsageDisplay(UsageDisplay::Left),
+        ),
+        "usage-display-used" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::UsageDisplay(UsageDisplay::Used),
+        ),
+        "update-frequency-one-minute" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::OneMinute),
+        ),
+        "update-frequency-five-minutes" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::FiveMinutes),
+        ),
+        "update-frequency-adaptive" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::Adaptive),
+        ),
+        "launch-at-login" => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::LaunchAtLoginToggle,
+        ),
         "open" => {
             app.state::<PopupDismissGuard>().cancel_pending();
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {

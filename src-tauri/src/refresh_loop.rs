@@ -42,7 +42,12 @@ pub fn spawn(
                 let _ = app.emit("usage-state", &state);
                 finish_refresh(&app, &state, &settings, &notifications);
             }
-            tokio::time::sleep(interval).await;
+            let refresh_frequency_changed = service.wait_for_refresh_frequency_change();
+            tokio::pin!(refresh_frequency_changed);
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = &mut refresh_frequency_changed => {}
+            }
         }
     });
 }

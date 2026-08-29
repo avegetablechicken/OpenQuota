@@ -9,6 +9,7 @@ use chrono::Utc;
 use crate::{
     models::{
         MetricSource, ProviderErrorKind, ProviderSnapshot, ProviderViewState, SnapshotSource,
+        UpdateFrequency,
     },
     policy::{FAILURE_RETRY_BACKOFF, FAST_REFRESH_INTERVAL, REFRESH_INTERVAL, STALE_AFTER},
     providers::{ProviderError, ProviderRefresh, ProviderRegistry},
@@ -49,6 +50,7 @@ pub struct ProviderService {
     last_full_refresh_at: RwLock<Option<chrono::DateTime<Utc>>>,
     refresh_interval: RwLock<Duration>,
     unchanged_refreshes: Mutex<u8>,
+    refresh_frequency_wakeup: tokio::sync::Notify,
     refresh_timeout: Duration,
     settings: Option<Arc<SettingsService>>,
 }
@@ -119,6 +121,7 @@ impl ProviderService {
             last_full_refresh_at: RwLock::new(None),
             refresh_interval: RwLock::new(REFRESH_INTERVAL),
             unchanged_refreshes: Mutex::new(0),
+            refresh_frequency_wakeup: tokio::sync::Notify::new(),
             refresh_timeout,
             settings,
         }
@@ -138,11 +141,7 @@ impl ProviderService {
             .read()
             .ok()
             .and_then(|value| value.to_owned());
-        let refresh_interval_seconds = self
-            .refresh_interval
-            .read()
-            .map(|value| value.as_secs())
-            .unwrap_or_else(|_| REFRESH_INTERVAL.as_secs());
+        let refresh_interval_seconds = self.refresh_interval().as_secs();
         UsageViewState {
             providers,
             last_full_refresh_at,
@@ -541,10 +540,25 @@ impl ProviderService {
     }
 
     fn refresh_interval(&self) -> Duration {
+        match self.update_frequency() {
+            UpdateFrequency::OneMinute => FAST_REFRESH_INTERVAL,
+            UpdateFrequency::FiveMinutes => REFRESH_INTERVAL,
+            UpdateFrequency::Adaptive => self.dynamic_refresh_interval(),
+        }
+    }
+
+    fn dynamic_refresh_interval(&self) -> Duration {
         self.refresh_interval
             .read()
             .map(|value| *value)
             .unwrap_or(REFRESH_INTERVAL)
+    }
+
+    fn update_frequency(&self) -> UpdateFrequency {
+        self.settings
+            .as_ref()
+            .map(|settings| settings.get().update_frequency)
+            .unwrap_or_default()
     }
 
     fn set_refresh_interval(&self, interval: Duration) {
@@ -554,20 +568,49 @@ impl ProviderService {
     }
 
     fn update_refresh_interval(&self, data_changed: bool) -> Duration {
-        let current = self.refresh_interval();
-        let interval = self
-            .unchanged_refreshes
-            .lock()
-            .map(|mut unchanged| refresh_interval_for(current, data_changed, &mut unchanged))
-            .unwrap_or_else(|_| {
-                if data_changed {
-                    FAST_REFRESH_INTERVAL
-                } else {
-                    REFRESH_INTERVAL
-                }
-            });
+        let interval = match self.update_frequency() {
+            UpdateFrequency::OneMinute => {
+                self.reset_unchanged_refreshes();
+                FAST_REFRESH_INTERVAL
+            }
+            UpdateFrequency::FiveMinutes => {
+                self.reset_unchanged_refreshes();
+                REFRESH_INTERVAL
+            }
+            UpdateFrequency::Adaptive => {
+                let current = self.dynamic_refresh_interval();
+                self.unchanged_refreshes
+                    .lock()
+                    .map(|mut unchanged| {
+                        refresh_interval_for(current, data_changed, &mut unchanged)
+                    })
+                    .unwrap_or_else(|_| {
+                        if data_changed {
+                            FAST_REFRESH_INTERVAL
+                        } else {
+                            REFRESH_INTERVAL
+                        }
+                    })
+            }
+        };
         self.set_refresh_interval(interval);
         interval
+    }
+
+    fn reset_unchanged_refreshes(&self) {
+        if let Ok(mut unchanged) = self.unchanged_refreshes.lock() {
+            *unchanged = 0;
+        }
+    }
+
+    pub fn refresh_frequency_changed(&self) {
+        self.reset_unchanged_refreshes();
+        self.set_refresh_interval(REFRESH_INTERVAL);
+        self.refresh_frequency_wakeup.notify_one();
+    }
+
+    pub async fn wait_for_refresh_frequency_change(&self) {
+        self.refresh_frequency_wakeup.notified().await;
     }
 
     fn is_in_failure_backoff(&self, provider_id: &str) -> bool {

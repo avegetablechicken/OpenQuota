@@ -730,6 +730,16 @@ pub enum UsageDisplay {
     Left,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateFrequency {
+    OneMinute,
+    FiveMinutes,
+    #[default]
+    #[serde(other)]
+    Adaptive,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ResetDisplay {
@@ -825,6 +835,7 @@ pub struct AppSettings {
     pub window_mode: WindowMode,
     pub menu_bar_style: MenuBarStyle,
     pub usage_display: UsageDisplay,
+    pub update_frequency: UpdateFrequency,
     pub reset_display: ResetDisplay,
     pub time_format: TimeFormatPreference,
     pub always_show_pacing: bool,
@@ -854,6 +865,7 @@ impl Default for AppSettings {
             window_mode: WindowMode::Popup,
             menu_bar_style: MenuBarStyle::Icon,
             usage_display: UsageDisplay::Left,
+            update_frequency: UpdateFrequency::Adaptive,
             reset_display: ResetDisplay::Countdown,
             time_format: TimeFormatPreference::System,
             always_show_pacing: false,
@@ -898,7 +910,7 @@ mod tests {
     use super::{
         ApiKeyMutationOutcome, ApiKeyStatus, AppSettings, LogLevel, MenuBarStyle,
         ProviderApiKeyState, ProviderErrorKind, ProviderLink, ProviderSnapshot, ProviderViewState,
-        UsagePeriod, WindowMode,
+        UpdateFrequency, UsagePeriod, WindowMode,
     };
 
     #[test]
@@ -934,6 +946,24 @@ mod tests {
         unknown["menuBarStyle"] = serde_json::json!("futureStyle");
         let settings: AppSettings = serde_json::from_value(unknown).unwrap();
         assert_eq!(settings.menu_bar_style, MenuBarStyle::Icon);
+    }
+
+    #[test]
+    fn update_frequency_defaults_to_adaptive_and_unknown_values_fall_back_to_it() {
+        assert_eq!(
+            AppSettings::default().update_frequency,
+            UpdateFrequency::Adaptive
+        );
+
+        let mut missing = serde_json::to_value(AppSettings::default()).unwrap();
+        missing.as_object_mut().unwrap().remove("updateFrequency");
+        let settings: AppSettings = serde_json::from_value(missing).unwrap();
+        assert_eq!(settings.update_frequency, UpdateFrequency::Adaptive);
+
+        let mut unknown = serde_json::to_value(AppSettings::default()).unwrap();
+        unknown["updateFrequency"] = serde_json::json!("hourly");
+        let settings: AppSettings = serde_json::from_value(unknown).unwrap();
+        assert_eq!(settings.update_frequency, UpdateFrequency::Adaptive);
     }
 
     #[test]

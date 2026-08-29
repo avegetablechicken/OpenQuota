@@ -363,6 +363,7 @@ export const settingsState: SettingsViewState = {
     windowMode: 'popup',
     menuBarStyle: 'text',
     usageDisplay: 'left',
+    updateFrequency: 'adaptive',
     resetDisplay: 'countdown',
     timeFormat: 'system',
     alwaysShowPacing: false,

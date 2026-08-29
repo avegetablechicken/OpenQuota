@@ -258,6 +258,7 @@ export interface AppSettings {
   windowMode: 'popup' | 'floating';
   menuBarStyle: 'icon' | 'text' | 'bars';
   usageDisplay: 'used' | 'left';
+  updateFrequency: 'oneMinute' | 'fiveMinutes' | 'adaptive';
   resetDisplay: 'countdown' | 'exact';
   timeFormat: 'system' | 'twelveHour' | 'twentyFourHour';
   alwaysShowPacing: boolean;

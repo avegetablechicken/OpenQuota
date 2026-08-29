@@ -49,6 +49,7 @@ const settings: AppSettings = {
   windowMode: 'popup',
   menuBarStyle: 'icon',
   usageDisplay: 'used',
+  updateFrequency: 'adaptive',
   resetDisplay: 'countdown',
   timeFormat: 'system',
   alwaysShowPacing: false,

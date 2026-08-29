@@ -36,7 +36,7 @@ tauri-plugin-updater = "2.10.1"
 tempfile = "3"
 thiserror = "2"
 tiny-skia = { version = "0.12", default-features = false, features = ["simd", "std"] }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["macros", "sync", "time"] }
 toml = "1.1.2"
 walkdir = "2"
 zeroize = "1.8"

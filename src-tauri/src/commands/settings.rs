@@ -14,7 +14,9 @@ use tauri_plugin_opener::OpenerExt;
 use crate::{
     apply_shortcut_change, autostart_is_enabled, child_process,
     desktop_integration::DesktopIntegration,
-    models::{AppSettings, SettingsViewState},
+    models::{
+        AppSettings, MenuBarStyle, SettingsViewState, UpdateFrequency, UsageDisplay, WindowMode,
+    },
     notifications::{finish_refresh, permission as notification_permission},
     pacing::NotificationEvaluator,
     providers::{detect_local_credentials, ProviderRegistry},
@@ -29,6 +31,64 @@ use crate::{
 enum SettingsSaveMode {
     Normal,
     ResetAll,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TraySetting {
+    MenuBarStyle(MenuBarStyle),
+    WindowMode(WindowMode),
+    UsageDisplay(UsageDisplay),
+    UpdateFrequency(UpdateFrequency),
+    LaunchAtLoginToggle,
+}
+
+pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let service = app.state::<Arc<ProviderService>>().inner().clone();
+        let settings_service = app.state::<Arc<SettingsService>>().inner().clone();
+        let notifications = app.state::<Arc<NotificationEvaluator>>().inner().clone();
+
+        for _ in 0..3 {
+            let current = settings_service.get();
+            let mut next = current.clone();
+            match setting {
+                TraySetting::MenuBarStyle(value) => next.menu_bar_style = value,
+                TraySetting::WindowMode(value) => next.window_mode = value,
+                TraySetting::UsageDisplay(value) => next.usage_display = value,
+                TraySetting::UpdateFrequency(value) => next.update_frequency = value,
+                TraySetting::LaunchAtLoginToggle => next.launch_at_login = !current.launch_at_login,
+            }
+            if next == current {
+                return;
+            }
+
+            match save_app_settings_inner(
+                app.clone(),
+                service.clone(),
+                settings_service.clone(),
+                notifications.clone(),
+                next,
+                settings_service.settings_revision(),
+                settings_service.account_revision(),
+                SettingsSaveMode::Normal,
+            )
+            .await
+            {
+                Ok(_) => return,
+                Err(error) if error.starts_with("Settings changed before") => continue,
+                Err(error) => {
+                    crate::app_warn!("config", "tray setting could not be saved: {error}");
+                    return;
+                }
+            }
+        }
+
+        crate::app_warn!(
+            "config",
+            "tray setting could not be saved after concurrent changes"
+        );
+    });
 }
 
 #[tauri::command]
@@ -166,12 +226,16 @@ async fn save_app_settings_inner(
         }
     }
     crate::app_debug!("config", "application settings persisted");
+    if previous.update_frequency != updated.update_frequency {
+        service.refresh_frequency_changed();
+    }
     tray_presentation::update(
         &app,
         &service.state(),
         &updated,
         settings_service.registry(),
     );
+    crate::update_tray_menu(&app, &updated);
     let _ = app.emit(
         "settings-state",
         settings_view_state(&app, &settings_service),
