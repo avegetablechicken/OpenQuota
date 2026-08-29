@@ -8,8 +8,11 @@ use tiny_skia::{
     BlendMode, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
 };
 
+#[cfg(test)]
 const ICON_SIZE: u32 = 36;
+#[cfg(test)]
 const ICON_POINTS: f32 = 18.0;
+#[cfg(test)]
 const ICON_SCALE: f32 = ICON_SIZE as f32 / ICON_POINTS;
 pub const MAX_BARS: usize = 4;
 
@@ -54,11 +57,24 @@ pub struct TextGroup {
     pub values: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct BarGroup {
+    pub provider_id: String,
+    pub upstream_provider_id: Option<String>,
+    pub fractions: Vec<f64>,
+}
+
 pub fn text_icon(groups: &[TextGroup]) -> Option<Image<'static>> {
     let strip = render_text_strip(groups)?;
     Some(Image::new_owned(strip.rgba, strip.width, TEXT_HEIGHT))
 }
 
+pub fn bar_strip_icon(groups: &[BarGroup]) -> Option<Image<'static>> {
+    let strip = render_bar_strip(groups)?;
+    Some(Image::new_owned(strip.rgba, strip.width, TEXT_HEIGHT))
+}
+
+#[cfg(test)]
 pub fn bar_icon(fractions: &[f64]) -> Image<'static> {
     Image::new_owned(render_bar_rgba(fractions), ICON_SIZE, ICON_SIZE)
 }
@@ -72,6 +88,12 @@ struct RenderedStrip {
 struct GroupLayout<'a> {
     group: &'a TextGroup,
     text_width: f32,
+    width: f32,
+}
+
+#[derive(Debug, Clone)]
+struct BarGroupLayout<'a> {
+    group: &'a BarGroup,
     width: f32,
 }
 
@@ -114,7 +136,12 @@ fn render_text_strip(groups: &[TextGroup]) -> Option<RenderedStrip> {
     let mut x = OUTER_PADDING;
 
     for layout in groups {
-        draw_provider_icon(&mut pixmap, layout.group, x);
+        draw_provider_icon(
+            &mut pixmap,
+            &layout.group.provider_id,
+            layout.group.upstream_provider_id.as_deref(),
+            x,
+        );
         let text_x = x + PROVIDER_ICON_SIZE + ICON_TEXT_GAP;
         if layout.group.values.len() == 1 {
             let value = &layout.group.values[0];
@@ -132,6 +159,51 @@ fn render_text_strip(groups: &[TextGroup]) -> Option<RenderedStrip> {
                 );
             }
         }
+        x += layout.width + GROUP_GAP;
+    }
+
+    Some(RenderedStrip {
+        rgba: pixmap.take_demultiplied(),
+        width,
+    })
+}
+
+fn render_bar_strip(groups: &[BarGroup]) -> Option<RenderedStrip> {
+    const BAR_AREA_WIDTH: f32 = 36.0;
+
+    let groups = groups
+        .iter()
+        .filter(|group| !group.fractions.is_empty())
+        .map(|group| BarGroupLayout {
+            group,
+            width: PROVIDER_ICON_SIZE + ICON_TEXT_GAP + BAR_AREA_WIDTH,
+        })
+        .collect::<Vec<_>>();
+    if groups.is_empty() {
+        return None;
+    }
+
+    let content_width = groups.iter().map(|group| group.width).sum::<f32>()
+        + GROUP_GAP * groups.len().saturating_sub(1) as f32;
+    let width = (content_width + OUTER_PADDING * 2.0).ceil().max(1.0) as u32;
+    let mut pixmap = Pixmap::new(width, TEXT_HEIGHT).expect("menu bar strip dimensions are valid");
+    let mut x = OUTER_PADDING;
+
+    for layout in groups {
+        draw_provider_icon(
+            &mut pixmap,
+            &layout.group.provider_id,
+            layout.group.upstream_provider_id.as_deref(),
+            x,
+        );
+        draw_bar_rows(
+            &mut pixmap,
+            &layout.group.fractions,
+            x + PROVIDER_ICON_SIZE + ICON_TEXT_GAP,
+            0.0,
+            BAR_AREA_WIDTH,
+            TEXT_HEIGHT as f32,
+        );
         x += layout.width + GROUP_GAP;
     }
 
@@ -234,18 +306,21 @@ fn blend_alpha_mask(
     }
 }
 
-fn draw_provider_icon(pixmap: &mut Pixmap, group: &TextGroup, x: f32) {
+fn draw_provider_icon(
+    pixmap: &mut Pixmap,
+    provider_id: &str,
+    upstream_provider_id: Option<&str>,
+    x: f32,
+) {
     let mut paint = Paint::default();
     paint.set_color_rgba8(0, 0, 0, 255);
     paint.anti_alias = true;
     let icon_top = (TEXT_HEIGHT as f32 - PROVIDER_ICON_SIZE) / 2.0;
 
-    if let Some(path) = provider_path(&group.provider_id) {
-        let style = provider_mark_style(&group.provider_id);
-        if let Some((upstream_path, upstream_style)) = group
-            .upstream_provider_id
-            .as_deref()
-            .and_then(|provider_id| {
+    if let Some(path) = provider_path(provider_id) {
+        let style = provider_mark_style(provider_id);
+        if let Some((upstream_path, upstream_style)) =
+            upstream_provider_id.and_then(|provider_id| {
                 provider_path(provider_id).map(|path| (path, provider_mark_style(provider_id)))
             })
         {
@@ -276,6 +351,77 @@ fn draw_provider_icon(pixmap: &mut Pixmap, group: &TextGroup, x: f32) {
                 FillRule::Winding,
                 Transform::identity(),
                 None,
+            );
+        }
+    }
+}
+
+fn draw_bar_rows(
+    pixmap: &mut Pixmap,
+    fractions: &[f64],
+    x: f32,
+    y: f32,
+    area_width: f32,
+    area_height: f32,
+) {
+    let count = fractions.len().min(2);
+    if count == 0 {
+        return;
+    }
+
+    let padding = (area_height * 0.08).round().max(1.0);
+    let gap = (area_height * 0.03).round().max(1.0);
+    let track_x = x + padding;
+    let track_width = area_width - 2.0 * padding;
+    let layout_count = count.max(2) as f32;
+    let track_height = ((area_height - 2.0 * padding - (layout_count - 1.0) * gap) / layout_count)
+        .floor()
+        .max(1.0);
+    let radius = (track_height / 3.0).floor().max(1.0);
+    let total_height = count as f32 * track_height + count.saturating_sub(1) as f32 * gap;
+    let y_offset = y + padding + ((area_height - 2.0 * padding - total_height) / 2.0).floor();
+
+    for (index, fraction) in fractions.iter().take(count).enumerate() {
+        let bar_y = y_offset + index as f32 * (track_height + gap) + 1.0;
+        fill_rounded_bar(
+            pixmap,
+            track_x,
+            bar_y,
+            track_width,
+            track_height,
+            radius,
+            radius,
+            41,
+        );
+
+        let fill = bar_fill(track_width, *fraction);
+        if fill.fill_width > 0.0 {
+            let trailing = if fill.fill_width >= track_width {
+                radius
+            } else {
+                (radius * 0.35).floor().max(0.0)
+            };
+            fill_rounded_bar(
+                pixmap,
+                track_x,
+                bar_y,
+                fill.fill_width,
+                track_height,
+                radius,
+                trailing,
+                255,
+            );
+        }
+        if let Some(divider_x) = fill.divider_x {
+            fill_rounded_bar(
+                pixmap,
+                track_x + divider_x,
+                bar_y,
+                fill.remainder_width,
+                track_height,
+                (radius * 0.2).floor().max(0.0),
+                radius,
+                61,
             );
         }
     }
@@ -508,6 +654,7 @@ fn parse_svg_path(source: &str) -> Result<Path, String> {
     builder.finish().ok_or_else(|| "path is empty".into())
 }
 
+#[cfg(test)]
 fn render_bar_rgba(fractions: &[f64]) -> Vec<u8> {
     let size = ICON_POINTS;
     let mut pixmap = Pixmap::new(ICON_SIZE, ICON_SIZE).expect("menu bar icon dimensions are valid");
@@ -669,9 +816,10 @@ fn fill_rounded_bar(
 #[cfg(test)]
 mod tests {
     use super::{
-        bar_fill, bar_icon, draw_provider_icon, parse_svg_path, provider_path, render_bar_rgba,
-        render_text_strip, text_icon, visual_bar_fraction, TextGroup, COMPOSITE_UPSTREAM_CENTER,
-        COMPOSITE_UPSTREAM_SIZE, ICON_SIZE, MAX_BARS, PROVIDER_ICON_SIZE, TEXT_HEIGHT,
+        bar_fill, bar_icon, bar_strip_icon, draw_provider_icon, parse_svg_path, provider_path,
+        render_bar_rgba, render_text_strip, text_icon, visual_bar_fraction, BarGroup, TextGroup,
+        COMPOSITE_UPSTREAM_CENTER, COMPOSITE_UPSTREAM_SIZE, ICON_SIZE, MAX_BARS,
+        PROVIDER_ICON_SIZE, TEXT_HEIGHT,
     };
 
     fn text_group(provider_id: &str, values: &[&str]) -> TextGroup {
@@ -682,12 +830,25 @@ mod tests {
         }
     }
 
+    fn bar_group(provider_id: &str, fractions: &[f64]) -> BarGroup {
+        BarGroup {
+            provider_id: provider_id.into(),
+            upstream_provider_id: None,
+            fractions: fractions.to_vec(),
+        }
+    }
+
     fn provider_icon_rgba(provider_id: &str, upstream_provider_id: Option<&str>) -> Vec<u8> {
         let mut pixmap = tiny_skia::Pixmap::new(PROVIDER_ICON_SIZE as u32, TEXT_HEIGHT)
             .expect("provider icon dimensions should be valid");
         let mut group = text_group(provider_id, &["50%"]);
         group.upstream_provider_id = upstream_provider_id.map(str::to_owned);
-        draw_provider_icon(&mut pixmap, &group, 0.0);
+        draw_provider_icon(
+            &mut pixmap,
+            &group.provider_id,
+            group.upstream_provider_id.as_deref(),
+            0.0,
+        );
         pixmap.take_demultiplied()
     }
 
@@ -813,6 +974,27 @@ mod tests {
         .expect("two groups should render");
         assert_eq!(one.rgba.len(), (one.width * TEXT_HEIGHT * 4) as usize);
         assert!(two.width > one.width);
+    }
+
+    #[test]
+    fn bar_strip_uses_provider_groups_and_renders_each_pinned_quota() {
+        let one = bar_strip_icon(&[bar_group("codex", &[0.75, 0.4])])
+            .expect("one provider should render");
+        let two = bar_strip_icon(&[
+            bar_group("codex", &[0.75, 0.4]),
+            bar_group("claude", &[0.8]),
+        ])
+        .expect("multiple providers should render");
+
+        assert_eq!(one.height(), TEXT_HEIGHT);
+        assert!(two.width() > one.width());
+        assert!(two
+            .rgba()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[3] == 255));
+        assert!(bar_strip_icon(&[bar_group("codex", &[])]).is_none());
     }
 
     #[test]

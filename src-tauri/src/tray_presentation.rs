@@ -41,7 +41,7 @@ struct TrayGauge {
 enum MacMenuBarIcon {
     Mark,
     Text(Vec<crate::menu_bar::TextGroup>),
-    Bars(Vec<f64>),
+    Bars(Vec<crate::menu_bar::BarGroup>),
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -117,12 +117,12 @@ fn mac_menu_bar_presentation(
             }
         }
         crate::models::MenuBarStyle::Bars => {
-            let fractions = bar_fractions(groups);
+            let bar_groups = bar_groups(groups);
             MacMenuBarPresentation {
-                icon: if fractions.is_empty() {
+                icon: if bar_groups.is_empty() {
                     MacMenuBarIcon::Mark
                 } else {
-                    MacMenuBarIcon::Bars(fractions)
+                    MacMenuBarIcon::Bars(bar_groups)
                 },
             }
         }
@@ -158,15 +158,13 @@ fn apply_mac_menu_bar_presentation(
                 crate::app_warn!("tray", "macOS menu bar icon update failed");
             }
         }
-        MacMenuBarIcon::Bars(fractions) => {
+        MacMenuBarIcon::Bars(bar_groups) => {
             // Clear Text before installing Bars so no stale value can remain beside the compact glyph.
             if tray.set_title(Some("")).is_err() {
                 crate::app_warn!("tray", "macOS menu bar title clear failed");
             }
-            if tray
-                .set_icon_with_as_template(Some(crate::menu_bar::bar_icon(&fractions)), true)
-                .is_err()
-            {
+            let icon = crate::menu_bar::bar_strip_icon(&bar_groups).unwrap_or_else(mark_icon);
+            if tray.set_icon_with_as_template(Some(icon), true).is_err() {
                 crate::app_warn!("tray", "macOS menu bar icon update failed");
             }
         }
@@ -174,11 +172,20 @@ fn apply_mac_menu_bar_presentation(
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn bar_fractions(groups: &[TrayGroup]) -> Vec<f64> {
+fn bar_groups(groups: &[TrayGroup]) -> Vec<crate::menu_bar::BarGroup> {
     groups
         .iter()
-        .flat_map(|group| group.metrics.iter())
-        .filter_map(|metric| metric.gauge.map(|gauge| gauge.display_fraction))
+        .map(|group| crate::menu_bar::BarGroup {
+            provider_id: group.provider_id.clone(),
+            upstream_provider_id: group.upstream_provider_id.clone(),
+            fractions: group
+                .metrics
+                .iter()
+                .filter_map(|metric| metric.gauge.map(|gauge| gauge.display_fraction))
+                .take(crate::settings::MAX_PINS_PER_PROVIDER)
+                .collect(),
+        })
+        .filter(|group| !group.fractions.is_empty())
         .take(crate::menu_bar::MAX_BARS)
         .collect()
 }
@@ -454,7 +461,7 @@ mod tests {
     };
 
     use super::{
-        bar_fractions, format_tokens, mac_menu_bar_presentation, primary_gauge, resolved_groups,
+        bar_groups, format_tokens, mac_menu_bar_presentation, primary_gauge, resolved_groups,
         text_groups, MacMenuBarIcon, MacMenuBarPresentation, TrayGauge, TrayGroup, TrayMetric,
     };
     use crate::service::UsageViewState;
@@ -565,7 +572,11 @@ mod tests {
         assert_eq!(
             mac_menu_bar_presentation(&groups, crate::models::MenuBarStyle::Bars),
             MacMenuBarPresentation {
-                icon: MacMenuBarIcon::Bars(vec![0.75]),
+                icon: MacMenuBarIcon::Bars(vec![crate::menu_bar::BarGroup {
+                    provider_id: "codex".into(),
+                    upstream_provider_id: None,
+                    fractions: vec![0.75],
+                }]),
             }
         );
     }
@@ -628,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn bars_use_the_first_four_bounded_metrics_in_layout_order() {
+    fn bars_keep_pinned_quota_metrics_grouped_by_provider() {
         let metric = |value: f64| TrayMetric {
             value: format!("{value:.0}%"),
             detail: String::new(),
@@ -658,7 +669,21 @@ mod tests {
             },
         ];
 
-        assert_eq!(bar_fractions(&groups), vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(
+            bar_groups(&groups),
+            vec![
+                crate::menu_bar::BarGroup {
+                    provider_id: "claude".into(),
+                    upstream_provider_id: None,
+                    fractions: vec![0.1, 0.2],
+                },
+                crate::menu_bar::BarGroup {
+                    provider_id: "codex".into(),
+                    upstream_provider_id: None,
+                    fractions: vec![0.3, 0.4],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -753,8 +778,22 @@ mod tests {
             })
         );
         assert_eq!(used_groups[0].metrics[0].value, "25%");
-        assert_eq!(bar_fractions(&groups), vec![0.75, 0.4]);
-        assert_eq!(bar_fractions(&used_groups), vec![0.25, 0.6]);
+        assert_eq!(
+            bar_groups(&groups),
+            vec![crate::menu_bar::BarGroup {
+                provider_id: "codex".into(),
+                upstream_provider_id: None,
+                fractions: vec![0.75, 0.4],
+            }]
+        );
+        assert_eq!(
+            bar_groups(&used_groups),
+            vec![crate::menu_bar::BarGroup {
+                provider_id: "codex".into(),
+                upstream_provider_id: None,
+                fractions: vec![0.25, 0.6],
+            }]
+        );
     }
 
     #[test]
@@ -990,7 +1029,7 @@ mod tests {
         assert_eq!(metric.value, "2500 cap");
         assert_eq!(metric.detail, "Extra Usage 2500 cap");
         assert_eq!(metric.gauge, None);
-        assert!(bar_fractions(&[TrayGroup {
+        assert!(bar_groups(&[TrayGroup {
             provider_id: "grok".into(),
             upstream_provider_id: None,
             metrics: vec![metric],
