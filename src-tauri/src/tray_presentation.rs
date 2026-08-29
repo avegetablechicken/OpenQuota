@@ -734,6 +734,7 @@ mod tests {
         let state = UsageViewState {
             providers: [("codex".into(), provider_state)].into_iter().collect(),
             last_full_refresh_at: None,
+            refresh_interval_seconds: crate::policy::REFRESH_INTERVAL.as_secs(),
         };
         let catalog = ProviderRegistry::from_definitions(vec![codex::definition()]).unwrap();
         let groups = resolved_groups(
@@ -839,6 +840,7 @@ mod tests {
             .into_iter()
             .collect(),
             last_full_refresh_at: None,
+            refresh_interval_seconds: crate::policy::REFRESH_INTERVAL.as_secs(),
         };
 
         let groups = resolved_groups(&state, &settings, &registry);

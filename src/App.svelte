@@ -88,6 +88,7 @@
   const providerStates = $derived(Object.values(viewState.providers));
   const anyRefreshing = $derived(providerStates.some((state) => state.refreshing));
   const lastFullRefresh = $derived(viewState.lastFullRefreshAt ?? undefined);
+  const refreshIntervalMs = $derived((viewState.refreshIntervalSeconds ?? 5 * 60) * 1000);
   const platform = desktopPlatform();
   const shortcuts = shortcutLabels(platform);
   const settingsController = new SettingsController((message) => (settingsError = message));
@@ -973,7 +974,9 @@
           aria-label="Refresh all provider usage"
         >
           <span>OpenQuota {appVersion}</span><small
-            >{anyRefreshing ? 'Updating…' : nextUpdateLabel(lastFullRefresh, now)}</small
+            >{anyRefreshing
+              ? 'Updating…'
+              : nextUpdateLabel(lastFullRefresh, now, refreshIntervalMs)}</small
           >
         </button>
         {#if screen === 'dashboard'}

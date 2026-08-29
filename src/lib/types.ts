@@ -144,6 +144,7 @@ export interface ProviderViewState {
 export interface UsageViewState {
   providers: Record<string, ProviderViewState>;
   lastFullRefreshAt?: string | null;
+  refreshIntervalSeconds?: number;
 }
 
 export type MetricSection = 'alwaysVisible' | 'onDemand';

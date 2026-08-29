@@ -10,7 +10,7 @@ use crate::{
     models::{
         MetricSource, ProviderErrorKind, ProviderSnapshot, ProviderViewState, SnapshotSource,
     },
-    policy::{FAILURE_RETRY_BACKOFF, REFRESH_INTERVAL, STALE_AFTER},
+    policy::{FAILURE_RETRY_BACKOFF, FAST_REFRESH_INTERVAL, REFRESH_INTERVAL, STALE_AFTER},
     providers::{ProviderError, ProviderRefresh, ProviderRegistry},
     settings::SettingsService,
     storage::Storage,
@@ -19,12 +19,24 @@ use crate::{
 // Cursor can make several bounded requests in sequence; allow its full healthy network budget
 // before quarantining the synchronous provider worker.
 const PROVIDER_REFRESH_TIMEOUT: Duration = Duration::from_secs(120);
+const FAST_REFRESH_UNCHANGED_ROUNDS: u8 = 2;
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageViewState {
     pub providers: BTreeMap<String, ProviderViewState>,
     pub last_full_refresh_at: Option<chrono::DateTime<Utc>>,
+    pub refresh_interval_seconds: u64,
+}
+
+impl Default for UsageViewState {
+    fn default() -> Self {
+        Self {
+            providers: BTreeMap::new(),
+            last_full_refresh_at: None,
+            refresh_interval_seconds: REFRESH_INTERVAL.as_secs(),
+        }
+    }
 }
 
 pub struct ProviderService {
@@ -35,6 +47,8 @@ pub struct ProviderService {
     last_live_refresh: Mutex<HashMap<String, Instant>>,
     last_failed_refresh: Mutex<HashMap<String, Instant>>,
     last_full_refresh_at: RwLock<Option<chrono::DateTime<Utc>>>,
+    refresh_interval: RwLock<Duration>,
+    unchanged_refreshes: Mutex<u8>,
     refresh_timeout: Duration,
     settings: Option<Arc<SettingsService>>,
 }
@@ -103,6 +117,8 @@ impl ProviderService {
             last_live_refresh: Mutex::new(HashMap::new()),
             last_failed_refresh: Mutex::new(HashMap::new()),
             last_full_refresh_at: RwLock::new(None),
+            refresh_interval: RwLock::new(REFRESH_INTERVAL),
+            unchanged_refreshes: Mutex::new(0),
             refresh_timeout,
             settings,
         }
@@ -122,9 +138,15 @@ impl ProviderService {
             .read()
             .ok()
             .and_then(|value| value.to_owned());
+        let refresh_interval_seconds = self
+            .refresh_interval
+            .read()
+            .map(|value| value.as_secs())
+            .unwrap_or_else(|_| REFRESH_INTERVAL.as_secs());
         UsageViewState {
             providers,
             last_full_refresh_at,
+            refresh_interval_seconds,
         }
     }
 
@@ -433,11 +455,14 @@ impl ProviderService {
     where
         F: FnMut(&UsageViewState) + Send,
     {
+        let previous = self.state();
         self.refresh_enabled_with_progress(provider_ids, force, on_progress)
             .await;
         if let Ok(mut completed_at) = self.last_full_refresh_at.write() {
             *completed_at = Some(Utc::now());
         }
+        let current = self.state();
+        self.update_refresh_interval(usage_data_changed(&previous, &current, provider_ids));
         self.state()
     }
 
@@ -512,7 +537,37 @@ impl ProviderService {
             .lock()
             .ok()
             .and_then(|value| value.get(provider_id).copied())
-            .is_some_and(|instant| instant.elapsed() < REFRESH_INTERVAL)
+            .is_some_and(|instant| instant.elapsed() < self.refresh_interval())
+    }
+
+    fn refresh_interval(&self) -> Duration {
+        self.refresh_interval
+            .read()
+            .map(|value| *value)
+            .unwrap_or(REFRESH_INTERVAL)
+    }
+
+    fn set_refresh_interval(&self, interval: Duration) {
+        if let Ok(mut current) = self.refresh_interval.write() {
+            *current = interval;
+        }
+    }
+
+    fn update_refresh_interval(&self, data_changed: bool) -> Duration {
+        let current = self.refresh_interval();
+        let interval = self
+            .unchanged_refreshes
+            .lock()
+            .map(|mut unchanged| refresh_interval_for(current, data_changed, &mut unchanged))
+            .unwrap_or_else(|_| {
+                if data_changed {
+                    FAST_REFRESH_INTERVAL
+                } else {
+                    REFRESH_INTERVAL
+                }
+            });
+        self.set_refresh_interval(interval);
+        interval
     }
 
     fn is_in_failure_backoff(&self, provider_id: &str) -> bool {
@@ -656,6 +711,64 @@ fn has_duplicate_ids<'a>(mut ids: impl Iterator<Item = &'a str>) -> bool {
     ids.any(|id| !seen.insert(id))
 }
 
+fn usage_data_changed(
+    previous: &UsageViewState,
+    current: &UsageViewState,
+    provider_ids: &[String],
+) -> bool {
+    provider_ids.iter().any(|provider_id| {
+        let current_snapshot = current
+            .providers
+            .get(provider_id)
+            .and_then(|state| state.snapshot.as_ref());
+        let previous_snapshot = previous
+            .providers
+            .get(provider_id)
+            .and_then(|state| state.snapshot.as_ref());
+
+        match (previous_snapshot, current_snapshot) {
+            (None, Some(snapshot)) => snapshot_has_usage_data(snapshot),
+            (Some(previous), Some(current)) => {
+                previous.quotas != current.quotas
+                    || previous.value_metrics != current.value_metrics
+                    || previous.status_metrics != current.status_metrics
+                    || previous.usage_histories != current.usage_histories
+            }
+            _ => false,
+        }
+    })
+}
+
+fn refresh_interval_for(
+    current_interval: Duration,
+    data_changed: bool,
+    unchanged_refreshes: &mut u8,
+) -> Duration {
+    if data_changed {
+        *unchanged_refreshes = 0;
+        FAST_REFRESH_INTERVAL
+    } else if current_interval != FAST_REFRESH_INTERVAL {
+        *unchanged_refreshes = 0;
+        REFRESH_INTERVAL
+    } else {
+        *unchanged_refreshes = unchanged_refreshes.saturating_add(1);
+        if *unchanged_refreshes >= FAST_REFRESH_UNCHANGED_ROUNDS {
+            *unchanged_refreshes = 0;
+            REFRESH_INTERVAL
+        } else {
+            FAST_REFRESH_INTERVAL
+        }
+    }
+}
+
+fn snapshot_has_usage_data(snapshot: &ProviderSnapshot) -> bool {
+    !snapshot.quotas.is_empty()
+        || !snapshot.value_metrics.is_empty()
+        || !snapshot.status_metrics.is_empty()
+        || snapshot.usage_histories.local_device.is_some()
+        || snapshot.usage_histories.account.is_some()
+}
+
 fn snapshot_contract_error() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Internal,
@@ -704,7 +817,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        merge_refresh_result, validate_snapshot, ProviderService, PROVIDER_REFRESH_TIMEOUT,
+        merge_refresh_result, refresh_interval_for, usage_data_changed, validate_snapshot,
+        ProviderService, UsageViewState, PROVIDER_REFRESH_TIMEOUT,
     };
     use crate::{
         models::{
@@ -712,7 +826,7 @@ mod tests {
             ProviderSnapshot, ProviderViewState, QuotaFormat, QuotaWindow, SnapshotSource,
             StatusMetric, StatusTone,
         },
-        policy::{FAILURE_RETRY_BACKOFF, STALE_AFTER},
+        policy::{FAILURE_RETRY_BACKOFF, FAST_REFRESH_INTERVAL, REFRESH_INTERVAL, STALE_AFTER},
         providers::{
             AccountRefresh, ProviderError, ProviderRefresh, ProviderRegistry, UsageProvider,
         },
@@ -725,6 +839,81 @@ mod tests {
     #[test]
     fn production_refresh_timeout_covers_the_longest_bounded_provider_flow() {
         assert!(PROVIDER_REFRESH_TIMEOUT >= Duration::from_secs(110));
+    }
+
+    #[test]
+    fn usage_refresh_interval_follows_actual_snapshot_changes() {
+        let provider_ids = vec!["codex".to_owned()];
+        let previous_snapshot = test_snapshot("codex");
+        let previous = UsageViewState {
+            providers: [(
+                "codex".into(),
+                ProviderViewState {
+                    snapshot: Some(previous_snapshot.clone()),
+                    ..ProviderViewState::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            last_full_refresh_at: None,
+            refresh_interval_seconds: REFRESH_INTERVAL.as_secs(),
+        };
+
+        let mut timestamp_only = previous.clone();
+        timestamp_only
+            .providers
+            .get_mut("codex")
+            .unwrap()
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .refreshed_at = Utc::now();
+        assert!(!usage_data_changed(
+            &previous,
+            &timestamp_only,
+            &provider_ids
+        ));
+        let mut unchanged_refreshes = 0;
+        assert_eq!(
+            refresh_interval_for(REFRESH_INTERVAL, false, &mut unchanged_refreshes),
+            REFRESH_INTERVAL
+        );
+
+        let mut changed = timestamp_only.clone();
+        changed
+            .providers
+            .get_mut("codex")
+            .unwrap()
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .quotas
+            .push(QuotaWindow {
+                id: "session".into(),
+                label: "Session".into(),
+                used_percent: 25.0,
+                resets_at: None,
+                period_seconds: 300,
+                format: QuotaFormat::Percent,
+                used_value: None,
+                limit_value: None,
+                unit: None,
+                estimated: false,
+                source_note: None,
+            });
+        assert!(usage_data_changed(&previous, &changed, &provider_ids));
+        assert_eq!(
+            refresh_interval_for(REFRESH_INTERVAL, true, &mut unchanged_refreshes),
+            FAST_REFRESH_INTERVAL
+        );
+        assert_eq!(
+            refresh_interval_for(FAST_REFRESH_INTERVAL, false, &mut unchanged_refreshes),
+            FAST_REFRESH_INTERVAL
+        );
+        assert_eq!(
+            refresh_interval_for(FAST_REFRESH_INTERVAL, false, &mut unchanged_refreshes),
+            REFRESH_INTERVAL
+        );
     }
 
     struct SlowProvider {

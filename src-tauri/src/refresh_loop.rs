@@ -1,4 +1,7 @@
-use std::sync::{atomic::AtomicU64, Arc};
+use std::{
+    sync::{atomic::AtomicU64, Arc},
+    time::Duration,
+};
 
 use tauri::{AppHandle, Emitter};
 
@@ -17,6 +20,7 @@ pub fn spawn(
     tauri::async_runtime::spawn(async move {
         loop {
             let provider_ids = settings.enabled_provider_ids();
+            let mut interval = REFRESH_INTERVAL;
             if !provider_ids.is_empty() {
                 let progress_app = app.clone();
                 let progress_settings = settings.clone();
@@ -33,11 +37,12 @@ pub fn spawn(
                         let _ = progress_app.emit("usage-state", state);
                     })
                     .await;
+                interval = Duration::from_secs(state.refresh_interval_seconds);
                 emit_settings_if_account_changed(&app, &settings, &observed_account_revision);
                 let _ = app.emit("usage-state", &state);
                 finish_refresh(&app, &state, &settings, &notifications);
             }
-            tokio::time::sleep(REFRESH_INTERVAL).await;
+            tokio::time::sleep(interval).await;
         }
     });
 }
