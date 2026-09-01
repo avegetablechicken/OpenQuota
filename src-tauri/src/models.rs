@@ -454,6 +454,8 @@ pub struct MetricDefinition {
     pub id: String,
     pub label: String,
     pub source: MetricSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_scope: Option<UsageScope>,
     pub pinnable: bool,
     pub default_enabled: bool,
     pub default_section: MetricSection,
@@ -478,6 +480,7 @@ impl MetricDefinition {
             id: id.into(),
             label: label.into(),
             source,
+            usage_scope: None,
             pinnable,
             default_enabled,
             default_section,
@@ -566,6 +569,32 @@ impl MetricDefinition {
             Some(tray_short_label),
             tray_suffix,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn value_with_scope(
+        id: &str,
+        label: &str,
+        source_id: &str,
+        default_enabled: bool,
+        default_section: MetricSection,
+        default_pinned: bool,
+        tray_short_label: &str,
+        tray_suffix: Option<&str>,
+        scope: UsageScope,
+    ) -> Self {
+        let mut metric = Self::value(
+            id,
+            label,
+            source_id,
+            default_enabled,
+            default_section,
+            default_pinned,
+            tray_short_label,
+            tray_suffix,
+        );
+        metric.usage_scope = Some(scope);
+        metric
     }
 
     #[allow(clippy::too_many_arguments, dead_code)]

@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::models::{
     ApiKeyStatus, MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind,
-    ProviderLink, ProviderSnapshot, UsageHistories, UsagePeriodSelection,
+    ProviderLink, ProviderSnapshot, UsageHistories, UsagePeriodSelection, UsageScope,
 };
 use crate::{pricing::PricingStore, storage::Storage};
 
@@ -94,7 +94,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 MetricSection::OnDemand,
                 "30",
             ),
-            MetricDefinition::value(
+            MetricDefinition::value_with_scope(
                 "zai.credits30",
                 "Last 30 Days Credits",
                 "credits30",
@@ -103,6 +103,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 false,
                 "Cr",
                 None,
+                UsageScope::Account,
             ),
         ],
     }
@@ -335,7 +336,7 @@ mod tests {
     use chrono::{Local, NaiveDate, TimeZone, Utc};
 
     use crate::{
-        models::{ApiKeyStatus, MetricSection, ProviderErrorKind, QuotaFormat},
+        models::{ApiKeyStatus, MetricSection, ProviderErrorKind, QuotaFormat, UsageScope},
         providers::{
             api_key::{ApiKeyStore, EnvironmentReader, SecretBackend, SecretBytes},
             test_http, UsageProvider,
@@ -717,6 +718,10 @@ mod tests {
         assert_eq!(
             metric("zai.credits30").default_section,
             MetricSection::OnDemand
+        );
+        assert_eq!(
+            metric("zai.credits30").usage_scope,
+            Some(UsageScope::Account)
         );
         assert_eq!(
             definition

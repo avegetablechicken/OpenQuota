@@ -166,6 +166,7 @@ export interface MetricDefinition {
   id: string;
   label: string;
   source: MetricSource;
+  usageScope?: UsageScope;
   pinnable: boolean;
   defaultEnabled: boolean;
   defaultSection: MetricSection;

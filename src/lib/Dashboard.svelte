@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import { flip } from 'svelte/animate';
+  import { SvelteSet } from 'svelte/reactivity';
   import { scale, slide } from 'svelte/transition';
   import { reorderFlip, springMotion } from './motion';
   import { pointerReorder } from './pointerReorder';
@@ -97,15 +98,22 @@
     const source = metricDefinition(metric.id)?.source.kind;
     return source === 'usage' || source === 'trend';
   }
+  function metricUsageScope(metric: MetricLayout) {
+    return metricDefinition(metric.id)?.usageScope;
+  }
   function metricRenderRows(
     metrics: MetricLayout[],
     histories: UsageHistories,
     viewMode: UsageViewMode,
   ): MetricRenderRow[] {
     const scopes = usageHistoriesForMode(histories, viewMode).map(({ scope }) => scope);
+    const scopedMetrics = metrics.filter((metric) => {
+      const scope = metricUsageScope(metric);
+      return !scope || scopes.includes(scope);
+    });
     const groupScopes = viewMode === 'all' && scopes.length > 1;
     if (!groupScopes) {
-      return metrics.map((metric) => ({
+      return scopedMetrics.map((metric) => ({
         key: metric.id,
         metric,
         usageScope: isHistoryMetric(metric) ? scopes[0] : undefined,
@@ -115,9 +123,10 @@
     }
 
     const rows: MetricRenderRow[] = [];
-    const historyMetrics = metrics.filter(isHistoryMetric);
+    const historyMetrics = scopedMetrics.filter(isHistoryMetric);
     let historyMetricsInserted = false;
-    for (const metric of metrics) {
+    const renderedScopeHeadings = new SvelteSet<UsageScope>();
+    for (const metric of scopedMetrics) {
       if (isHistoryMetric(metric)) {
         if (historyMetricsInserted) continue;
         for (const [scopeIndex, usageScope] of scopes.entries()) {
@@ -126,20 +135,29 @@
               key: `${historyMetric.id}:${usageScope}`,
               metric: historyMetric,
               usageScope,
-              scopeHeading: metricIndex === 0 ? usageScope : undefined,
+              scopeHeading:
+                metricIndex === 0 && !renderedScopeHeadings.has(usageScope)
+                  ? usageScope
+                  : undefined,
               groupedScope: true,
               reorderable: scopeIndex === 0,
             });
           }
+          renderedScopeHeadings.add(usageScope);
         }
         historyMetricsInserted = true;
       } else {
+        const usageScope = metricUsageScope(metric);
         rows.push({
           key: metric.id,
           metric,
-          groupedScope: false,
+          usageScope,
+          scopeHeading:
+            usageScope && !renderedScopeHeadings.has(usageScope) ? usageScope : undefined,
+          groupedScope: usageScope !== undefined,
           reorderable: true,
         });
+        if (usageScope) renderedScopeHeadings.add(usageScope);
       }
     }
     return rows;
@@ -200,6 +218,13 @@
         const visibleMetrics = provider.metrics.filter((metric) => {
           if (!metric.enabled) return false;
           const source = metricDefinition(metric.id)?.source.kind;
+          const metricScope = metricUsageScope(metric);
+          if (
+            metricScope &&
+            ((usageViewMode !== 'all' && usageViewMode !== metricScope) ||
+              !snapshot.usageHistories[metricScope])
+          )
+            return false;
           return (
             (source !== 'usage' && source !== 'trend') ||
             usageHistoriesForMode(snapshot.usageHistories, usageViewMode).length > 0
