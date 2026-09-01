@@ -18,8 +18,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::models::{
     DailyUsage, MetricDefinition, MetricLayout, MetricSection, ModelUsageBreakdown,
-    ModelUsageEntry, ProviderDefinition, ProviderSnapshot, UsageHistories, UsageHistory,
-    UsagePeriod, UsagePeriodSelection,
+    ModelUsageEntry, ProviderDefinition, ProviderSnapshot, QuotaFormat, QuotaWindow,
+    UsageHistories, UsageHistory, UsagePeriod, UsagePeriodSelection,
 };
 use crate::storage::Storage;
 
@@ -809,6 +809,7 @@ impl Sub2ApiProvider {
             }
             result => result?,
         };
+        let now = Utc::now();
         let (plan, quotas, value_metrics) = match config.upstream {
             Sub2ApiUpstream::Codex => {
                 let response = UsageResponse {
@@ -816,8 +817,8 @@ impl Sub2ApiProvider {
                     headers: HashMap::new(),
                     body,
                 };
-                let mut mapped = map_usage(&response, None, Utc::now())
-                    .map_err(|_| Sub2ApiError::InvalidResponse)?;
+                let mut mapped =
+                    map_usage(&response, None, now).map_err(|_| Sub2ApiError::InvalidResponse)?;
                 mapped.value_metrics.retain_mut(|metric| {
                     if metric.id != "rateLimitResets" {
                         return false;
@@ -833,6 +834,7 @@ impl Sub2ApiProvider {
                 (mapped.plan, mapped.quotas, mapped.value_metrics)
             }
         };
+        let quotas = normalize_refreshed_quotas(config.upstream, quotas, now);
         let mut warnings = (session.account_count > 1)
             .then(|| {
                 format!(
@@ -870,7 +872,7 @@ impl Sub2ApiProvider {
             notices: Vec::new(),
             usage_histories: UsageHistories::account(usage),
             warnings,
-            refreshed_at: Utc::now(),
+            refreshed_at: now,
         })
     }
 
@@ -1135,6 +1137,64 @@ fn should_apply_metric_template(
     })
 }
 
+fn normalize_refreshed_quotas(
+    upstream: Sub2ApiUpstream,
+    mut quotas: Vec<QuotaWindow>,
+    now: chrono::DateTime<Utc>,
+) -> Vec<QuotaWindow> {
+    let expected: &[(&str, &str, u64)] = match upstream {
+        Sub2ApiUpstream::Codex => &[
+            ("session", "Session", 5 * 60 * 60),
+            ("weekly", "Weekly", 7 * 24 * 60 * 60),
+            ("spark", "Spark", 5 * 60 * 60),
+            ("sparkWeekly", "Spark Weekly", 7 * 24 * 60 * 60),
+        ],
+        Sub2ApiUpstream::Claude => &[
+            ("session", "Session", 5 * 60 * 60),
+            ("weekly", "Weekly", 7 * 24 * 60 * 60),
+            ("sonnet", "Sonnet", 7 * 24 * 60 * 60),
+            ("fable", "Fable", 7 * 24 * 60 * 60),
+        ],
+    };
+    let mut normalized = Vec::with_capacity(quotas.len().max(expected.len()));
+
+    for &(id, label, period_seconds) in expected {
+        let Some(index) = quotas.iter().position(|quota| quota.id == id) else {
+            normalized.push(reset_quota(id, label, period_seconds));
+            continue;
+        };
+        let mut quota = quotas.remove(index);
+        if quota
+            .resets_at
+            .as_ref()
+            .is_some_and(|resets_at| *resets_at <= now)
+        {
+            quota.used_percent = 0.0;
+            quota.resets_at = None;
+        }
+        normalized.push(quota);
+    }
+
+    normalized.extend(quotas);
+    normalized
+}
+
+fn reset_quota(id: &str, label: &str, period_seconds: u64) -> QuotaWindow {
+    QuotaWindow {
+        id: id.into(),
+        label: label.into(),
+        used_percent: 0.0,
+        resets_at: None,
+        period_seconds,
+        format: QuotaFormat::Percent,
+        used_value: None,
+        limit_value: None,
+        unit: None,
+        estimated: false,
+        source_note: None,
+    }
+}
+
 fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistory {
     stats.history.retain(|day| {
         NaiveDate::parse_from_str(day.date.trim(), "%Y-%m-%d").is_ok()
@@ -1283,10 +1343,10 @@ mod tests {
 
     use super::{
         connection_target, default_display_name_for_slot, definition_for, map_stats,
-        metric_template, normalize_base_url, normalized_codex_provider_base_url_text,
-        password_for_save, session_scope, should_apply_metric_template, AccountStats,
-        AccountStatsDay, StoredConfig, Sub2ApiClient, Sub2ApiConfigInput, Sub2ApiError,
-        Sub2ApiProvider, Sub2ApiProviders,
+        metric_template, normalize_base_url, normalize_refreshed_quotas,
+        normalized_codex_provider_base_url_text, password_for_save, session_scope,
+        should_apply_metric_template, AccountStats, AccountStatsDay, StoredConfig, Sub2ApiClient,
+        Sub2ApiConfigInput, Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
     };
     use crate::providers::{
         codex::{client::UsageResponse, mapper::map_usage},
@@ -1444,6 +1504,73 @@ mod tests {
             .chain(codex.iter())
             .filter(|metric| metric.id.ends_with("extra"))
             .all(|metric| !metric.enabled));
+    }
+
+    #[test]
+    fn claude_refresh_resets_missing_and_expired_quotas() {
+        let body = serde_json::json!({
+            "limits": [{
+                "kind": "weekly_scoped",
+                "scope": {"model": {"display_name": "Fable"}},
+                "percent": 58,
+                "resets_at": "2026-08-29T06:00:00Z"
+            }]
+        });
+        let mapped = crate::providers::claude::map_sub2api_usage(&body).unwrap();
+
+        let quotas = normalize_refreshed_quotas(
+            super::Sub2ApiUpstream::Claude,
+            mapped.quotas,
+            Utc.with_ymd_and_hms(2026, 9, 1, 18, 0, 0).unwrap(),
+        );
+
+        assert_eq!(
+            quotas
+                .iter()
+                .map(|quota| (quota.id.as_str(), quota.used_percent))
+                .collect::<Vec<_>>(),
+            [
+                ("session", 0.0),
+                ("weekly", 0.0),
+                ("sonnet", 0.0),
+                ("fable", 0.0),
+            ]
+        );
+        assert!(quotas.iter().all(|quota| quota.resets_at.is_none()));
+    }
+
+    #[test]
+    fn codex_refresh_resets_each_missing_quota() {
+        let response = UsageResponse {
+            status: StatusCode::OK,
+            headers: Default::default(),
+            body: serde_json::json!({
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 38,
+                        "limit_window_seconds": 604800,
+                        "reset_at": 1787810131
+                    }
+                }
+            }),
+        };
+        let now = Utc.with_ymd_and_hms(2026, 8, 23, 0, 0, 0).unwrap();
+        let mapped = map_usage(&response, None, now).unwrap();
+
+        let quotas = normalize_refreshed_quotas(super::Sub2ApiUpstream::Codex, mapped.quotas, now);
+
+        assert_eq!(
+            quotas
+                .iter()
+                .map(|quota| (quota.id.as_str(), quota.used_percent))
+                .collect::<Vec<_>>(),
+            [
+                ("session", 0.0),
+                ("weekly", 38.0),
+                ("spark", 0.0),
+                ("sparkWeekly", 0.0),
+            ]
+        );
     }
 
     #[test]
