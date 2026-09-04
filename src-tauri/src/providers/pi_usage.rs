@@ -20,7 +20,46 @@ use super::{
     model_scope::model_belongs_to_card,
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 4;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum PiUsageSource {
+    Pi,
+    OhMyPi,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PiUsageSources {
+    pub pi: bool,
+    pub oh_my_pi: bool,
+}
+
+pub fn usage_source_note(
+    base: &str,
+    pi_sources: PiUsageSources,
+    includes_opencode: bool,
+    includes_zcode: bool,
+) -> String {
+    let mut sources = Vec::new();
+    if pi_sources.pi {
+        sources.push("pi");
+    }
+    if pi_sources.oh_my_pi {
+        sources.push("oh-my-pi");
+    }
+    if includes_opencode {
+        sources.push("OpenCode");
+    }
+    if includes_zcode {
+        sources.push("ZCode");
+    }
+    let suffix = match sources.as_slice() {
+        [] => String::new(),
+        [source] => format!(" and {source}"),
+        [leading @ .., last] => format!(", {}, and {last}", leading.join(", ")),
+    };
+    format!("From your {base}{suffix} (estimated)")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct PiUsageEvent {
@@ -31,6 +70,7 @@ struct PiUsageEvent {
     carried_cost: Option<f64>,
     tokens: PiTokenBreakdown,
     reported_total_tokens: u64,
+    source: PiUsageSource,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,39 +95,48 @@ impl PiTokenBreakdown {
     }
 }
 
-/// Folds usage written by pi into the card of the underlying model provider. Returns whether at
-/// least one event contributed usage or an unknown-model marker to that card.
+/// Folds usage written by pi-compatible clients into the card of the underlying model provider.
+/// Returns whether each client contributed usage or an unknown-model marker to that card.
 pub fn scan_into(
     storage: &Storage,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
-) -> Result<bool, LogCacheError> {
+) -> Result<PiUsageSources, LogCacheError> {
     let home = home_directory();
-    let directory = sessions_directory(
+    let directories = sessions_directories(
         env_text("PI_CODING_AGENT_SESSION_DIR").as_deref(),
         env_text("PI_CODING_AGENT_DIR").as_deref(),
         &home,
     );
-    scan_directory_into(storage, &directory, now, pricing, card_id, accumulator)
+    scan_directories_into(storage, &directories, now, pricing, card_id, accumulator)
 }
 
-fn scan_directory_into(
+fn scan_directories_into(
     storage: &Storage,
-    directory: &Path,
+    directories: &[(PiUsageSource, PathBuf)],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
-) -> Result<bool, LogCacheError> {
-    let paths = discover_files(directory);
+) -> Result<PiUsageSources, LogCacheError> {
+    let paths = directories
+        .iter()
+        .flat_map(|(source, directory)| {
+            discover_files(directory)
+                .into_iter()
+                .map(|path| (*source, path))
+        })
+        .collect::<Vec<_>>();
     let mut seen_paths = HashSet::with_capacity(paths.len());
     let mut events = Vec::new();
-    for path in paths {
+    for (source, path) in paths {
         seen_paths.insert(path.clone());
         let Some(parsed) =
-            load_or_parse_log(storage, "pi", &path, LOG_CACHE_SCHEMA_VERSION, parse_jsonl)?
+            load_or_parse_log(storage, "pi", &path, LOG_CACHE_SCHEMA_VERSION, |content| {
+                parse_jsonl(content, source)
+            })?
         else {
             continue;
         };
@@ -110,24 +159,30 @@ fn scan_directory_into(
     ))
 }
 
-fn sessions_directory(
+fn sessions_directories(
     session_override: Option<&str>,
     config_override: Option<&str>,
     home: &Path,
-) -> PathBuf {
-    if let Some(path) = session_override
+) -> Vec<(PiUsageSource, PathBuf)> {
+    let pi = if let Some(path) = session_override
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return expand_home(path, home);
-    }
-    if let Some(path) = config_override
+        expand_home(path, home)
+    } else if let Some(path) = config_override
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return expand_home(path, home).join("sessions");
+        expand_home(path, home).join("sessions")
+    } else {
+        home.join(".pi").join("agent").join("sessions")
+    };
+    let oh_my_pi = home.join(".omp").join("agent").join("sessions");
+    if pi == oh_my_pi {
+        vec![(PiUsageSource::OhMyPi, oh_my_pi)]
+    } else {
+        vec![(PiUsageSource::Pi, pi), (PiUsageSource::OhMyPi, oh_my_pi)]
     }
-    home.join(".pi").join("agent").join("sessions")
 }
 
 fn discover_files(directory: &Path) -> Vec<PathBuf> {
@@ -147,15 +202,15 @@ fn discover_files(directory: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn parse_jsonl(content: &str) -> Vec<PiUsageEvent> {
+fn parse_jsonl(content: &str, source: PiUsageSource) -> Vec<PiUsageEvent> {
     content
         .lines()
         .filter(|line| line.contains("\"usage\""))
-        .filter_map(parse_line)
+        .filter_map(|line| parse_line(line, source))
         .collect()
 }
 
-fn parse_line(line: &str) -> Option<PiUsageEvent> {
+fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
     let object = serde_json::from_str::<Value>(line).ok()?;
     if object.get("type").and_then(Value::as_str) != Some("message") {
         return None;
@@ -165,14 +220,14 @@ fn parse_line(line: &str) -> Option<PiUsageEvent> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    let provider = message.get("provider")?.as_str()?;
-    let card_id = mapped_card(provider)?;
     let model = message
         .get("model")
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default()
         .to_owned();
+    let provider = message.get("provider")?.as_str()?;
+    let card_id = mapped_card(provider, &model, source)?;
     let usage = message.get("usage")?.as_object()?;
     let cache_write = unsigned_number(usage.get("cacheWrite")).unwrap_or_default();
     let cache_write_1h = unsigned_number(usage.get("cacheWrite1h")).unwrap_or_default();
@@ -195,19 +250,31 @@ fn parse_line(line: &str) -> Option<PiUsageEvent> {
             output: unsigned_number(usage.get("output")).unwrap_or_default(),
         },
         reported_total_tokens: unsigned_number(usage.get("totalTokens")).unwrap_or_default(),
+        source,
     })
 }
 
-fn mapped_card(provider: &str) -> Option<&'static str> {
+fn mapped_card(provider: &str, model: &str, source: PiUsageSource) -> Option<&'static str> {
+    if matches!(provider, "anthropic" | "claude-agent-sdk") || is_claude_model(model) {
+        return Some("claude");
+    }
+    if source == PiUsageSource::OhMyPi {
+        return Some("codex");
+    }
     match provider {
-        "anthropic" | "claude-agent-sdk" => Some("claude"),
-        "openai-codex" => Some("codex"),
+        "openai" | "openai-codex" => Some("codex"),
         "cursor" => Some("cursor"),
         "zai" | "zhipu" => Some("zai"),
         "google-antigravity" => Some("antigravity"),
         "github-copilot" => Some("copilot"),
+        _ if model_belongs_to_card("codex", model) => Some("codex"),
         _ => None,
     }
+}
+
+fn is_claude_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("claude") || model.contains("/claude")
 }
 
 fn deduplicate(events: Vec<PiUsageEvent>) -> Vec<PiUsageEvent> {
@@ -225,8 +292,8 @@ fn aggregate_into(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
-) -> bool {
-    let mut contributed = false;
+) -> PiUsageSources {
+    let mut contributed = PiUsageSources::default();
     for event in events {
         if event.card_id != card_id || event.timestamp > now {
             continue;
@@ -251,25 +318,32 @@ fn aggregate_into(
                 carried_cost.or(estimated_cost),
                 carried_cost.is_none(),
             );
-            contributed = true;
+            mark_source(&mut contributed, event.source);
             continue;
         }
         if let Some(cost) = event.carried_cost.filter(|cost| *cost > 0.0) {
             accumulator.add_exact(date, event.reported_total_tokens, cost, display_model);
-            contributed = true;
+            mark_source(&mut contributed, event.source);
         } else if !model.is_empty() {
             if let Some(cost) =
                 pricing.estimated_cost_dollars(model, event.tokens.pricing_tokens(), true)
             {
                 accumulator.add(date, event.reported_total_tokens, cost, model);
-                contributed = true;
+                mark_source(&mut contributed, event.source);
             } else if event.reported_total_tokens > 0 {
                 accumulator.add_unknown_model(date, model);
-                contributed = true;
+                mark_source(&mut contributed, event.source);
             }
         }
     }
     contributed
+}
+
+fn mark_source(sources: &mut PiUsageSources, source: PiUsageSource) {
+    match source {
+        PiUsageSource::Pi => sources.pi = true,
+        PiUsageSource::OhMyPi => sources.oh_my_pi = true,
+    }
 }
 
 fn finite_number(value: Option<&Value>) -> Option<f64> {
@@ -324,8 +398,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        aggregate_into, deduplicate, mapped_card, parse_line, scan_directory_into,
-        sessions_directory, PiTokenBreakdown, PiUsageEvent,
+        aggregate_into, deduplicate, mapped_card, parse_line, scan_directories_into,
+        sessions_directories, usage_source_note, PiTokenBreakdown, PiUsageEvent, PiUsageSource,
+        PiUsageSources,
     };
     use crate::{
         pricing::{ModelPricing, ModelRates, PricingCatalog, PricingSupplement},
@@ -361,6 +436,10 @@ mod tests {
         .to_string()
     }
 
+    fn parsed_line(line: &str) -> Option<PiUsageEvent> {
+        parse_line(line, PiUsageSource::Pi)
+    }
+
     fn pricing() -> ModelPricing {
         ModelPricing::new(
             PricingSupplement::default(),
@@ -376,37 +455,61 @@ mod tests {
     fn path_resolution_uses_session_then_config_then_default() {
         let home = Path::new("/home/tester");
         assert_eq!(
-            sessions_directory(Some("~/pi-sessions"), Some("~/ignored"), home),
-            home.join("pi-sessions")
+            sessions_directories(Some("~/pi-sessions"), Some("~/ignored"), home),
+            [
+                (PiUsageSource::Pi, home.join("pi-sessions")),
+                (
+                    PiUsageSource::OhMyPi,
+                    home.join(".omp").join("agent").join("sessions")
+                ),
+            ]
         );
         assert_eq!(
-            sessions_directory(None, Some("~/pi-config"), home),
+            sessions_directories(None, Some("~/pi-config"), home)[0].1,
             home.join("pi-config").join("sessions")
         );
         assert_eq!(
-            sessions_directory(Some("  "), Some("  "), home),
+            sessions_directories(Some("  "), Some("  "), home)[0].1,
             home.join(".pi").join("agent").join("sessions")
         );
     }
 
     #[test]
     fn parser_maps_cards_splits_cache_and_accepts_numeric_strings() {
-        let event = parse_line(&line("one", "anthropic", "claude-model", "\"0.5\"")).unwrap();
+        let event = parsed_line(&line("one", "anthropic", "claude-model", "\"0.5\"")).unwrap();
         assert_eq!(event.card_id, "claude");
         assert_eq!(event.carried_cost, Some(0.5));
         assert_eq!(event.tokens.cache_write_5m, 18);
         assert_eq!(event.tokens.cache_write_1h, 12);
         assert_eq!(event.reported_total_tokens, 202);
-        assert_eq!(mapped_card("openai-codex"), Some("codex"));
-        assert_eq!(mapped_card("nvidia-nim"), None);
+        assert_eq!(
+            mapped_card("openai-codex", "gpt-5.5", PiUsageSource::Pi),
+            Some("codex")
+        );
+        assert_eq!(
+            mapped_card("custom", "gpt-5.6-sol", PiUsageSource::Pi),
+            Some("codex")
+        );
+        assert_eq!(
+            mapped_card("custom", "claude-sonnet-5", PiUsageSource::OhMyPi),
+            Some("claude")
+        );
+        assert_eq!(
+            mapped_card("deepseek", "deepseek-v4", PiUsageSource::OhMyPi),
+            Some("codex")
+        );
+        assert_eq!(
+            mapped_card("nvidia-nim", "deepseek-v4", PiUsageSource::Pi),
+            None
+        );
     }
 
     #[test]
     fn parser_rejects_unmapped_and_non_assistant_messages() {
-        assert!(parse_line(&line("one", "nvidia-nim", "model", "1")).is_none());
-        assert!(parse_line(&line("mlx", "openai-codex", "qwen3.8:27b - mlx", "0")).is_some());
+        assert!(parsed_line(&line("one", "nvidia-nim", "model", "1")).is_none());
+        assert!(parsed_line(&line("mlx", "openai-codex", "qwen3.8:27b - mlx", "0")).is_some());
         let user = r#"{"type":"message","timestamp":"2026-07-12T10:00:00Z","message":{"role":"user","provider":"anthropic","usage":{}}}"#;
-        assert!(parse_line(user).is_none());
+        assert!(parsed_line(user).is_none());
     }
 
     #[test]
@@ -425,17 +528,21 @@ mod tests {
                 output: 50,
             },
             reported_total_tokens: 150,
+            source: PiUsageSource::Pi,
         };
         let mut accumulator = DailyUsageAccumulator::default();
 
-        assert!(aggregate_into(
-            vec![event],
-            "codex",
-            chrono::NaiveDate::MIN,
-            now(),
-            &pricing(),
-            &mut accumulator,
-        ));
+        assert!(
+            aggregate_into(
+                vec![event],
+                "codex",
+                chrono::NaiveDate::MIN,
+                now(),
+                &pricing(),
+                &mut accumulator,
+            )
+            .pi
+        );
         let history = accumulator.build(now(), "From pi");
         assert!(history.today.is_none());
         let other = history.other_usage.unwrap().today.unwrap();
@@ -446,19 +553,22 @@ mod tests {
     #[test]
     fn carried_cost_is_exact_zero_cost_is_priced_and_unknowns_are_reported() {
         let events = vec![
-            parse_line(&line("exact", "anthropic", "claude-unknown-exact", "0.5")).unwrap(),
-            parse_line(&line("priced", "anthropic", "claude-priced-model", "0")).unwrap(),
-            parse_line(&line("unknown", "anthropic", "claude-missing-model", "0")).unwrap(),
+            parsed_line(&line("exact", "anthropic", "claude-unknown-exact", "0.5")).unwrap(),
+            parsed_line(&line("priced", "anthropic", "claude-priced-model", "0")).unwrap(),
+            parsed_line(&line("unknown", "anthropic", "claude-missing-model", "0")).unwrap(),
         ];
         let mut accumulator = DailyUsageAccumulator::default();
-        assert!(aggregate_into(
-            events,
-            "claude",
-            chrono::NaiveDate::MIN,
-            now(),
-            &pricing(),
-            &mut accumulator,
-        ));
+        assert!(
+            aggregate_into(
+                events,
+                "claude",
+                chrono::NaiveDate::MIN,
+                now(),
+                &pricing(),
+                &mut accumulator,
+            )
+            .pi
+        );
         let history = accumulator.build(now(), "From pi");
         let period = history.today.unwrap();
         assert_eq!(period.tokens, 404);
@@ -470,24 +580,27 @@ mod tests {
     #[test]
     fn future_dated_events_do_not_contribute_usage() {
         let mut event =
-            parse_line(&line("future", "anthropic", "claude-priced-model", "0.5")).unwrap();
+            parsed_line(&line("future", "anthropic", "claude-priced-model", "0.5")).unwrap();
         event.timestamp = now() + chrono::Duration::seconds(1);
         let mut accumulator = DailyUsageAccumulator::default();
 
-        assert!(!aggregate_into(
-            vec![event],
-            "claude",
-            chrono::NaiveDate::MIN,
-            now(),
-            &pricing(),
-            &mut accumulator,
-        ));
+        assert_eq!(
+            aggregate_into(
+                vec![event],
+                "claude",
+                chrono::NaiveDate::MIN,
+                now(),
+                &pricing(),
+                &mut accumulator,
+            ),
+            PiUsageSources::default()
+        );
         assert!(accumulator.build(now(), "From pi").today.is_none());
     }
 
     #[test]
     fn repeated_message_ids_are_counted_once_across_files() {
-        let event = parse_line(&line("duplicate", "anthropic", "claude-model", "0.5")).unwrap();
+        let event = parsed_line(&line("duplicate", "anthropic", "claude-model", "0.5")).unwrap();
         assert_eq!(deduplicate(vec![event.clone(), event]).len(), 1);
     }
 
@@ -509,23 +622,108 @@ mod tests {
         let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
         let mut accumulator = DailyUsageAccumulator::default();
 
-        assert!(scan_directory_into(
-            &storage,
-            &sessions,
-            now(),
-            &pricing(),
-            "claude",
-            &mut accumulator,
-        )
-        .unwrap());
+        assert!(
+            scan_directories_into(
+                &storage,
+                &[(PiUsageSource::OhMyPi, sessions.clone())],
+                now(),
+                &pricing(),
+                "claude",
+                &mut accumulator,
+            )
+            .unwrap()
+            .oh_my_pi
+        );
         let history = accumulator.build(now(), "From pi");
         assert_eq!(history.today.unwrap().tokens, 202);
 
         let mut second = DailyUsageAccumulator::default();
         assert!(
-            scan_directory_into(&storage, &sessions, now(), &pricing(), "codex", &mut second,)
-                .unwrap()
+            scan_directories_into(
+                &storage,
+                &[(PiUsageSource::OhMyPi, sessions)],
+                now(),
+                &pricing(),
+                "codex",
+                &mut second,
+            )
+            .unwrap()
+            .oh_my_pi
         );
         assert_eq!(second.build(now(), "From pi").today.unwrap().tokens, 202);
+    }
+
+    #[test]
+    fn oh_my_pi_custom_upstreams_are_scanned_and_attributed() {
+        let directory = tempdir().unwrap();
+        let pi_sessions = directory.path().join("pi-sessions");
+        let oh_my_pi_sessions = directory.path().join("omp-sessions");
+        fs::create_dir_all(&pi_sessions).unwrap();
+        fs::create_dir_all(&oh_my_pi_sessions).unwrap();
+        fs::write(
+            pi_sessions.join("pi.jsonl"),
+            line("pi", "openai", "gpt-5.5", "0.25"),
+        )
+        .unwrap();
+        fs::write(
+            oh_my_pi_sessions.join("omp.jsonl"),
+            [
+                line("omp", "private-upstream", "gpt-5.6-sol", "0.75"),
+                line("deepseek", "deepseek", "deepseek-v4", "0.5"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let mut accumulator = DailyUsageAccumulator::default();
+
+        let sources = scan_directories_into(
+            &storage,
+            &[
+                (PiUsageSource::Pi, pi_sessions),
+                (PiUsageSource::OhMyPi, oh_my_pi_sessions),
+            ],
+            now(),
+            &pricing(),
+            "codex",
+            &mut accumulator,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sources,
+            PiUsageSources {
+                pi: true,
+                oh_my_pi: true,
+            }
+        );
+        let history = accumulator.build(now(), "From clients");
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 404);
+        assert_eq!(today.estimated_cost_usd, Some(1.0));
+        let other = history.other_usage.unwrap().today.unwrap();
+        assert_eq!(other.tokens, 202);
+        assert_eq!(other.priced_tokens, 202);
+        assert_eq!(other.estimated_cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn source_note_names_only_contributing_local_clients() {
+        assert_eq!(
+            usage_source_note(
+                "Codex logs",
+                PiUsageSources {
+                    pi: true,
+                    oh_my_pi: true,
+                },
+                true,
+                false,
+            ),
+            "From your Codex logs, pi, oh-my-pi, and OpenCode (estimated)"
+        );
+        assert_eq!(
+            usage_source_note("Codex logs", PiUsageSources::default(), false, false),
+            "From your Codex logs (estimated)"
+        );
     }
 }

@@ -33,8 +33,9 @@ that Claude Desktop is installed, but it does not reuse Desktop's encrypted sess
 and sign in once if Desktop is your only Claude login.
 
 Spend history is calculated locally from Claude usage logs. It can also include compatible Claude
-usage recorded by pi, Anthropic usage recorded by local OpenCode sessions, and, on macOS, Claude's
-local agent-mode sessions. These local records are not uploaded by OpenQuota.
+usage recorded by pi (`~/.pi/agent/sessions`) or oh-my-pi (`~/.omp/agent/sessions`), Anthropic usage
+recorded by local OpenCode sessions, and, on macOS, Claude's local agent-mode sessions. These local
+records are not uploaded by OpenQuota.
 
 ## Troubleshooting
 

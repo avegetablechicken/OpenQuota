@@ -61,9 +61,9 @@ pub fn scan_local_usage(
         Err(_) => {
             crate::app_warn!(
                 "plugin:pi",
-                "pi usage history could not be folded into Codex"
+                "pi/oh-my-pi usage history could not be folded into Codex"
             );
-            false
+            pi_usage::PiUsageSources::default()
         }
     };
     let includes_opencode =
@@ -92,17 +92,9 @@ pub fn scan_local_usage(
             false
         }
     };
-    let source_note = match (includes_pi, includes_opencode, includes_zcode) {
-        (true, true, true) => "From your Codex logs, pi, OpenCode, and ZCode (estimated)",
-        (true, true, false) => "From your Codex logs, pi, and OpenCode (estimated)",
-        (true, false, true) => "From your Codex logs, pi, and ZCode (estimated)",
-        (true, false, false) => "From your Codex logs and pi (estimated)",
-        (false, true, true) => "From your Codex logs, OpenCode, and ZCode (estimated)",
-        (false, true, false) => "From your Codex logs and OpenCode (estimated)",
-        (false, false, true) => "From your Codex logs and ZCode (estimated)",
-        (false, false, false) => "From your Codex logs (estimated)",
-    };
-    Ok(accumulator.build(now, source_note))
+    let source_note =
+        pi_usage::usage_source_note("Codex logs", includes_pi, includes_opencode, includes_zcode);
+    Ok(accumulator.build(now, &source_note))
 }
 
 fn scan_codex_events(

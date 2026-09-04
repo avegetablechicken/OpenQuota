@@ -104,13 +104,13 @@ pub fn scan_local_usage(
             Err(_) => {
                 crate::app_warn!(
                     "plugin:pi",
-                    "pi usage history could not be folded into Claude"
+                    "pi/oh-my-pi usage history could not be folded into Claude"
                 );
-                false
+                pi_usage::PiUsageSources::default()
             }
         }
     } else {
-        false
+        pi_usage::PiUsageSources::default()
     };
     let includes_opencode = if shared_sources.include_opencode {
         match opencode::scan_routed_usage_into(now, pricing, "claude", &mut accumulator) {
@@ -145,17 +145,13 @@ pub fn scan_local_usage(
     } else {
         false
     };
-    let source_note = match (includes_pi, includes_opencode, includes_zcode) {
-        (true, true, true) => "From your Claude usage history, pi, OpenCode, and ZCode (estimated)",
-        (true, true, false) => "From your Claude usage history, pi, and OpenCode (estimated)",
-        (true, false, true) => "From your Claude usage history, pi, and ZCode (estimated)",
-        (true, false, false) => "From your Claude usage history and pi (estimated)",
-        (false, true, true) => "From your Claude usage history, OpenCode, and ZCode (estimated)",
-        (false, true, false) => "From your Claude usage history and OpenCode (estimated)",
-        (false, false, true) => "From your Claude usage history and ZCode (estimated)",
-        (false, false, false) => "From your Claude usage history (estimated)",
-    };
-    Ok(accumulator.build(now, source_note))
+    let source_note = pi_usage::usage_source_note(
+        "Claude usage history",
+        includes_pi,
+        includes_opencode,
+        includes_zcode,
+    );
+    Ok(accumulator.build(now, &source_note))
 }
 
 fn discover_files(configured_roots: &[PathBuf], include_standard_roots: bool) -> Vec<PathBuf> {
