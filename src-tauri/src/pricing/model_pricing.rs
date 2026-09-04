@@ -24,6 +24,7 @@ impl ModelPricing {
     }
 
     pub fn resolve(&self, model: &str) -> Option<ModelRates> {
+        let model = model.trim();
         if let Some(cached) = self
             .memo
             .lock()
@@ -32,7 +33,12 @@ impl ModelPricing {
         {
             return cached;
         }
-        let resolved = self.resolve_uncached(model);
+        let normalized = model.to_ascii_lowercase();
+        let resolved = self.resolve_uncached(model).or_else(|| {
+            (normalized != model)
+                .then(|| self.resolve_uncached(&normalized))
+                .flatten()
+        });
         if let Ok(mut memo) = self.memo.lock() {
             memo.insert(model.to_owned(), resolved);
         }
@@ -236,6 +242,16 @@ mod tests {
                 true,
             )
             .is_none());
+    }
+
+    #[test]
+    fn model_resolution_ignores_ascii_case() {
+        let model_pricing = pricing(None, &[("gpt-5.5", rates(5.0, 30.0))], &[]);
+
+        assert_eq!(
+            model_pricing.resolve("GPT-5.5").unwrap().input_per_million,
+            5.0
+        );
     }
 
     #[test]

@@ -559,10 +559,11 @@ fn aggregate_into(
 
 fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
     let display_model = event.model.trim();
-    let model = if display_model == "codex-auto-review" {
+    let normalized_model = display_model.to_ascii_lowercase();
+    let model = if normalized_model == "codex-auto-review" {
         auto_review_fallback(&event.timestamp)
     } else {
-        display_model
+        normalized_model.as_str()
     };
     let canonical = pricing.supplement.canonical_name(model).unwrap_or(model);
     let fast_base = canonical
@@ -1009,6 +1010,20 @@ mod tests {
         assert_eq!(history.today.as_ref().unwrap().tokens, 110);
         assert!(history.today.as_ref().unwrap().estimated_cost_usd.is_some());
         assert!(history.today.as_ref().unwrap().estimate_complete);
+        assert!(history.unknown_models.is_empty());
+    }
+
+    #[test]
+    fn uppercase_codex_models_are_priced_without_losing_display_identity() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"GPT-5.5","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+        let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
+        let today = history.today.unwrap();
+
+        assert_eq!(today.tokens, 110);
+        assert!(today.estimated_cost_usd.is_some());
+        assert!(today.estimate_complete);
+        assert_eq!(today.model_breakdown.unwrap().models[0].model, "GPT-5.5");
         assert!(history.unknown_models.is_empty());
     }
 
