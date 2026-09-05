@@ -1,12 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
-  import {
-    formatLimit,
-    formatReset,
-    isFreshSessionWindow,
-    paceTooltip,
-    projectPace,
-  } from './pacing';
+  import { formatLimit, formatReset, paceTooltip, projectPace } from './pacing';
   import type { QuotaWindow } from './types';
 
   interface Props {
@@ -16,7 +10,6 @@
     resetDisplay: 'countdown' | 'exact';
     timeFormat: 'system' | 'twelveHour' | 'twentyFourHour';
     alwaysShowPacing: boolean;
-    isSessionWindow?: boolean;
     onToggleUsage: () => void;
     onToggleReset: () => void;
   }
@@ -28,7 +21,6 @@
     resetDisplay,
     timeFormat,
     alwaysShowPacing,
-    isSessionWindow = false,
     onToggleUsage,
     onToggleReset,
   }: Props = $props();
@@ -82,7 +74,6 @@
     }
     return Math.min(100, Math.max(0, Math.round(usageDisplay === 'used' ? used : remaining)));
   });
-  const freshSession = $derived(isFreshSessionWindow(quota, now, isSessionWindow));
   const pace = $derived(projectPace(quota, now));
   const paceDetail = $derived(paceTooltip(pace));
   const roundedUsed = $derived(Math.round(used));
@@ -206,13 +197,9 @@
     <button type="button" data-tooltip={readingTooltip ?? undefined} onclick={onToggleUsage}>
       {reading}
     </button>
-    {#if freshSession}
-      <span data-tooltip="Sessions start after you send your first message.">Not started</span>
-    {:else}
-      <button type="button" data-tooltip={resetTooltip ?? undefined} onclick={onToggleReset}>
-        {formatReset(quota.resetsAt, now, resetDisplay, timeFormat)}
-      </button>
-    {/if}
+    <button type="button" data-tooltip={resetTooltip ?? undefined} onclick={onToggleReset}>
+      {formatReset(quota.resetsAt, now, resetDisplay, timeFormat)}
+    </button>
   </div>
 </section>
 

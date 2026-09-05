@@ -22,17 +22,16 @@ function quota(usedPercent: number, elapsedFraction = 0.5): QuotaWindow {
   };
 }
 
-function show(value: QuotaWindow, onToggleReset = vi.fn(), isSessionWindow = false) {
+function show(value: QuotaWindow, onToggleReset = vi.fn(), usageDisplay: 'used' | 'left' = 'left') {
   return {
     onToggleReset,
     ...render(QuotaMetric, {
       quota: value,
       now,
-      usageDisplay: 'left',
+      usageDisplay,
       resetDisplay: 'countdown',
       timeFormat: 'system',
       alwaysShowPacing: false,
-      isSessionWindow,
       onToggleUsage: vi.fn(),
       onToggleReset,
     }),
@@ -47,7 +46,6 @@ function showAlways(value: QuotaWindow) {
     resetDisplay: 'countdown',
     timeFormat: 'system',
     alwaysShowPacing: true,
-    isSessionWindow: false,
     onToggleUsage: vi.fn(),
     onToggleReset: vi.fn(),
   });
@@ -97,14 +95,20 @@ describe('quota pacing presentation', () => {
     expect(container.querySelector('.meter__pace')).toHaveStyle('--pace-percent: 75%');
   });
 
-  it('shows an unused rolling session as not started without pacing decoration', () => {
-    const { container } = show(quota(0), vi.fn(), true);
-    expect(screen.getByText('Not started')).toHaveAttribute(
-      'data-tooltip',
-      'Sessions start after you send your first message.',
-    );
+  it.each(['used', 'left'] as const)('renders available zero usage in %s mode', (mode) => {
+    const { container } = show(quota(0), vi.fn(), mode);
+    expect(
+      screen.getByRole('button', { name: mode === 'used' ? '0% used' : '100% left' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('No data')).not.toBeInTheDocument();
     expect(container.querySelector('.pace-warning')).not.toBeInTheDocument();
     expect(container.querySelector('.meter-shell')).not.toHaveAttribute('data-tooltip');
+  });
+
+  it('keeps zero usage visible for a non-session window', () => {
+    show(quota(0), vi.fn(), 'used');
+    expect(screen.getByRole('button', { name: '0% used' })).toBeInTheDocument();
+    expect(screen.queryByText('No data')).not.toBeInTheDocument();
   });
 
   it('does not decorate unused non-session quotas as healthy pacing', () => {

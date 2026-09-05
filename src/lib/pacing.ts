@@ -50,12 +50,6 @@ export function projectPace(window: QuotaWindow, now: number): PaceProjection {
   };
 }
 
-export function isFreshSessionWindow(window: QuotaWindow, now: number, isSessionWindow: boolean) {
-  if (!isSessionWindow || window.usedPercent > 0 || !window.resetsAt) return false;
-  const reset = new Date(window.resetsAt).getTime();
-  return Number.isFinite(reset) && now < reset;
-}
-
 export function paceTooltip(value: PaceProjection) {
   if (value.severity === 'level') return null;
   if (value.severity === 'spent') return 'Limit reached';

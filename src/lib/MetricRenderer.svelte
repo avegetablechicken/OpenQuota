@@ -36,10 +36,6 @@
     if (source?.kind !== 'quota' && source?.kind !== 'quotaOrValue') return undefined;
     return snapshot.quotas.find((item) => item.id === source.sourceId);
   });
-  const isSessionWindow = $derived(
-    (definition?.source.kind === 'quota' || definition?.source.kind === 'quotaOrValue') &&
-      definition.source.sessionWindow,
-  );
   const scopedUsageHistories = $derived(
     usageHistoriesForMode(snapshot.usageHistories, usageScope ?? viewMode),
   );
@@ -69,7 +65,6 @@
     resetDisplay={settings.resetDisplay}
     timeFormat={settings.timeFormat}
     alwaysShowPacing={settings.alwaysShowPacing}
-    {isSessionWindow}
     onToggleUsage={() =>
       onSettingsChange({
         ...settings,

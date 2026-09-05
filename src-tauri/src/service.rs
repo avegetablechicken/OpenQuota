@@ -95,8 +95,9 @@ impl ProviderService {
             let id = definition.id.clone();
             let state = match storage.load_snapshot_for_identity(&id, registry.cache_identity(&id))
             {
-                Ok(Some(snapshot)) => {
+                Ok(Some(mut snapshot)) => {
                     crate::app_debug!("cache", "loaded cached snapshot for {id}");
+                    normalize_quota_availability(definition, &mut snapshot);
                     ProviderViewState::from_cache(snapshot)
                 }
                 Ok(None) => ProviderViewState::default(),
@@ -481,6 +482,12 @@ impl ProviderService {
         provider_id: &str,
         result: Result<ProviderRefresh, ProviderError>,
     ) -> ProviderViewState {
+        let result = result.map(|mut refresh| {
+            if let Some(definition) = self.registry.definition(provider_id) {
+                normalize_quota_availability(definition, &mut refresh.snapshot);
+            }
+            refresh
+        });
         let account_error = result
             .as_ref()
             .ok()
@@ -661,6 +668,28 @@ impl RefreshFlight {
             completed_tx,
         }
     }
+}
+
+fn normalize_quota_availability(
+    definition: &crate::models::ProviderDefinition,
+    snapshot: &mut ProviderSnapshot,
+) {
+    // Missing quota entries are the shared no-data representation for every consumer.
+    snapshot.quotas.retain(|quota| {
+        let starts_on_use = definition.metrics.iter().any(|metric| {
+            matches!(
+                &metric.source,
+                MetricSource::Quota { source_id, session_window: true }
+                    | MetricSource::QuotaOrValue { source_id, session_window: true }
+                    if source_id == &quota.id
+            )
+        });
+        !(starts_on_use
+            && quota.used_percent <= 0.0
+            && quota
+                .resets_at
+                .is_some_and(|reset| reset > snapshot.refreshed_at))
+    });
 }
 
 fn validate_snapshot(
@@ -1232,6 +1261,75 @@ mod tests {
         let old_service = ProviderService::new(registry, storage);
         let old = old_service.state();
         assert!(old.providers.get("cached").unwrap().stale);
+    }
+
+    #[test]
+    fn unavailable_sessions_use_missing_quota_state_for_live_and_cached_data() {
+        for mut definition in [
+            crate::providers::claude::definition(),
+            crate::providers::opencode::definition(),
+            crate::providers::codex::definition(),
+        ] {
+            let id = definition.id.clone();
+            let starts_on_use = definition.metrics[0].source.session_window();
+            definition.fallback_enabled = true;
+            let directory = tempdir().unwrap();
+            let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+            let registry = Arc::new(ProviderRegistry::from_definitions(vec![definition]).unwrap());
+            let mut snapshot = test_snapshot(&id);
+            snapshot.quotas.push(QuotaWindow {
+                id: "session".into(),
+                label: "Session".into(),
+                used_percent: 0.0,
+                resets_at: Some(snapshot.refreshed_at + chrono::Duration::hours(5)),
+                period_seconds: 18_000,
+                format: QuotaFormat::Percent,
+                used_value: None,
+                limit_value: None,
+                unit: None,
+                estimated: false,
+                source_note: None,
+            });
+            let mut weekly = snapshot.quotas[0].clone();
+            weekly.id = "weekly".into();
+            weekly.label = "Weekly".into();
+            snapshot.quotas.push(weekly);
+            storage.save_snapshot(&snapshot).unwrap();
+            let service = ProviderService::new(registry, storage.clone());
+            let cached = service.provider_state(&id).snapshot.unwrap();
+            assert_eq!(cached.quotas.len(), if starts_on_use { 1 } else { 2 });
+            assert!(cached.quotas.iter().any(|quota| quota.id == "weekly"));
+            let live = service
+                .apply_refresh_result(
+                    &id,
+                    Ok(ProviderRefresh {
+                        snapshot: snapshot.clone(),
+                        cache_identity: None,
+                        account: None,
+                    }),
+                )
+                .snapshot
+                .unwrap();
+            assert_eq!(live.quotas, cached.quotas);
+            assert_eq!(
+                storage.load_snapshot(&id).unwrap().unwrap().quotas,
+                live.quotas
+            );
+
+            snapshot.quotas[0].used_percent = 1.0;
+            let active = service
+                .apply_refresh_result(
+                    &id,
+                    Ok(ProviderRefresh {
+                        snapshot,
+                        cache_identity: None,
+                        account: None,
+                    }),
+                )
+                .snapshot
+                .unwrap();
+            assert_eq!(active.quotas.len(), 2);
+        }
     }
 
     #[test]
