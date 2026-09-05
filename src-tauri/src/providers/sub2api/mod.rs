@@ -18,8 +18,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::models::{
     DailyUsage, MetricDefinition, MetricLayout, MetricSection, ModelUsageBreakdown,
-    ModelUsageEntry, ProviderDefinition, ProviderSnapshot, QuotaFormat, QuotaWindow,
-    UsageHistories, UsageHistory, UsagePeriod, UsagePeriodSelection,
+    ModelUsageEntry, ProviderDefinition, ProviderSnapshot, QuotaWindow, UsageHistories,
+    UsageHistory, UsagePeriod, UsagePeriodSelection,
 };
 use crate::storage::Storage;
 
@@ -1142,25 +1142,14 @@ fn normalize_refreshed_quotas(
     mut quotas: Vec<QuotaWindow>,
     now: chrono::DateTime<Utc>,
 ) -> Vec<QuotaWindow> {
-    let expected: &[(&str, &str, u64)] = match upstream {
-        Sub2ApiUpstream::Codex => &[
-            ("session", "Session", 5 * 60 * 60),
-            ("weekly", "Weekly", 7 * 24 * 60 * 60),
-            ("spark", "Spark", 5 * 60 * 60),
-            ("sparkWeekly", "Spark Weekly", 7 * 24 * 60 * 60),
-        ],
-        Sub2ApiUpstream::Claude => &[
-            ("session", "Session", 5 * 60 * 60),
-            ("weekly", "Weekly", 7 * 24 * 60 * 60),
-            ("sonnet", "Sonnet", 7 * 24 * 60 * 60),
-            ("fable", "Fable", 7 * 24 * 60 * 60),
-        ],
+    let expected: &[&str] = match upstream {
+        Sub2ApiUpstream::Codex => &["session", "weekly", "spark", "sparkWeekly"],
+        Sub2ApiUpstream::Claude => &["session", "weekly", "sonnet", "fable"],
     };
     let mut normalized = Vec::with_capacity(quotas.len().max(expected.len()));
 
-    for &(id, label, period_seconds) in expected {
+    for &id in expected {
         let Some(index) = quotas.iter().position(|quota| quota.id == id) else {
-            normalized.push(reset_quota(id, label, period_seconds));
             continue;
         };
         let mut quota = quotas.remove(index);
@@ -1177,22 +1166,6 @@ fn normalize_refreshed_quotas(
 
     normalized.extend(quotas);
     normalized
-}
-
-fn reset_quota(id: &str, label: &str, period_seconds: u64) -> QuotaWindow {
-    QuotaWindow {
-        id: id.into(),
-        label: label.into(),
-        used_percent: 0.0,
-        resets_at: None,
-        period_seconds,
-        format: QuotaFormat::Percent,
-        used_value: None,
-        limit_value: None,
-        unit: None,
-        estimated: false,
-        source_note: None,
-    }
 }
 
 fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistory {
@@ -1507,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_refresh_resets_missing_and_expired_quotas() {
+    fn claude_refresh_omits_missing_and_resets_expired_quotas() {
         let body = serde_json::json!({
             "limits": [{
                 "kind": "weekly_scoped",
@@ -1529,18 +1502,13 @@ mod tests {
                 .iter()
                 .map(|quota| (quota.id.as_str(), quota.used_percent))
                 .collect::<Vec<_>>(),
-            [
-                ("session", 0.0),
-                ("weekly", 0.0),
-                ("sonnet", 0.0),
-                ("fable", 0.0),
-            ]
+            [("fable", 0.0)]
         );
         assert!(quotas.iter().all(|quota| quota.resets_at.is_none()));
     }
 
     #[test]
-    fn codex_refresh_resets_each_missing_quota() {
+    fn codex_refresh_omits_missing_quotas() {
         let response = UsageResponse {
             status: StatusCode::OK,
             headers: Default::default(),
@@ -1564,12 +1532,7 @@ mod tests {
                 .iter()
                 .map(|quota| (quota.id.as_str(), quota.used_percent))
                 .collect::<Vec<_>>(),
-            [
-                ("session", 0.0),
-                ("weekly", 38.0),
-                ("spark", 0.0),
-                ("sparkWeekly", 0.0),
-            ]
+            [("weekly", 38.0)]
         );
     }
 
