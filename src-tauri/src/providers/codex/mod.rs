@@ -264,10 +264,7 @@ impl CodexProvider {
         let mut response = self
             .client
             .fetch_usage(&auth.access_token, auth.account_id.as_deref())?;
-        if matches!(
-            response.status,
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ) {
+        if should_refresh_access_token(response.status) {
             self.refresh_access_token(auth, now, &mut warnings)?;
             Self::ensure_candidate_identity(auth, account_identity)?;
             response = self
@@ -358,6 +355,10 @@ impl CodexProvider {
         }
         Ok(())
     }
+}
+
+fn should_refresh_access_token(status: StatusCode) -> bool {
+    status == StatusCode::UNAUTHORIZED
 }
 
 fn resolve_account_usage(
@@ -482,8 +483,8 @@ mod account_tests {
     use tempfile::tempdir;
 
     use super::{
-        resolve_account_usage, validate_account_identity, AccountUsageOutcome, CodexClient,
-        CodexError, CodexProvider,
+        resolve_account_usage, should_refresh_access_token, validate_account_identity,
+        AccountUsageOutcome, CodexClient, CodexError, CodexProvider,
     };
     use crate::{
         models::{ProviderSnapshot, UsageHistories, UsageHistory, UsagePeriod},
@@ -508,6 +509,14 @@ mod account_tests {
             Err(CodexError::AccountChanged)
         ));
         assert!(validate_account_identity(None, None).is_ok());
+    }
+
+    #[test]
+    fn only_unauthorized_usage_responses_refresh_shared_credentials() {
+        assert!(should_refresh_access_token(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+        assert!(!should_refresh_access_token(reqwest::StatusCode::FORBIDDEN));
     }
 
     #[test]

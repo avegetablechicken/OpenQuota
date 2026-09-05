@@ -690,6 +690,9 @@ pub fn run() {
                 &settings.get(),
                 settings.registry(),
             );
+            #[cfg(target_os = "macos")]
+            app.handle()
+                .run_on_main_thread(http_client::warm_system_proxy_credentials)?;
             spawn_startup_credential_detection(
                 app.handle().clone(),
                 registry,

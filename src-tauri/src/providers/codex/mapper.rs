@@ -20,7 +20,7 @@ pub fn map_usage(
     reset_credits: Option<&UsageResponse>,
     now: DateTime<Utc>,
 ) -> Result<MappedUsage, CodexError> {
-    if matches!(response.status.as_u16(), 401 | 403) {
+    if response.status == reqwest::StatusCode::UNAUTHORIZED {
         return Err(CodexError::TokenExpired);
     }
     if !response.status.is_success() {
@@ -403,6 +403,20 @@ mod tests {
             headers: HashMap::new(),
             body,
         }
+    }
+
+    #[test]
+    fn forbidden_usage_is_not_misclassified_as_an_expired_token() {
+        let response = UsageResponse {
+            status: StatusCode::FORBIDDEN,
+            headers: HashMap::new(),
+            body: Value::Null,
+        };
+
+        assert!(matches!(
+            map_usage(&response, None, Utc::now()),
+            Err(crate::providers::codex::CodexError::RequestFailed(403))
+        ));
     }
 
     fn value_metric<'a>(mapped: &'a super::MappedUsage, id: &str) -> &'a ValueMetric {

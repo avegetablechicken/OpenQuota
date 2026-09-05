@@ -4,6 +4,11 @@ pub fn blocking_client_builder() -> ClientBuilder {
     platform::configure(Client::builder())
 }
 
+#[cfg(target_os = "macos")]
+pub fn warm_system_proxy_credentials() {
+    platform::warm_system_proxy_credentials();
+}
+
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use reqwest::blocking::ClientBuilder;
@@ -16,16 +21,36 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     use std::{
+        collections::HashMap,
         ffi::{CStr, CString},
         io::Read,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
         os::raw::{c_char, c_int},
-        sync::{Mutex, OnceLock},
-        time::Duration,
+        sync::{Mutex, MutexGuard, OnceLock},
+        time::{Duration, Instant},
     };
 
     use ipnet::IpNet;
     use reqwest::{blocking::ClientBuilder, Proxy, Url};
+    use security_core_foundation::{
+        array::CFArray as SecurityCFArray,
+        base::{CFType as SecurityCFType, TCFType as SecurityTCFType},
+        boolean::CFBoolean as SecurityCFBoolean,
+        dictionary::CFDictionary as SecurityCFDictionary,
+        string::CFString as SecurityCFString,
+    };
+    use security_framework::os::macos::{
+        keychain::SecKeychain,
+        passwords::{find_internet_password, SecAuthenticationType, SecProtocolType},
+    };
+    use security_framework_sys::{
+        base::errSecSuccess,
+        item::{
+            kSecAttrAccount, kSecAttrServer, kSecClass, kSecClassInternetPassword,
+            kSecMatchSearchList, kSecReturnAttributes,
+        },
+        keychain_item::SecItemCopyMatching,
+    };
     use system_configuration::{
         core_foundation::{
             array::CFArray,
@@ -48,7 +73,9 @@ mod platform {
 
     const MAX_PAC_BYTES: u64 = 4 * 1024 * 1024;
     const PAC_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-    static PROXY_RESOLVER: OnceLock<Option<ProxyResolver>> = OnceLock::new();
+    const SYSTEM_PROXY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+    static PROXY_RESOLVER: OnceLock<ProxyResolver> = OnceLock::new();
+    static PAC_ENGINE: OnceLock<Mutex<()>> = OnceLock::new();
 
     unsafe extern "C" {
         fn pacparser_init() -> c_int;
@@ -59,39 +86,39 @@ mod platform {
 
     pub(super) fn configure(builder: ClientBuilder) -> ClientBuilder {
         let builder = builder.no_proxy();
-        let Some(resolver) = PROXY_RESOLVER.get_or_init(ProxyResolver::from_sources) else {
-            return builder;
-        };
+        let resolver = PROXY_RESOLVER.get_or_init(ProxyResolver::from_sources);
         builder.proxy(Proxy::custom(move |url| resolver.proxy_for_url(url)))
+    }
+
+    pub(super) fn warm_system_proxy_credentials() {
+        let Ok(url) = Url::parse("https://chatgpt.com/backend-api/wham/usage") else {
+            return;
+        };
+        PROXY_RESOLVER
+            .get_or_init(ProxyResolver::from_sources)
+            .system
+            .warm_credentials_for_url(&url);
     }
 
     struct ProxyResolver {
         environment: EnvironmentProxyConfig,
-        system: Option<SystemProxyResolver>,
+        system: DynamicSystemProxyResolver,
     }
 
     impl ProxyResolver {
-        fn from_sources() -> Option<Self> {
+        fn from_sources() -> Self {
             let environment = EnvironmentProxyConfig::from_env();
-            let system = if environment.covers_http_and_https() {
-                None
-            } else {
-                SystemProxyResolver::from_settings()
-            };
-            if !environment.has_proxy() && system.is_none() {
-                return None;
-            }
-            Some(Self {
+            Self {
                 environment,
-                system,
-            })
+                system: DynamicSystemProxyResolver::default(),
+            }
         }
 
         fn proxy_for_url(&self, url: &Url) -> Option<String> {
             if let Some(proxy) = self.environment.proxy_for_scheme(url.scheme()) {
                 return (!self.environment.bypass.matches(url)).then(|| proxy.to_owned());
             }
-            self.system.as_ref()?.proxy_for_url(url)
+            self.system.proxy_for_url(url)
         }
     }
 
@@ -118,14 +145,6 @@ mod platform {
                     .map(|value| BypassRules::from_comma_list(&value, false))
                     .unwrap_or_default(),
             }
-        }
-
-        fn has_proxy(&self) -> bool {
-            self.http.is_some() || self.https.is_some() || self.all.is_some()
-        }
-
-        fn covers_http_and_https(&self) -> bool {
-            self.all.is_some() || (self.http.is_some() && self.https.is_some())
         }
 
         fn proxy_for_scheme(&self, scheme: &str) -> Option<&str> {
@@ -157,50 +176,159 @@ mod platform {
         })
     }
 
+    #[derive(Default)]
+    struct DynamicSystemProxyResolver {
+        cache: Mutex<SystemProxyCache>,
+    }
+
+    #[derive(Default)]
+    struct SystemProxyCache {
+        checked_at: Option<Instant>,
+        configuration: Option<SystemProxyConfiguration>,
+        resolver: Option<SystemProxyResolver>,
+        reload_failed: bool,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct SystemProxyConfiguration {
+        pac: Option<PacSource>,
+        fallback: Option<StaticProxyConfig>,
+        bypass: BypassRules,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    enum PacSource {
+        Script(String),
+        Url(String),
+    }
+
     struct SystemProxyResolver {
         pac: Option<PacResolver>,
         fallback: Option<StaticProxyConfig>,
+        bypass: BypassRules,
+        credentials: Mutex<HashMap<ProxyEndpoint, Option<ProxyCredentials>>>,
     }
 
+    #[derive(Clone, Hash, PartialEq, Eq)]
+    struct ProxyEndpoint {
+        host: String,
+        port: u16,
+    }
+
+    #[derive(Clone)]
+    struct ProxyCredentials {
+        username: zeroize::Zeroizing<String>,
+        password: zeroize::Zeroizing<String>,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
     struct StaticProxyConfig {
         bypass: BypassRules,
         http: Option<String>,
         https: Option<String>,
     }
 
-    impl SystemProxyResolver {
+    impl DynamicSystemProxyResolver {
+        fn proxy_for_url(&self, url: &Url) -> Option<String> {
+            let mut cache = self.cache.lock().ok()?;
+            if cache
+                .checked_at
+                .is_none_or(|checked| checked.elapsed() >= SYSTEM_PROXY_REFRESH_INTERVAL)
+            {
+                cache.checked_at = Some(Instant::now());
+                cache.update(SystemProxyConfiguration::from_settings());
+            }
+            cache
+                .resolver
+                .as_ref()
+                .and_then(|resolver| resolver.proxy_for_url(url))
+        }
+
+        fn warm_credentials_for_url(&self, url: &Url) {
+            let Ok(mut cache) = self.cache.lock() else {
+                return;
+            };
+            cache.update(SystemProxyConfiguration::from_settings());
+            if let Some(resolver) = &cache.resolver {
+                resolver.warm_credentials_for_url(url);
+            }
+        }
+    }
+
+    impl SystemProxyCache {
+        fn update(&mut self, configuration: Option<SystemProxyConfiguration>) {
+            if self.configuration == configuration && !self.reload_failed {
+                return;
+            }
+
+            // pacparser keeps one process-global engine. Replacing the resolver reloads
+            // that engine under its own mutex while this cache mutex excludes evaluations.
+            self.resolver = None;
+            self.configuration = configuration.clone();
+            let (resolver, reload_failed) = configuration
+                .map(SystemProxyResolver::from_configuration)
+                .unwrap_or((None, false));
+            self.resolver = resolver;
+            self.reload_failed = reload_failed;
+        }
+    }
+
+    impl SystemProxyConfiguration {
         fn from_settings() -> Option<Self> {
             let store = SCDynamicStoreBuilder::new("OpenQuota").build()?;
             let settings = store.get_proxies()?;
             let fallback = StaticProxyConfig::from_settings(&settings);
+            let bypass = BypassRules::from_system_settings(&settings);
             let pac = if flag_setting(&settings, unsafe { kSCPropNetProxiesProxyAutoConfigEnable })
             {
-                let resolver = system_pac_script(&settings)
-                    .ok()
-                    .and_then(|script| PacResolver::new(&script));
-                if resolver.is_some() {
-                    crate::app_info!("http", "macOS PAC proxy enabled");
-                } else {
-                    crate::app_warn!("http", "macOS PAC proxy unavailable");
-                }
-                resolver
+                pac_source(&settings)
             } else {
                 None
             };
-            if pac.is_none() && fallback.is_none() {
-                return None;
-            }
-            if pac.is_none() && fallback.is_some() {
+            (pac.is_some() || fallback.is_some()).then_some(Self {
+                pac,
+                fallback,
+                bypass,
+            })
+        }
+    }
+
+    impl SystemProxyResolver {
+        fn from_configuration(configuration: SystemProxyConfiguration) -> (Option<Self>, bool) {
+            let pac_requested = configuration.pac.is_some();
+            let pac = configuration.pac.and_then(|source| {
+                source
+                    .load()
+                    .ok()
+                    .and_then(|script| PacResolver::new(&script))
+            });
+            if pac.is_some() {
+                crate::app_info!("http", "macOS PAC proxy enabled");
+            } else if pac_requested {
+                crate::app_warn!("http", "macOS PAC proxy unavailable");
+            } else if configuration.fallback.is_some() {
                 crate::app_info!("http", "macOS static proxy enabled");
             }
-            Some(Self { pac, fallback })
+            let reload_failed = pac_requested && pac.is_none();
+            let resolver = (pac.is_some() || configuration.fallback.is_some()).then_some(Self {
+                pac,
+                fallback: configuration.fallback,
+                bypass: configuration.bypass,
+                credentials: Mutex::new(HashMap::new()),
+            });
+            (resolver, reload_failed)
         }
 
         fn proxy_for_url(&self, url: &Url) -> Option<String> {
-            if let Some(pac) = &self.pac {
-                return self.apply_pac_decision(url, pac.decision_for_url(url));
+            if self.bypass.matches(url) {
+                return None;
             }
-            self.fallback.as_ref()?.proxy_for_url(url)
+            let proxy = if let Some(pac) = &self.pac {
+                self.apply_pac_decision(url, pac.decision_for_url(url))
+            } else {
+                self.fallback.as_ref()?.proxy_for_url(url)
+            }?;
+            Some(self.proxy_with_credentials(proxy))
         }
 
         fn apply_pac_decision(&self, url: &Url, decision: PacDecision) -> Option<String> {
@@ -213,6 +341,138 @@ mod platform {
                 }
             }
         }
+
+        fn proxy_with_credentials(&self, proxy: String) -> String {
+            let Ok(mut url) = Url::parse(&proxy) else {
+                return proxy;
+            };
+            if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() {
+                return proxy;
+            }
+            let Some(host) = url.host_str().map(str::to_owned) else {
+                return proxy;
+            };
+            let Some(port) = url.port_or_known_default() else {
+                return proxy;
+            };
+            let endpoint = ProxyEndpoint { host, port };
+            let credentials = self
+                .credentials
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&endpoint).cloned().flatten());
+            let Some(credentials) = credentials else {
+                return proxy;
+            };
+            if url.set_username(&credentials.username).is_err()
+                || url.set_password(Some(&credentials.password)).is_err()
+            {
+                return proxy;
+            }
+            url.into()
+        }
+
+        fn warm_credentials_for_url(&self, url: &Url) {
+            if self.bypass.matches(url) {
+                return;
+            }
+            let proxy = if let Some(pac) = &self.pac {
+                self.apply_pac_decision(url, pac.decision_for_url(url))
+            } else {
+                self.fallback
+                    .as_ref()
+                    .and_then(|proxy| proxy.proxy_for_url(url))
+            };
+            let Some(proxy) = proxy.and_then(|proxy| Url::parse(&proxy).ok()) else {
+                return;
+            };
+            if !matches!(proxy.scheme(), "http" | "https") || !proxy.username().is_empty() {
+                return;
+            }
+            let Some(host) = proxy.host_str().map(str::to_owned) else {
+                return;
+            };
+            let Some(port) = proxy.port_or_known_default() else {
+                return;
+            };
+            let endpoint = ProxyEndpoint { host, port };
+            let credentials = load_proxy_credentials(&endpoint);
+            if let Ok(mut cache) = self.credentials.lock() {
+                cache.insert(endpoint, credentials);
+            }
+        }
+    }
+
+    impl PacSource {
+        fn load(self) -> Result<String, &'static str> {
+            match self {
+                Self::Script(script) => Ok(script),
+                Self::Url(url) => std::thread::spawn(move || load_pac_url(&url))
+                    .join()
+                    .map_err(|_| "automatic proxy downloader stopped unexpectedly")?,
+            }
+        }
+    }
+
+    fn load_proxy_credentials(endpoint: &ProxyEndpoint) -> Option<ProxyCredentials> {
+        let keychain = SecKeychain::default().ok()?;
+        let keychains = SecurityCFArray::from_CFTypes(std::slice::from_ref(&keychain));
+        // macOS may save one credential for companion HTTP/SOCKS ports. Match the
+        // exact proxy server and let Keychain select its default internet password.
+        let query = unsafe {
+            SecurityCFDictionary::from_CFType_pairs(&[
+                (
+                    SecurityCFString::wrap_under_get_rule(kSecClass),
+                    SecurityCFString::wrap_under_get_rule(kSecClassInternetPassword).into_CFType(),
+                ),
+                (
+                    SecurityCFString::wrap_under_get_rule(kSecAttrServer),
+                    SecurityCFString::from(endpoint.host.as_str()).into_CFType(),
+                ),
+                (
+                    SecurityCFString::wrap_under_get_rule(kSecReturnAttributes),
+                    SecurityCFBoolean::true_value().into_CFType(),
+                ),
+                (
+                    SecurityCFString::wrap_under_get_rule(kSecMatchSearchList),
+                    keychains.into_CFType(),
+                ),
+            ])
+        };
+        let mut result = std::ptr::null();
+        let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
+        if status != errSecSuccess || result.is_null() {
+            return None;
+        }
+        let item = unsafe {
+            SecurityCFDictionary::<SecurityCFString, SecurityCFType>::wrap_under_create_rule(
+                result.cast_mut().cast(),
+            )
+        };
+        let username = item
+            .find(unsafe { kSecAttrAccount })?
+            .downcast::<SecurityCFString>()?
+            .to_string();
+        let password_result = find_internet_password(
+            Some(std::slice::from_ref(&keychain)),
+            &endpoint.host,
+            None,
+            &username,
+            "",
+            None,
+            SecProtocolType::Any,
+            SecAuthenticationType::Any,
+        );
+        let (password, _) = password_result.ok()?;
+        let password = String::from_utf8(password.as_ref().to_vec()).ok()?;
+        if username.is_empty() || password.is_empty() {
+            return None;
+        }
+        crate::app_info!("http", "macOS proxy credentials loaded");
+        Some(ProxyCredentials {
+            username: zeroize::Zeroizing::new(username),
+            password: zeroize::Zeroizing::new(password),
+        })
     }
 
     impl StaticProxyConfig {
@@ -291,18 +551,16 @@ mod platform {
         Some(url.into())
     }
 
-    fn system_pac_script(settings: &ProxySettings) -> Result<String, &'static str> {
+    fn pac_source(settings: &ProxySettings) -> Option<PacSource> {
         if let Some(script) = string_setting(settings, unsafe {
             kSCPropNetProxiesProxyAutoConfigJavaScript
         }) {
-            return Ok(script);
+            return Some(PacSource::Script(script));
         }
-        let Some(url) = string_setting(settings, unsafe {
+        string_setting(settings, unsafe {
             kSCPropNetProxiesProxyAutoConfigURLString
-        }) else {
-            return Err("automatic proxy configuration has no script or URL");
-        };
-        load_pac_url(&url)
+        })
+        .map(PacSource::Url)
     }
 
     fn flag_setting(settings: &ProxySettings, key: CFStringRef) -> bool {
@@ -340,12 +598,13 @@ mod platform {
             .unwrap_or_default()
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default, PartialEq, Eq)]
     struct BypassRules {
         exclude_simple_hostnames: bool,
         rules: Vec<BypassRule>,
     }
 
+    #[derive(Clone, PartialEq, Eq)]
     enum BypassRule {
         All,
         Ip(IpAddr),
@@ -357,7 +616,7 @@ mod platform {
         Pattern(String),
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     enum HostMatch {
         Exact,
         IncludeSubdomains,
@@ -551,7 +810,7 @@ mod platform {
         Ok(script)
     }
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     enum PacDecision {
         Proxy(String),
         Direct,
@@ -559,25 +818,32 @@ mod platform {
     }
 
     struct PacResolver {
-        engine: Mutex<()>,
+        script: CString,
+        decisions: Mutex<HashMap<String, PacDecision>>,
+    }
+
+    struct PacParserSession {
+        _guard: MutexGuard<'static, ()>,
     }
 
     impl PacResolver {
         fn new(script: &str) -> Option<Self> {
             let script = CString::new(script).ok()?;
-            if unsafe { pacparser_init() } != 1 {
-                return None;
-            }
-            if unsafe { pacparser_parse_pac_string(script.as_ptr()) } != 1 {
-                unsafe { pacparser_cleanup() };
-                return None;
-            }
+            PacParserSession::new(&script)?;
             Some(Self {
-                engine: Mutex::new(()),
+                script,
+                decisions: Mutex::new(HashMap::new()),
             })
         }
 
         fn decision_for_url(&self, url: &Url) -> PacDecision {
+            let cache_key = url.as_str();
+            let Ok(mut decisions) = self.decisions.lock() else {
+                return PacDecision::Error;
+            };
+            if let Some(decision) = decisions.get(cache_key) {
+                return decision.clone();
+            }
             let Some(host) = url.host_str() else {
                 return PacDecision::Error;
             };
@@ -587,7 +853,7 @@ mod platform {
             let Ok(host) = CString::new(host) else {
                 return PacDecision::Error;
             };
-            let Ok(_guard) = self.engine.lock() else {
+            let Some(_session) = PacParserSession::new(&self.script) else {
                 return PacDecision::Error;
             };
             let result = unsafe { pacparser_find_proxy(url.as_ptr(), host.as_ptr()) };
@@ -597,7 +863,31 @@ mod platform {
             let Ok(result) = unsafe { CStr::from_ptr(result) }.to_str() else {
                 return PacDecision::Error;
             };
-            pac_decision_from_result(result)
+            let decision = pac_decision_from_result(result);
+            if decision != PacDecision::Error {
+                decisions.insert(cache_key.to_owned(), decision.clone());
+            }
+            decision
+        }
+    }
+
+    impl PacParserSession {
+        fn new(script: &CString) -> Option<Self> {
+            let guard = PAC_ENGINE.get_or_init(|| Mutex::new(())).lock().ok()?;
+            if unsafe { pacparser_init() } != 1 {
+                return None;
+            }
+            if unsafe { pacparser_parse_pac_string(script.as_ptr()) } != 1 {
+                unsafe { pacparser_cleanup() };
+                return None;
+            }
+            Some(Self { _guard: guard })
+        }
+    }
+
+    impl Drop for PacParserSession {
+        fn drop(&mut self) {
+            unsafe { pacparser_cleanup() };
         }
     }
 
@@ -638,13 +928,38 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::{
-            pac_decision_from_result, BypassRules, EnvironmentProxyConfig, HostMatch, PacDecision,
-            ProxyResolver, StaticProxyConfig, SystemProxyResolver,
+            pac_decision_from_result, BypassRules, DynamicSystemProxyResolver,
+            EnvironmentProxyConfig, HostMatch, PacDecision, ProxyCredentials, ProxyEndpoint,
+            ProxyResolver, StaticProxyConfig, SystemProxyCache, SystemProxyConfiguration,
+            SystemProxyResolver,
         };
         use reqwest::Url;
+        use std::{collections::HashMap, sync::Mutex, time::Instant};
 
         fn url(value: &str) -> Url {
             Url::parse(value).unwrap()
+        }
+
+        fn dynamic_system(resolver: SystemProxyResolver) -> DynamicSystemProxyResolver {
+            DynamicSystemProxyResolver {
+                cache: Mutex::new(SystemProxyCache {
+                    checked_at: Some(Instant::now()),
+                    resolver: Some(resolver),
+                    ..SystemProxyCache::default()
+                }),
+            }
+        }
+
+        fn static_configuration(https: Option<&str>) -> SystemProxyConfiguration {
+            SystemProxyConfiguration {
+                pac: None,
+                fallback: Some(StaticProxyConfig {
+                    bypass: BypassRules::default(),
+                    http: None,
+                    https: https.map(str::to_owned),
+                }),
+                bypass: BypassRules::default(),
+            }
         }
 
         #[test]
@@ -656,13 +971,15 @@ mod platform {
                     all: None,
                     bypass: BypassRules::from_comma_list("direct.example", false),
                 },
-                system: Some(SystemProxyResolver {
+                system: dynamic_system(SystemProxyResolver {
                     pac: None,
                     fallback: Some(StaticProxyConfig {
                         bypass: BypassRules::default(),
                         http: Some("http://system-http:8080/".into()),
                         https: Some("http://system-https:8443/".into()),
                     }),
+                    bypass: BypassRules::default(),
+                    credentials: Mutex::new(HashMap::new()),
                 }),
             };
 
@@ -686,7 +1003,7 @@ mod platform {
                     all: None,
                     bypass: BypassRules::default(),
                 },
-                system: Some(SystemProxyResolver {
+                system: dynamic_system(SystemProxyResolver {
                     pac: None,
                     fallback: Some(StaticProxyConfig {
                         bypass: BypassRules::from_entries(
@@ -697,6 +1014,8 @@ mod platform {
                         http: Some("http://system-http:8080/".into()),
                         https: Some("http://system-https:8443/".into()),
                     }),
+                    bypass: BypassRules::from_entries(["bypass.example"], false, HostMatch::Exact),
+                    credentials: Mutex::new(HashMap::new()),
                 }),
             };
 
@@ -708,6 +1027,58 @@ mod platform {
         }
 
         #[test]
+        fn system_proxy_cache_applies_configuration_changes() {
+            let target = url("https://example.com");
+            let mut cache = SystemProxyCache::default();
+
+            cache.update(Some(static_configuration(Some("http://first:8080"))));
+            assert_eq!(
+                cache
+                    .resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.proxy_for_url(&target)),
+                Some("http://first:8080".into())
+            );
+
+            cache.update(Some(static_configuration(Some("http://second:8080"))));
+            assert_eq!(
+                cache
+                    .resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.proxy_for_url(&target)),
+                Some("http://second:8080".into())
+            );
+
+            cache.update(None);
+            assert!(cache.resolver.is_none());
+        }
+
+        #[test]
+        fn system_proxy_uses_cached_basic_credentials() {
+            let endpoint = ProxyEndpoint {
+                host: "proxy.example".into(),
+                port: 8080,
+            };
+            let resolver = SystemProxyResolver {
+                pac: None,
+                fallback: None,
+                bypass: BypassRules::default(),
+                credentials: Mutex::new(HashMap::from([(
+                    endpoint,
+                    Some(ProxyCredentials {
+                        username: zeroize::Zeroizing::new("user@example".into()),
+                        password: zeroize::Zeroizing::new("p@ss/word".into()),
+                    }),
+                )])),
+            };
+
+            assert_eq!(
+                resolver.proxy_with_credentials("http://proxy.example:8080".into()),
+                "http://user%40example:p%40ss%2Fword@proxy.example:8080/"
+            );
+        }
+
+        #[test]
         fn pac_direct_is_terminal_and_only_errors_use_static_fallback() {
             let resolver = SystemProxyResolver {
                 pac: None,
@@ -716,6 +1087,8 @@ mod platform {
                     http: Some("http://system-http:8080/".into()),
                     https: Some("http://system-https:8443/".into()),
                 }),
+                bypass: BypassRules::default(),
+                credentials: Mutex::new(HashMap::new()),
             };
             let target = url("https://example.com");
             assert_eq!(
@@ -799,10 +1172,33 @@ mod platform {
         #[test]
         #[ignore = "requires a configured macOS PAC service"]
         fn configured_system_pac_resolves_chatgpt() {
-            let resolver =
-                SystemProxyResolver::from_settings().expect("macOS system proxy should initialize");
+            let configuration = SystemProxyConfiguration::from_settings()
+                .expect("macOS system proxy should initialize");
+            let resolver = SystemProxyResolver::from_configuration(configuration)
+                .0
+                .expect("macOS system proxy should resolve");
             let target = url("https://chatgpt.com/backend-api/wham/usage");
             assert!(resolver.proxy_for_url(&target).is_some());
+        }
+
+        #[test]
+        #[ignore = "requires an authenticated macOS proxy with Keychain credentials"]
+        fn configured_system_proxy_loads_keychain_credentials() {
+            let configuration = SystemProxyConfiguration::from_settings()
+                .expect("macOS system proxy should initialize");
+            let resolver = SystemProxyResolver::from_configuration(configuration)
+                .0
+                .expect("macOS system proxy should resolve");
+            let target = url("https://chatgpt.com/backend-api/wham/usage");
+            resolver.warm_credentials_for_url(&target);
+            let proxy = resolver
+                .proxy_for_url(&target)
+                .expect("ChatGPT should use the configured proxy");
+            let proxy = url(&proxy);
+            assert!(!proxy.username().is_empty());
+            assert!(proxy
+                .password()
+                .is_some_and(|password| !password.is_empty()));
         }
     }
 }
