@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode};
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -26,7 +26,7 @@ pub struct TokenRefresh {
 }
 
 pub struct GrokClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
     credits_url: String,
     settings_url: String,
     refresh_url: String,
@@ -48,12 +48,13 @@ impl GrokClient {
         refresh_url: &str,
         timeout: Duration,
     ) -> Result<Self, GrokError> {
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(timeout)
-            .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| GrokError::ConnectionFailed)?;
+        let client = crate::http_client::ProviderClient::new("grok", move |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(timeout)
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+        })
+        .map_err(|_| GrokError::ConnectionFailed)?;
         Ok(Self {
             client,
             credits_url: credits_url.to_owned(),
@@ -76,10 +77,14 @@ impl GrokClient {
         access_token: &str,
         endpoint: &str,
     ) -> Result<GrokResponse, GrokError> {
+        let client = self
+            .client
+            .current()
+            .map_err(|_| GrokError::ConnectionFailed)?;
         let started = std::time::Instant::now();
         let response = self
             .send_request(|| {
-                self.client
+                client
                     .get(url)
                     .bearer_auth(access_token.trim())
                     .header("X-XAI-Token-Auth", TOKEN_AUTH_HEADER)
@@ -108,11 +113,15 @@ impl GrokClient {
         refresh_token: &str,
         client_id: &str,
     ) -> Result<TokenRefresh, GrokError> {
+        let client = self
+            .client
+            .current()
+            .map_err(|_| GrokError::ConnectionFailed)?;
         let started = std::time::Instant::now();
         crate::app_info!("auth:grok", "token refresh attempt");
         let response = self
             .send_request(|| {
-                self.client.post(&self.refresh_url).form(&[
+                client.post(&self.refresh_url).form(&[
                     ("grant_type", "refresh_token"),
                     ("client_id", client_id),
                     ("refresh_token", refresh_token),

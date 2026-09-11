@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode, Url};
+use reqwest::{StatusCode, Url};
 use serde_json::Value;
 
 use super::{auth::DevinAuth, DevinError};
@@ -14,7 +14,7 @@ pub(super) struct DevinResponse {
 }
 
 pub(super) struct DevinClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
 }
 
 impl DevinClient {
@@ -23,12 +23,13 @@ impl DevinClient {
     }
 
     fn with_timeout(timeout: Duration) -> Result<Self, DevinError> {
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(timeout)
-            .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| DevinError::ConnectionFailed)?;
+        let client = crate::http_client::ProviderClient::new("devin", move |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(timeout)
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+        })
+        .map_err(|_| DevinError::ConnectionFailed)?;
         Ok(Self { client })
     }
 
@@ -37,6 +38,8 @@ impl DevinClient {
         let started = std::time::Instant::now();
         let response = self
             .client
+            .current()
+            .map_err(|_| DevinError::ConnectionFailed)?
             .post(url)
             .header("Content-Type", "application/json")
             .header("Connect-Protocol-Version", "1")

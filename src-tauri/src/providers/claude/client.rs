@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use reqwest::{blocking::Client, StatusCode};
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -17,7 +17,7 @@ pub struct ClaudeRefreshResponse {
 
 #[derive(Clone)]
 pub struct ClaudeClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
 }
 
 impl ClaudeClient {
@@ -27,11 +27,17 @@ impl ClaudeClient {
 
     fn with_timeout(timeout: std::time::Duration) -> Result<Self, ClaudeError> {
         Ok(Self {
-            client: crate::http_client::blocking_client_builder()
-                .timeout(timeout)
-                .build()
-                .map_err(|_| ClaudeError::ConnectionFailed)?,
+            client: crate::http_client::ProviderClient::new("claude", move |builder| {
+                builder.timeout(timeout)
+            })
+            .map_err(|_| ClaudeError::ConnectionFailed)?,
         })
+    }
+
+    pub fn for_provider(&self, provider_id: &str) -> Self {
+        Self {
+            client: self.client.for_provider(provider_id),
+        }
     }
 
     pub fn fetch_usage(
@@ -42,6 +48,8 @@ impl ClaudeClient {
         let started = std::time::Instant::now();
         let response = self
             .client
+            .current()
+            .map_err(|_| ClaudeError::ConnectionFailed)?
             .get(&config.usage_url)
             .bearer_auth(token.trim())
             .header("Accept", "application/json")
@@ -77,6 +85,8 @@ impl ClaudeClient {
         crate::app_info!("auth:claude", "token refresh attempt");
         let response = self
             .client
+            .current()
+            .map_err(|_| ClaudeError::ConnectionFailed)?
             .post(&config.refresh_url)
             .json(&json!({
                 "grant_type": "refresh_token",

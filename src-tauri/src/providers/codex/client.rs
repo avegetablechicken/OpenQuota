@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use reqwest::{blocking::Client, header::HeaderMap, StatusCode};
+use reqwest::{header::HeaderMap, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -29,7 +29,7 @@ pub struct TokenRefresh {
 }
 
 pub struct CodexClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
     refresh_url: String,
     usage_url: String,
     profile_url: String,
@@ -58,12 +58,13 @@ impl CodexClient {
         refresh_url: &str,
         timeout: Duration,
     ) -> Result<Self, CodexError> {
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(timeout)
-            .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| CodexError::ConnectionFailed)?;
+        let client = crate::http_client::ProviderClient::new("codex", move |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(timeout)
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+        })
+        .map_err(|_| CodexError::ConnectionFailed)?;
         Ok(Self {
             client,
             refresh_url: refresh_url.to_owned(),
@@ -83,6 +84,8 @@ impl CodexClient {
         let started = std::time::Instant::now();
         let mut request = self
             .client
+            .current()
+            .map_err(|_| CodexError::ConnectionFailed)?
             .get(&self.usage_url)
             .bearer_auth(access_token)
             .header("Accept", "application/json");
@@ -121,6 +124,8 @@ impl CodexClient {
         let started = std::time::Instant::now();
         let mut request = self
             .client
+            .current()
+            .map_err(|_| CodexError::ConnectionFailed)?
             .get(&self.profile_url)
             .timeout(self.profile_timeout)
             .bearer_auth(access_token)
@@ -157,6 +162,8 @@ impl CodexClient {
         let started = std::time::Instant::now();
         let mut request = self
             .client
+            .current()
+            .map_err(|_| CodexError::ConnectionFailed)?
             .get(&self.reset_credits_url)
             .bearer_auth(access_token)
             .header("Accept", "application/json")
@@ -199,6 +206,8 @@ impl CodexClient {
         let started = std::time::Instant::now();
         let mut request = self
             .client
+            .current()
+            .map_err(|_| CodexError::ConnectionFailed)?
             .post(&self.consume_reset_credit_url)
             .bearer_auth(access_token)
             .header("Accept", "application/json")
@@ -237,6 +246,8 @@ impl CodexClient {
         crate::app_info!("auth:codex", "token refresh attempt");
         let response = self
             .client
+            .current()
+            .map_err(|_| CodexError::ConnectionFailed)?
             .post(&self.refresh_url)
             .form(&[
                 ("grant_type", "refresh_token"),

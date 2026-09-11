@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode, Url};
+use reqwest::{StatusCode, Url};
 
 use super::{auth::token_subject, CursorError};
 
@@ -61,7 +61,7 @@ impl Default for Endpoints {
 }
 
 pub struct CursorClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
     endpoints: Endpoints,
 }
 
@@ -71,11 +71,12 @@ impl CursorClient {
     }
 
     pub(super) fn with_endpoints(endpoints: Endpoints) -> Result<Self, CursorError> {
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| CursorError::ConnectionFailed)?;
+        let client = crate::http_client::ProviderClient::new("cursor", move |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+        })
+        .map_err(|_| CursorError::ConnectionFailed)?;
         Ok(Self { client, endpoints })
     }
 
@@ -96,6 +97,8 @@ impl CursorClient {
         self.send(
             "token-refresh",
             self.client
+                .current()
+                .map_err(|_| CursorError::ConnectionFailed)?
                 .post(&self.endpoints.refresh)
                 .header("Content-Type", "application/json")
                 .json(&serde_json::json!({
@@ -120,6 +123,8 @@ impl CursorClient {
         self.send(
             "request-usage",
             self.client
+                .current()
+                .map_err(|_| CursorError::ConnectionFailed)?
                 .get(url)
                 .header(
                     "Cookie",
@@ -140,6 +145,8 @@ impl CursorClient {
         self.send(
             "stripe",
             self.client
+                .current()
+                .map_err(|_| CursorError::ConnectionFailed)?
                 .get(&self.endpoints.stripe)
                 .header(
                     "Cookie",
@@ -160,6 +167,8 @@ impl CursorClient {
         self.send(
             "usage-summary",
             self.client
+                .current()
+                .map_err(|_| CursorError::ConnectionFailed)?
                 .get(&self.endpoints.usage_summary)
                 .header(
                     "Cookie",
@@ -187,6 +196,8 @@ impl CursorClient {
         self.send(
             "usage-csv",
             self.client
+                .current()
+                .map_err(|_| CursorError::ConnectionFailed)?
                 .get(url)
                 .header(
                     "Cookie",
@@ -207,6 +218,8 @@ impl CursorClient {
         self.send(
             label,
             self.client
+                .current()
+                .map_err(|_| CursorError::ConnectionFailed)?
                 .post(url)
                 .bearer_auth(access_token)
                 .header("Content-Type", "application/json")

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode};
+use reqwest::StatusCode;
 use serde_json::Value;
 
 use super::OpenCodeError;
@@ -14,7 +14,7 @@ pub(super) struct UsageResponse {
 }
 
 pub(super) struct OpenCodeClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
     usage_url: String,
 }
 
@@ -25,12 +25,13 @@ impl OpenCodeClient {
 
     fn with_endpoint(usage_url: &str, timeout: Duration) -> Result<Self, OpenCodeError> {
         Ok(Self {
-            client: crate::http_client::blocking_client_builder()
-                .connect_timeout(Duration::from_secs(8))
-                .timeout(timeout)
-                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .map_err(|_| OpenCodeError::ConnectionFailed)?,
+            client: crate::http_client::ProviderClient::new("opencode", move |builder| {
+                builder
+                    .connect_timeout(Duration::from_secs(8))
+                    .timeout(timeout)
+                    .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+            })
+            .map_err(|_| OpenCodeError::ConnectionFailed)?,
             usage_url: usage_url.into(),
         })
     }
@@ -39,6 +40,8 @@ impl OpenCodeClient {
         let started = std::time::Instant::now();
         let response = self
             .client
+            .current()
+            .map_err(|_| OpenCodeError::ConnectionFailed)?
             .get(&self.usage_url)
             .bearer_auth(api_key)
             .header("Accept", "application/json")

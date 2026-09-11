@@ -19,7 +19,7 @@ const DEFAULT_TOKEN_LIFETIME_SECONDS: f64 = 3_600.0;
 
 pub struct AntigravityClient {
     local: Client,
-    remote: Client,
+    remote: crate::http_client::ProviderClient,
     cloud_bases: Vec<String>,
     google_token_url: String,
 }
@@ -83,10 +83,10 @@ impl AntigravityClient {
                 .timeout(std::time::Duration::from_secs(5))
                 .build()
                 .map_err(|_| AntigravityError::Unavailable)?,
-            remote: crate::http_client::blocking_client_builder()
-                .timeout(remote_timeout)
-                .build()
-                .map_err(|_| AntigravityError::Unavailable)?,
+            remote: crate::http_client::ProviderClient::new("antigravity", move |builder| {
+                builder.timeout(remote_timeout)
+            })
+            .map_err(|_| AntigravityError::Unavailable)?,
             cloud_bases,
             google_token_url,
         })
@@ -144,9 +144,11 @@ impl AntigravityClient {
         body: Value,
         user_agent: CloudUserAgent,
     ) -> CloudOutcome {
+        let Ok(client) = self.remote.current() else {
+            return CloudOutcome::Unavailable;
+        };
         for base in &self.cloud_bases {
-            let response = self
-                .remote
+            let response = client
                 .post(format!("{base}{path}"))
                 .bearer_auth(token)
                 .header("Accept", "application/json")
@@ -179,9 +181,11 @@ impl AntigravityClient {
 
     pub fn refresh_google_token(&self, refresh_token: &str) -> RefreshOutcome {
         crate::app_info!("auth:antigravity", "token refresh attempt");
+        let Ok(client) = self.remote.current() else {
+            return RefreshOutcome::Unavailable;
+        };
         let client_secret = GOOGLE_CLIENT_SECRET_PARTS.concat();
-        let response = self
-            .remote
+        let response = client
             .post(&self.google_token_url)
             .form(&[
                 ("client_id", GOOGLE_CLIENT_ID),

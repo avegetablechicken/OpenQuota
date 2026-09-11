@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode};
+use reqwest::StatusCode;
 use serde_json::Value;
 
 use super::OpenRouterError;
@@ -15,7 +15,7 @@ pub struct EndpointResponse {
 }
 
 pub struct OpenRouterClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
     credits_url: String,
     key_url: String,
 }
@@ -30,12 +30,13 @@ impl OpenRouterClient {
         key_url: &str,
         timeout: Duration,
     ) -> Result<Self, OpenRouterError> {
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(timeout)
-            .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| OpenRouterError::ConnectionFailed)?;
+        let client = crate::http_client::ProviderClient::new("openrouter", move |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(timeout)
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+        })
+        .map_err(|_| OpenRouterError::ConnectionFailed)?;
         Ok(Self {
             client,
             credits_url: credits_url.to_owned(),
@@ -60,6 +61,8 @@ impl OpenRouterClient {
         let started = std::time::Instant::now();
         let response = self
             .client
+            .current()
+            .map_err(|_| OpenRouterError::ConnectionFailed)?
             .get(url)
             .bearer_auth(api_key)
             .header("Accept", "application/json")

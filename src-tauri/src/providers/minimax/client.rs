@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode};
+use reqwest::StatusCode;
 use serde_json::Value;
 
 use super::MiniMaxError;
@@ -14,7 +14,7 @@ pub struct EndpointResponse {
 }
 
 pub struct MiniMaxClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
     url: String,
 }
 
@@ -24,12 +24,13 @@ impl MiniMaxClient {
     }
 
     fn with_endpoint(url: &str, timeout: Duration) -> Result<Self, MiniMaxError> {
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(timeout)
-            .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| MiniMaxError::ConnectionFailed)?;
+        let client = crate::http_client::ProviderClient::new("minimax", move |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(timeout)
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+        })
+        .map_err(|_| MiniMaxError::ConnectionFailed)?;
         Ok(Self {
             client,
             url: url.to_owned(),
@@ -40,6 +41,8 @@ impl MiniMaxClient {
         let started = std::time::Instant::now();
         let response = self
             .client
+            .current()
+            .map_err(|_| MiniMaxError::ConnectionFailed)?
             .get(&self.url)
             .bearer_auth(api_key)
             .header("Accept", "application/json")

@@ -23,6 +23,20 @@ use crate::{
     tray_presentation,
 };
 
+#[tauri::command]
+pub async fn probe_provider_proxy(
+    registry: State<'_, Arc<ProviderRegistry>>,
+    provider_id: String,
+    proxy: String,
+) -> Result<crate::http_client::ProxyExitLocation, String> {
+    if registry.definition(&provider_id).is_none() {
+        return Err("Unknown provider.".to_owned());
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::http_client::proxy_exit_location(&proxy))
+        .await
+        .map_err(|_| "The proxy exit location could not be detected.".to_owned())?
+}
+
 fn resolve_provider_link<'a>(
     registry: &'a ProviderRegistry,
     provider_id: &str,

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick, type Snippet } from 'svelte';
   import {
     clearSub2ApiConfig,
     deleteSub2ApiConfig,
@@ -17,6 +17,7 @@
   interface Props {
     providerId: string;
     onRemove?: () => void;
+    children?: Snippet;
   }
 
   interface ConnectionDraft {
@@ -39,7 +40,7 @@
     };
   }
 
-  let { providerId, onRemove = () => {} }: Props = $props();
+  let { providerId, onRemove = () => {}, children }: Props = $props();
 
   let connectionState = $state<Sub2ApiConfigState>({
     configured: false,
@@ -570,6 +571,8 @@
     </div>
   </div>
 </section>
+
+{@render children?.()}
 
 <section class="sub2api-item-actions" aria-label="Sub2API Item">
   <button

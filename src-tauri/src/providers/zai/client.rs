@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode, Url};
+use reqwest::{StatusCode, Url};
 use serde_json::Value;
 
 use super::ZaiError;
@@ -23,7 +23,7 @@ pub struct ZaiResponse {
 }
 
 pub struct ZaiClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
     subscription_url: String,
     quota_url: String,
     legacy_usage_url: String,
@@ -48,12 +48,13 @@ impl ZaiClient {
         credit_usage_url: &str,
         timeout: Duration,
     ) -> Result<Self, ZaiError> {
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(timeout)
-            .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| ZaiError::ConnectionFailed)?;
+        let client = crate::http_client::ProviderClient::new("zai", move |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(timeout)
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+        })
+        .map_err(|_| ZaiError::ConnectionFailed)?;
         Ok(Self {
             client,
             subscription_url: subscription_url.to_owned(),
@@ -95,6 +96,8 @@ impl ZaiClient {
         }
         let request = self
             .client
+            .current()
+            .map_err(|_| ZaiError::ConnectionFailed)?
             .get(url)
             .bearer_auth(api_key)
             .header("Accept", "application/json");
@@ -104,6 +107,8 @@ impl ZaiClient {
     fn fetch(&self, url: &str, api_key: &str, endpoint: &str) -> Result<ZaiResponse, ZaiError> {
         let request = self
             .client
+            .current()
+            .map_err(|_| ZaiError::ConnectionFailed)?
             .get(url)
             .bearer_auth(api_key)
             .header("Accept", "application/json");

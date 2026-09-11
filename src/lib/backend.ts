@@ -5,6 +5,7 @@ import type {
   AppSettings,
   BootstrapState,
   ProviderApiKeyState,
+  ProxyExitLocation,
   ResetClaimOutcome,
   SettingsViewState,
   Sub2ApiConfigInput,
@@ -209,4 +210,8 @@ export function onMainWindowHidden(handler: PayloadHandler<void>) {
 
 export function onUpdateProgress(handler: PayloadHandler<UpdateProgress>) {
   return onEvent('update-progress', handler);
+}
+
+export function probeProviderProxy(providerId: string, proxy: string) {
+  return invoke<ProxyExitLocation>('probe_provider_proxy', { providerId, proxy });
 }

@@ -465,14 +465,21 @@ struct Sub2ApiClient {
 }
 
 impl Sub2ApiClient {
+    #[cfg(test)]
     fn new(base_url: &str) -> Result<Self, Sub2ApiError> {
+        Self::for_provider(base_url, "sub2api")
+    }
+
+    fn for_provider(base_url: &str, provider_id: &str) -> Result<Self, Sub2ApiError> {
         let base_url = normalize_base_url(base_url)?;
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(20))
-            .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| transport_error("client setup", &error))?;
+        let client = crate::http_client::ProviderClient::new(provider_id, |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(Duration::from_secs(20))
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+        })
+        .and_then(|client| client.current())
+        .map_err(|error| transport_error("client setup", &error))?;
         Ok(Self { client, base_url })
     }
 
@@ -774,7 +781,7 @@ impl Sub2ApiProvider {
     }
 
     fn connect(&self, config: &StoredConfig) -> Result<CachedSession, Sub2ApiError> {
-        let client = Sub2ApiClient::new(&config.base_url)?;
+        let client = Sub2ApiClient::for_provider(&config.base_url, &self.provider_id)?;
         let login = client.login(&config.email, &config.password)?;
         Ok(CachedSession {
             scope: session_scope(config),
@@ -801,7 +808,7 @@ impl Sub2ApiProvider {
     }
 
     fn refresh_snapshot(&self, config: &StoredConfig) -> Result<ProviderSnapshot, Sub2ApiError> {
-        let client = Sub2ApiClient::new(&config.base_url)?;
+        let client = Sub2ApiClient::for_provider(&config.base_url, &self.provider_id)?;
         let mut session = self.session(config)?;
         let accounts = match client.accounts(session.token.as_str(), config.upstream) {
             Err(Sub2ApiError::Authentication) => {

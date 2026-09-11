@@ -78,6 +78,7 @@ impl SettingsService {
             account_revision: AtomicU64::new(0),
             active_account_identities: RwLock::new(HashMap::new()),
         };
+        crate::http_client::set_provider_proxies(&service.get().provider_proxies);
         service.activate_launch_accounts()?;
         Ok(service)
     }
@@ -137,6 +138,7 @@ impl SettingsService {
             account_revision: AtomicU64::new(0),
             active_account_identities: RwLock::new(HashMap::new()),
         };
+        crate::http_client::set_provider_proxies(&service.get().provider_proxies);
         service.activate_launch_accounts()?;
         let plan = CredentialDetectionPlan {
             provider_ids,
@@ -360,6 +362,13 @@ impl SettingsService {
                 "Settings changed before they could be saved. Please try again.".to_owned(),
             );
         }
+        settings.provider_proxies.retain(|id, url| {
+            *url = url.trim().to_owned();
+            self.registry.definition(id).is_some() && !url.is_empty()
+        });
+        for url in settings.provider_proxies.values() {
+            crate::http_client::validate_provider_proxy(url)?;
+        }
         let enabled_before = enabled_provider_set(&current);
         let detected = current
             .providers
@@ -396,6 +405,7 @@ impl SettingsService {
             .save_settings_with_account_updates(settings, &account_updates)
             .map_err(|_| "OpenQuota settings could not be saved.".to_owned())?;
         let enablement_changed = enabled_provider_set(settings) != enabled_before;
+        crate::http_client::set_provider_proxies(&settings.provider_proxies);
         current.clone_from(settings);
         if enablement_changed {
             self.enablement_revision.fetch_add(1, Ordering::SeqCst);
@@ -639,9 +649,11 @@ impl SettingsService {
         provider.enabled = false;
         provider.detected = false;
         provider.expanded = false;
+        next.provider_proxies.remove(provider_id);
         self.storage
             .save_settings(&next)
             .map_err(|_| "OpenQuota settings could not be saved.".to_owned())?;
+        crate::http_client::set_provider_proxies(&next.provider_proxies);
         current.clone_from(&next);
         if enabled_provider_set(&next) != enabled_before {
             self.enablement_revision.fetch_add(1, Ordering::SeqCst);

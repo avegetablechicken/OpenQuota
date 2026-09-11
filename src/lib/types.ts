@@ -253,6 +253,8 @@ export interface AppSettings {
   providers: ProviderLayout[];
   knownProviderIds: string[];
   providerNames: Record<string, string>;
+  /** Proxy URL or "direct"; absent entries use system routing. */
+  providerProxies?: Record<string, string>;
   showTotalSpend: boolean;
   theme: 'system' | 'light' | 'dark';
   density: 'default' | 'compact';
@@ -314,4 +316,9 @@ export interface BootstrapState {
   usage: UsageViewState;
   settings: SettingsViewState;
   catalog: ProviderCatalog;
+}
+
+export interface ProxyExitLocation {
+  ip: string;
+  countryCode: string;
 }

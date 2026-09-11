@@ -4,6 +4,192 @@ pub fn blocking_client_builder() -> ClientBuilder {
     platform::configure(Client::builder())
 }
 
+/// Persisted override: absent means system routing, `direct` disables every proxy,
+/// and any other value is a validated proxy URL.
+pub const DIRECT_PROXY: &str = "direct";
+
+pub fn validate_provider_proxy(value: &str) -> Result<(), String> {
+    if value == DIRECT_PROXY {
+        Ok(())
+    } else {
+        validate_proxy_url(value)
+    }
+}
+
+// Each client retains its provider ID, including independently configured account slots.
+static PROVIDER_PROXIES: std::sync::RwLock<std::collections::BTreeMap<String, String>> =
+    std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+pub fn set_provider_proxies(proxies: &std::collections::BTreeMap<String, String>) {
+    *PROVIDER_PROXIES
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = proxies.clone();
+}
+
+pub fn validate_proxy_url(value: &str) -> Result<(), String> {
+    let invalid = || {
+        "Enter a valid HTTP, HTTPS, SOCKS5 or SOCKS5H proxy URL without a path, query or fragment."
+            .to_owned()
+    };
+    let url = reqwest::Url::parse(value).map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+        || url.host_str().is_none()
+        || url.port() == Some(0)
+        || !matches!(url.path(), "" | "/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    reqwest::Proxy::all(value).map_err(|_| invalid())?;
+    Ok(())
+}
+
+fn client_builder_for_proxy(proxy: Option<&str>) -> Result<ClientBuilder, reqwest::Error> {
+    Ok(match proxy {
+        Some(DIRECT_PROXY) => Client::builder().no_proxy(),
+        Some(url) => Client::builder()
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(url)?),
+        None => blocking_client_builder(),
+    })
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyExitLocation {
+    pub ip: String,
+    pub country_code: String,
+}
+
+const PROXY_LOCATION_ERROR: &str = "The proxy exit location could not be detected.";
+
+pub fn proxy_exit_location(proxy: &str) -> Result<ProxyExitLocation, String> {
+    validate_provider_proxy(proxy)?;
+    let client = client_builder_for_proxy(Some(proxy))
+        .and_then(|builder| {
+            builder
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(concat!("OpenQuota/", env!("CARGO_PKG_VERSION")))
+                .build()
+        })
+        .map_err(|_| PROXY_LOCATION_ERROR.to_owned())?;
+    // Only the fixed diagnostic endpoint is contacted; no provider credentials are attached.
+    query_proxy_exit(&client, "https://www.cloudflare.com/cdn-cgi/trace")
+}
+
+fn query_proxy_exit(client: &Client, endpoint: &str) -> Result<ProxyExitLocation, String> {
+    use std::io::Read;
+    let response = client
+        .get(endpoint)
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|_| PROXY_LOCATION_ERROR.to_owned())?;
+    if !response.status().is_success() {
+        return Err(PROXY_LOCATION_ERROR.to_owned());
+    }
+    let mut body = String::new();
+    response
+        .take(4097)
+        .read_to_string(&mut body)
+        .map_err(|_| PROXY_LOCATION_ERROR.to_owned())?;
+    if body.len() > 4096 {
+        return Err(PROXY_LOCATION_ERROR.to_owned());
+    }
+    parse_proxy_exit(&body).ok_or_else(|| PROXY_LOCATION_ERROR.to_owned())
+}
+
+fn parse_proxy_exit(body: &str) -> Option<ProxyExitLocation> {
+    let mut ip = None;
+    let mut country_code = None;
+    for line in body.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "ip" => {
+                ip = value
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+                    .map(|ip| ip.to_string())
+            }
+            "loc"
+                if value.len() == 2
+                    && value.bytes().all(|byte| byte.is_ascii_uppercase())
+                    && !matches!(value, "XX" | "ZZ") =>
+            {
+                country_code = Some(value.to_owned())
+            }
+            _ => {}
+        }
+    }
+    Some(ProxyExitLocation {
+        ip: ip?,
+        country_code: country_code?,
+    })
+}
+
+type ClientFactory = dyn Fn(ClientBuilder) -> ClientBuilder + Send + Sync;
+type CachedClient = Option<(Option<String>, Client)>;
+
+#[derive(Clone)]
+pub struct ProviderClient {
+    provider_id: String,
+    configure: std::sync::Arc<ClientFactory>,
+    cached: std::sync::Arc<std::sync::Mutex<CachedClient>>,
+}
+
+impl ProviderClient {
+    pub fn new(
+        provider_id: &str,
+        configure: impl Fn(ClientBuilder) -> ClientBuilder + Send + Sync + 'static,
+    ) -> Result<Self, reqwest::Error> {
+        let client = Self {
+            provider_id: provider_id.to_owned(),
+            configure: std::sync::Arc::new(configure),
+            cached: Default::default(),
+        };
+        client.current()?;
+        Ok(client)
+    }
+
+    pub fn for_provider(&self, provider_id: &str) -> Self {
+        Self {
+            provider_id: provider_id.to_owned(),
+            configure: self.configure.clone(),
+            cached: Default::default(),
+        }
+    }
+
+    pub fn current(&self) -> Result<Client, reqwest::Error> {
+        let proxy = PROVIDER_PROXIES
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.provider_id)
+            .cloned();
+        self.current_with_proxy(proxy)
+    }
+
+    fn current_with_proxy(&self, proxy: Option<String>) -> Result<Client, reqwest::Error> {
+        let mut cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((previous, client)) = cached.as_ref() {
+            if previous == &proxy {
+                return Ok(client.clone());
+            }
+        }
+        let builder = client_builder_for_proxy(proxy.as_deref())?;
+        let client = (self.configure)(builder).build()?;
+        *cached = Some((proxy, client.clone()));
+        Ok(client)
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn warm_system_proxy_credentials() {
     platform::warm_system_proxy_credentials();
@@ -1200,5 +1386,153 @@ mod platform {
                 .password()
                 .is_some_and(|password| !password.is_empty()));
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_proxy_tests {
+    use super::{validate_provider_proxy, validate_proxy_url, ProviderClient, DIRECT_PROXY};
+    use crate::providers::test_http::serve_once;
+    use std::time::Duration;
+
+    #[test]
+    fn exit_location_requires_a_real_ip_and_country_not_the_datacenter() {
+        let result = super::parse_proxy_exit("ip=203.0.113.7\ncolo=NRT\nloc=US\n").unwrap();
+        assert_eq!(result.ip, "203.0.113.7");
+        assert_eq!(result.country_code, "US");
+        assert_eq!(
+            super::parse_proxy_exit("ip=2001:db8::1\nloc=HK\n")
+                .unwrap()
+                .country_code,
+            "HK"
+        );
+        for body in [
+            "ip=bad\nloc=US",
+            "ip=203.0.113.7\ncolo=NRT",
+            "ip=203.0.113.7\nloc=XX",
+            "ip=203.0.113.7\nloc=USA",
+            "<html>error</html>",
+        ] {
+            assert!(super::parse_proxy_exit(body).is_none());
+        }
+    }
+
+    #[test]
+    fn exit_probe_uses_the_explicit_proxy_and_direct_routes() {
+        let proxy = serve_once(200, &[], "ip=203.0.113.7\nloc=JP\n");
+        let proxied = super::client_builder_for_proxy(Some(&proxy))
+            .unwrap()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        assert_eq!(
+            super::query_proxy_exit(&proxied, "http://unresolvable.invalid/cdn-cgi/trace")
+                .unwrap()
+                .country_code,
+            "JP"
+        );
+        let direct = super::client_builder_for_proxy(Some(DIRECT_PROXY))
+            .unwrap()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let endpoint = serve_once(200, &[], "ip=2001:db8::1\nloc=DE\n");
+        assert_eq!(
+            super::query_proxy_exit(&direct, &endpoint)
+                .unwrap()
+                .country_code,
+            "DE"
+        );
+        for endpoint in [
+            serve_once(429, &[], "rate limited"),
+            serve_once(200, &[], &"x".repeat(4097)),
+            serve_once(200, &[], "ip=203.0.113.7\nloc=XX"),
+        ] {
+            assert_eq!(
+                super::query_proxy_exit(&direct, &endpoint).unwrap_err(),
+                super::PROXY_LOCATION_ERROR
+            );
+        }
+    }
+
+    #[test]
+    fn validates_supported_proxy_endpoints_without_echoing_credentials() {
+        assert!(validate_provider_proxy(DIRECT_PROXY).is_ok());
+        assert!(validate_proxy_url(DIRECT_PROXY).is_err());
+        for value in [
+            "http://127.0.0.1:7890",
+            "https://proxy.example",
+            "socks5://localhost:1080",
+            "socks5h://user:pass@[::1]:1080",
+        ] {
+            assert!(validate_proxy_url(value).is_ok(), "{value}");
+        }
+        for value in [
+            "localhost:7890",
+            "ftp://proxy.example",
+            "http://localhost:0",
+            "http://localhost/path",
+            "http://localhost?secret",
+            "http://localhost#secret",
+        ] {
+            let error = validate_proxy_url(value).unwrap_err();
+            assert!(!error.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn switches_proxy_connections_and_restores_default_client() {
+        let client = ProviderClient::new("proxy-test", |builder| {
+            builder.timeout(Duration::from_secs(2))
+        })
+        .unwrap();
+        let other = client.for_provider("proxy-test-other");
+        let first = serve_once(200, &[], "first");
+        let second = serve_once(200, &[], "second");
+        let target = "http://unresolvable.invalid/usage";
+        assert_eq!(
+            client
+                .current_with_proxy(Some(first))
+                .unwrap()
+                .get(target)
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "first"
+        );
+        assert_eq!(
+            client
+                .current_with_proxy(Some(second))
+                .unwrap()
+                .get(target)
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "second"
+        );
+        let direct_target = serve_once(200, &[], "direct response");
+        assert_eq!(
+            client
+                .current_with_proxy(Some(DIRECT_PROXY.into()))
+                .unwrap()
+                .get(direct_target)
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "direct response"
+        );
+        assert_eq!(
+            client.cached.lock().unwrap().as_ref().unwrap().0.as_deref(),
+            Some(DIRECT_PROXY)
+        );
+        assert!(other.cached.lock().unwrap().is_none());
+        client.current_with_proxy(None).unwrap();
+        assert!(client.cached.lock().unwrap().as_ref().unwrap().0.is_none());
+        assert!(client
+            .current_with_proxy(Some("not a proxy URL".into()))
+            .is_err());
     }
 }

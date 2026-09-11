@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{blocking::Client, StatusCode, Url};
+use reqwest::{StatusCode, Url};
 use serde_json::Value;
 
 use super::CopilotError;
@@ -16,7 +16,7 @@ pub(super) struct CopilotResponse {
 }
 
 pub(super) struct CopilotClient {
-    client: Client,
+    client: crate::http_client::ProviderClient,
     usage_url: String,
     orgs_url: String,
     api_base_url: String,
@@ -33,11 +33,12 @@ impl CopilotClient {
         api_base_url: &str,
         timeout: Duration,
     ) -> Result<Self, CopilotError> {
-        let client = crate::http_client::blocking_client_builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(timeout)
-            .build()
-            .map_err(|_| CopilotError::ConnectionFailed)?;
+        let client = crate::http_client::ProviderClient::new("copilot", move |builder| {
+            builder
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(timeout)
+        })
+        .map_err(|_| CopilotError::ConnectionFailed)?;
         Url::parse(usage_url).map_err(|_| CopilotError::InvalidResponse)?;
         Url::parse(orgs_url).map_err(|_| CopilotError::InvalidResponse)?;
         Url::parse(api_base_url).map_err(|_| CopilotError::InvalidResponse)?;
@@ -53,6 +54,8 @@ impl CopilotClient {
         let started = std::time::Instant::now();
         let response = self
             .client
+            .current()
+            .map_err(|_| CopilotError::ConnectionFailed)?
             .get(&self.usage_url)
             .header("Authorization", format!("token {token}"))
             .header("Accept", "application/json")
@@ -115,6 +118,8 @@ impl CopilotClient {
         let started = std::time::Instant::now();
         let response = self
             .client
+            .current()
+            .map_err(|_| CopilotError::ConnectionFailed)?
             .get(url)
             .header("Authorization", format!("token {token}"))
             .header("Accept", "application/vnd.github+json")

@@ -204,6 +204,7 @@ pub(crate) fn runtimes(
     Ok(runtime_configs(discovery)
         .into_iter()
         .map(|config| {
+            let client = client.for_provider(&config.definition.id);
             Arc::new(ClaudeProvider::new_scoped(
                 config,
                 storage.clone(),

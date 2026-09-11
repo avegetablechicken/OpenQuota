@@ -5,6 +5,7 @@
   import type { AppSettings, MetricLayout, MetricSection, ProviderLayout } from './types';
   import Icon from './Icon.svelte';
   import ProviderApiKeySection from './ProviderApiKeySection.svelte';
+  import ProviderProxySection from './ProviderProxySection.svelte';
   import ProviderNameSection from './ProviderNameSection.svelte';
   import Sub2ApiConfigSection from './Sub2ApiConfigSection.svelte';
   import { reorderFlip } from './motion';
@@ -233,12 +234,15 @@
       </div>
     {/each}
     {#if catalog.supportsConnectionConfiguration(provider.id)}
-      <Sub2ApiConfigSection providerId={provider.id} onRemove={onProviderRemoved} />
+      <Sub2ApiConfigSection providerId={provider.id} onRemove={onProviderRemoved}>
+        <ProviderProxySection {settings} {provider} {onChange} />
+      </Sub2ApiConfigSection>
     {:else}
       <ProviderApiKeySection
         providerId={provider.id}
         providerName={providerDisplayName(provider.id)}
       />
+      <ProviderProxySection {settings} {provider} {onChange} />
     {/if}
     {#if message}
       <div class:denied={messageKind === 'denied'} class="customization-pill" role="status">

@@ -709,6 +709,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap::get_bootstrap_state,
             commands::provider::open_provider_link,
+            commands::provider::probe_provider_proxy,
             commands::provider::get_provider_api_key_state,
             commands::provider::save_provider_api_key,
             commands::provider::delete_provider_api_key,
