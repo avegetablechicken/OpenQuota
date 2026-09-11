@@ -83,27 +83,33 @@ describe('CustomizeProviderList Sub2API labels', () => {
     forgetSub2ApiUpstream('sub2api@3');
   });
 
-  it('keeps the metric count when the upstream category is unique', async () => {
-    render(CustomizeProviderList, {
-      settings,
-      catalog: new ProviderCatalogIndex(catalog),
-      onOpen: vi.fn(),
-      onChange: vi.fn(),
-      onReorderStart: vi.fn(),
-      onReorderEnd: vi.fn(),
-      onSettings: vi.fn(),
-      reducedMotion: false,
-    });
+  it.each([true, false])(
+    'shows the base URL for a unique upstream (enabled: %s)',
+    async (enabled) => {
+      render(CustomizeProviderList, {
+        settings: {
+          ...settings,
+          providers: settings.providers.map((provider) => ({ ...provider, enabled })),
+        },
+        catalog: new ProviderCatalogIndex(catalog),
+        onOpen: vi.fn(),
+        onChange: vi.fn(),
+        onReorderStart: vi.fn(),
+        onReorderEnd: vi.fn(),
+        onSettings: vi.fn(),
+        reducedMotion: false,
+      });
 
-    expect(await screen.findByText('Sub2API 2')).toBeInTheDocument();
-    expect(screen.queryByText('192.0.2.8:6060')).not.toBeInTheDocument();
-    expect(await screen.findByText('2 metrics')).toBeInTheDocument();
-    expect(mocks.invoke).toHaveBeenCalledWith('get_sub2api_config_state', {
-      providerId: 'sub2api@2',
-    });
-  });
+      expect(await screen.findByText('Sub2API 2')).toBeInTheDocument();
+      expect(await screen.findByText('192.0.2.8:6060')).toBeInTheDocument();
+      expect(screen.queryByText(/\d+ metrics/)).not.toBeInTheDocument();
+      expect(mocks.invoke).toHaveBeenCalledWith('get_sub2api_config_state', {
+        providerId: 'sub2api@2',
+      });
+    },
+  );
 
-  it('shows endpoints only when another item uses the same upstream category', async () => {
+  it('shows endpoints for every configuration sharing an upstream category', async () => {
     const duplicateCatalog = structuredClone(catalog);
     duplicateCatalog.providers.push({
       ...duplicateCatalog.providers[0],

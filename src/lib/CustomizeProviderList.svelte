@@ -45,23 +45,9 @@
           provider.detected),
     ),
   );
-  const repeatedSub2ApiUpstreams = $derived.by(() => {
-    const upstreams = visibleProviders.flatMap((provider) => {
-      if (
-        !catalog.supportsConnectionConfiguration(provider.id) ||
-        !$sub2ApiEndpoints[provider.id]
-      ) {
-        return [];
-      }
-      const upstream = $sub2ApiUpstreams[provider.id];
-      return upstream ? [upstream] : [];
-    });
-    return upstreams.filter((upstream, index) => upstreams.indexOf(upstream) !== index);
-  });
   function providerListSubtitle(provider: ProviderLayout) {
-    const upstream = $sub2ApiUpstreams[provider.id];
-    if (upstream && repeatedSub2ApiUpstreams.includes(upstream)) {
-      return $sub2ApiEndpoints[provider.id] ?? `${availableMetricCount(provider)} metrics`;
+    if (catalog.supportsConnectionConfiguration(provider.id)) {
+      return $sub2ApiEndpoints[provider.id] ?? 'Base URL unavailable';
     }
     return `${availableMetricCount(provider)} metrics`;
   }
