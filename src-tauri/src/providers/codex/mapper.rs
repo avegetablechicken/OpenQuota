@@ -522,6 +522,7 @@ mod tests {
             )
             .unwrap();
             ProviderSnapshot {
+                accounts: None,
                 provider_id: "codex".into(),
                 plan: mapped.plan,
                 quotas: mapped.quotas,

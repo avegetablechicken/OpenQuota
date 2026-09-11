@@ -695,13 +695,23 @@ fn normalize_quota_availability(
 fn validate_snapshot(
     registry: &ProviderRegistry,
     provider_id: &str,
-    snapshot: ProviderSnapshot,
+    mut snapshot: ProviderSnapshot,
 ) -> Result<ProviderSnapshot, ProviderError> {
     let Some(definition) = registry.definition(provider_id) else {
         return Err(snapshot_contract_error());
     };
     if snapshot.provider_id != provider_id {
         return Err(snapshot_contract_error());
+    }
+
+    if let Some(accounts) = &mut snapshot.accounts {
+        let mut ids = std::collections::HashSet::new();
+        for account in accounts {
+            if !ids.insert(account.id.clone()) || account.snapshot.accounts.is_some() {
+                return Err(snapshot_contract_error());
+            }
+            account.snapshot = validate_snapshot(registry, provider_id, account.snapshot.clone())?;
+        }
     }
 
     let quota_sources = definition
@@ -800,15 +810,28 @@ fn usage_data_changed(
 
         match (previous_snapshot, current_snapshot) {
             (None, Some(snapshot)) => snapshot_has_usage_data(snapshot),
-            (Some(previous), Some(current)) => {
-                previous.quotas != current.quotas
-                    || previous.value_metrics != current.value_metrics
-                    || previous.status_metrics != current.status_metrics
-                    || previous.usage_histories != current.usage_histories
-            }
+            (Some(previous), Some(current)) => snapshot_usage_changed(previous, current),
             _ => false,
         }
     })
+}
+
+fn snapshot_usage_changed(previous: &ProviderSnapshot, current: &ProviderSnapshot) -> bool {
+    previous.quotas != current.quotas
+        || previous.value_metrics != current.value_metrics
+        || previous.status_metrics != current.status_metrics
+        || previous.usage_histories != current.usage_histories
+        || match (&previous.accounts, &current.accounts) {
+            (None, None) => false,
+            (Some(previous), Some(current)) => {
+                previous.len() != current.len()
+                    || previous.iter().zip(current).any(|(previous, current)| {
+                        previous.id != current.id
+                            || snapshot_usage_changed(&previous.snapshot, &current.snapshot)
+                    })
+            }
+            _ => true,
+        }
 }
 
 fn refresh_interval_for(
@@ -1168,6 +1191,7 @@ mod tests {
 
     fn test_snapshot(provider_id: &str) -> ProviderSnapshot {
         ProviderSnapshot {
+            accounts: None,
             provider_id: provider_id.into(),
             plan: None,
             quotas: Vec::new(),
@@ -1211,6 +1235,7 @@ mod tests {
     #[test]
     fn failed_refresh_preserves_last_successful_snapshot_without_forcing_stale() {
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "codex".into(),
             plan: None,
             quotas: Vec::new(),

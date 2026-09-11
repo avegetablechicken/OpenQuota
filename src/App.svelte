@@ -42,6 +42,7 @@
   import { horizontalPageTransition, shouldSlideBetweenScreens } from './lib/pageTransition';
   import { desktopPlatform, shortcutLabels } from './lib/platform';
   import { withProviderName } from './lib/providerNames';
+  import { sub2ApiUpstreamAccountName } from './lib/sub2ApiUpstreams';
   import RenameProviderSheet from './lib/RenameProviderSheet.svelte';
   import {
     buildProviderShareRows,
@@ -426,12 +427,17 @@
   async function shareProvider(
     providerId: string,
     viewMode: import('./lib/types').UsageViewMode = 'all',
+    accountId?: string,
   ) {
     const current = settingsState;
     if (!current) return;
-    const card = document.querySelector<HTMLElement>(`[data-provider-id="${providerId}"]`);
+    const card = document.querySelector<HTMLElement>(
+      `[data-provider-id="${providerId}"]${accountId ? ` [data-account-id="${accountId}"]` : ''}`,
+    );
     if (!card) return;
-    const provider = viewState.providers[providerId]?.snapshot;
+    const parentSnapshot = viewState.providers[providerId]?.snapshot;
+    const account = parentSnapshot?.accounts?.find((account) => account.id === accountId);
+    const provider = account?.snapshot ?? parentSnapshot;
     const layout = current.settings.providers.find((item) => item.id === providerId);
     if (!provider || !layout) return;
     const snapshot = [providerDisplayName(providerId), card.innerText.trim()].join('\n');
@@ -447,7 +453,9 @@
       const canvas = renderProviderShareCard(catalog, {
         providerId,
         providerNames: current.settings.providerNames,
-        plan: provider.plan,
+        plan: account
+          ? [sub2ApiUpstreamAccountName(account.name), provider.plan].filter(Boolean).join(' · ')
+          : provider.plan,
         rows,
       });
       await copyCanvas(canvas, snapshot);

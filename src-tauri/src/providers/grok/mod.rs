@@ -214,6 +214,7 @@ impl GrokProvider {
             &mut warnings,
         );
         Ok(ProviderSnapshot {
+            accounts: None,
             provider_id: "grok".into(),
             plan,
             quotas: mapped.quotas,

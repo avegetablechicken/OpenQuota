@@ -109,6 +109,7 @@ export interface UsageHistories {
 }
 
 export interface ProviderSnapshot {
+  accounts?: Array<{ id: string; name: string; snapshot: ProviderSnapshot }>;
   providerId: string;
   plan: string | null;
   quotas: QuotaWindow[];

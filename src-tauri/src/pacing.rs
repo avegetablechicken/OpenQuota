@@ -691,6 +691,7 @@ mod tests {
             ..AppSettings::default()
         };
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "custom".into(),
             plan: None,
             quotas: vec![QuotaWindow {
@@ -784,6 +785,7 @@ mod tests {
         let now = Utc::now();
         let resets_at = now + Duration::hours(4);
         let snapshot = |source_id: &str, label: &str, used_percent: f64| ProviderSnapshot {
+            accounts: None,
             provider_id: "switching".into(),
             plan: None,
             quotas: vec![QuotaWindow {

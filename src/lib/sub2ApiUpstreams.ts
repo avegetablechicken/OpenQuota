@@ -137,3 +137,7 @@ export function forgetSub2ApiUpstream(providerId: string) {
     return next;
   });
 }
+
+export function sub2ApiUpstreamAccountName(name: string): string {
+  return name.replace(/^Sub2API · (?:Codex|Claude) · /, '');
+}

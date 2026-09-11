@@ -152,6 +152,7 @@ mod tests {
     fn refresh_error_does_not_hide_the_retained_notification_snapshot() {
         let state = ProviderViewState {
             snapshot: Some(ProviderSnapshot {
+                accounts: None,
                 provider_id: "codex".into(),
                 plan: None,
                 quotas: Vec::new(),

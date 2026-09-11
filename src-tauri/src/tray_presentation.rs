@@ -173,20 +173,31 @@ fn apply_mac_menu_bar_presentation(
 
 #[cfg(any(target_os = "macos", test))]
 fn bar_groups(groups: &[TrayGroup]) -> Vec<crate::menu_bar::BarGroup> {
+    let mut provider_ids = Vec::new();
     groups
         .iter()
-        .map(|group| crate::menu_bar::BarGroup {
-            provider_id: group.provider_id.clone(),
-            upstream_provider_id: group.upstream_provider_id.clone(),
-            fractions: group
+        .filter_map(|group| {
+            let fractions = group
                 .metrics
                 .iter()
                 .filter_map(|metric| metric.gauge.map(|gauge| gauge.display_fraction))
                 .take(crate::settings::MAX_PINS_PER_PROVIDER)
-                .collect(),
+                .collect::<Vec<_>>();
+            if fractions.is_empty() {
+                return None;
+            }
+            if !provider_ids.contains(&group.provider_id.as_str()) {
+                if provider_ids.len() == crate::menu_bar::MAX_BARS {
+                    return None;
+                }
+                provider_ids.push(group.provider_id.as_str());
+            }
+            Some(crate::menu_bar::BarGroup {
+                provider_id: group.provider_id.clone(),
+                upstream_provider_id: group.upstream_provider_id.clone(),
+                fractions,
+            })
         })
-        .filter(|group| !group.fractions.is_empty())
-        .take(crate::menu_bar::MAX_BARS)
         .collect()
 }
 
@@ -234,28 +245,56 @@ fn resolved_groups(
             let provider_name = registry
                 .display_name(&definition.id, settings)
                 .unwrap_or_else(|| settings.provider_display_name(definition).to_owned());
-            let metrics = provider
-                .metrics
-                .iter()
-                .filter(|metric| metric.pinned)
-                .filter_map(|metric| {
-                    let metric_definition = registry.metric(&metric.id)?;
-                    let mut resolved =
-                        tray_metric(metric_definition, snapshot, settings.usage_display)?;
-                    resolved.detail = format!("{} {}", provider_name, resolved.detail);
-                    Some(resolved)
-                })
-                .collect::<Vec<_>>();
-            (!metrics.is_empty()).then_some(TrayGroup {
-                #[cfg(any(target_os = "macos", test))]
-                provider_id: definition.id.clone(),
-                #[cfg(any(target_os = "macos", test))]
-                upstream_provider_id: registry
-                    .upstream_provider_id(&definition.id)
-                    .map(str::to_owned),
-                metrics,
-            })
+            let snapshots = match &snapshot.accounts {
+                Some(accounts) => accounts
+                    .iter()
+                    .map(|account| {
+                        let account_name = account
+                            .name
+                            .strip_prefix("Sub2API · Codex · ")
+                            .or_else(|| account.name.strip_prefix("Sub2API · Claude · "))
+                            .unwrap_or(&account.name);
+                        (
+                            &account.snapshot,
+                            format!("{provider_name} · {account_name}"),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                None => vec![(snapshot, provider_name)],
+            };
+            Some(
+                snapshots
+                    .into_iter()
+                    .filter_map(|(snapshot, name)| {
+                        let metrics = provider
+                            .metrics
+                            .iter()
+                            .filter(|metric| metric.pinned)
+                            .filter_map(|metric| {
+                                let metric_definition = registry.metric(&metric.id)?;
+                                let mut resolved = tray_metric(
+                                    metric_definition,
+                                    snapshot,
+                                    settings.usage_display,
+                                )?;
+                                resolved.detail = format!("{} {}", name, resolved.detail);
+                                Some(resolved)
+                            })
+                            .collect::<Vec<_>>();
+                        (!metrics.is_empty()).then_some(TrayGroup {
+                            #[cfg(any(target_os = "macos", test))]
+                            provider_id: definition.id.clone(),
+                            #[cfg(any(target_os = "macos", test))]
+                            upstream_provider_id: registry
+                                .upstream_provider_id(&definition.id)
+                                .map(str::to_owned),
+                            metrics,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
         })
+        .flatten()
         .collect()
 }
 
@@ -687,8 +726,38 @@ mod tests {
     }
 
     #[test]
+    fn bar_limit_counts_connections_not_upstream_accounts() {
+        let groups = [
+            "sub2api", "sub2api", "sub2api", "sub2api", "sub2api", "codex", "claude", "cursor",
+            "grok",
+        ]
+        .into_iter()
+        .map(|id| TrayGroup {
+            provider_id: id.into(),
+            upstream_provider_id: None,
+            metrics: vec![TrayMetric {
+                value: "50%".into(),
+                detail: String::new(),
+                gauge: Some(TrayGauge {
+                    display_fraction: 0.5,
+                    remaining_fraction: 0.5,
+                }),
+            }],
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(
+            bar_groups(&groups)
+                .iter()
+                .map(|group| group.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            ["sub2api", "sub2api", "sub2api", "sub2api", "sub2api", "codex", "claude", "cursor"]
+        );
+    }
+
+    #[test]
     fn pinned_quota_metrics_resolve_in_layout_order() {
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "codex".into(),
             plan: None,
             quotas: vec![
@@ -795,11 +864,77 @@ mod tests {
                 fractions: vec![0.25, 0.6],
             }]
         );
+
+        let template = state.providers["codex"].snapshot.as_ref().unwrap().clone();
+        let mut settings = default_settings(&catalog, &HashSet::from(["codex".to_owned()]));
+        settings
+            .provider_names
+            .insert("codex".into(), "Configured name".into());
+        let mut previous_text_width = 0;
+        let mut previous_bar_width = 0;
+        for count in [0, 1, 5] {
+            let mut state = state.clone();
+            state
+                .providers
+                .get_mut("codex")
+                .unwrap()
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .accounts = Some(
+                (0..count)
+                    .map(|index| {
+                        let mut snapshot = template.clone();
+                        snapshot.quotas[0].used_percent = (index * 10) as f64;
+                        crate::models::AccountSnapshot {
+                            id: index.to_string(),
+                            name: "Sub2API · Codex · Same upstream name".into(),
+                            snapshot,
+                        }
+                    })
+                    .collect(),
+            );
+            let groups = resolved_groups(&state, &settings, &catalog);
+            assert_eq!(groups.len(), count);
+            assert_eq!(text_groups(&groups).len(), count);
+            assert_eq!(bar_groups(&groups).len(), count);
+            for (index, group) in groups.iter().enumerate() {
+                assert_eq!(group.metrics.len(), 2);
+                assert_eq!(group.metrics[0].value, format!("{}%", 100 - index * 10));
+                assert!(group.metrics[0]
+                    .detail
+                    .starts_with("Configured name · Same upstream name Session"));
+                assert_eq!(group.metrics[1].value, "40%");
+                assert_eq!(
+                    bar_groups(std::slice::from_ref(group))[0].fractions[0],
+                    1.0 - index as f64 / 10.0
+                );
+            }
+            if count == 0 {
+                for style in [
+                    crate::models::MenuBarStyle::Text,
+                    crate::models::MenuBarStyle::Bars,
+                ] {
+                    assert_eq!(
+                        mac_menu_bar_presentation(&groups, style).icon,
+                        MacMenuBarIcon::Mark
+                    );
+                }
+            } else {
+                let text = crate::menu_bar::text_icon(&text_groups(&groups)).unwrap();
+                let bars = crate::menu_bar::bar_strip_icon(&bar_groups(&groups)).unwrap();
+                assert!(text.width() > previous_text_width);
+                assert!(bars.width() > previous_bar_width);
+                previous_text_width = text.width();
+                previous_bar_width = bars.width();
+            }
+        }
     }
 
     #[test]
     fn tray_details_use_the_runtime_provider_name() {
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "codex".into(),
             plan: None,
             quotas: vec![QuotaWindow {
@@ -851,6 +986,7 @@ mod tests {
     #[test]
     fn count_quota_display_changes_text_and_fill_but_not_status_fraction() {
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "cursor".into(),
             plan: None,
             quotas: vec![QuotaWindow {
@@ -956,6 +1092,7 @@ mod tests {
     #[test]
     fn pinned_value_metrics_keep_numeric_values_outside_quota_bars() {
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "codex".into(),
             plan: None,
             quotas: Vec::new(),
@@ -999,6 +1136,7 @@ mod tests {
     #[test]
     fn pinned_status_metrics_keep_text_and_never_create_a_gauge() {
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "grok".into(),
             plan: None,
             quotas: Vec::new(),

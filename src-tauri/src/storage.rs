@@ -553,6 +553,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "codex".into(),
             plan: Some("Plus".into()),
             quotas: Vec::new(),
@@ -602,6 +603,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "claude".into(),
             plan: Some("Max".into()),
             quotas: Vec::new(),
@@ -735,6 +737,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "cursor".into(),
             plan: None,
             quotas: vec![QuotaWindow {

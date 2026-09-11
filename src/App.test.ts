@@ -115,6 +115,64 @@ describe('OpenQuota dashboard', () => {
   });
   afterEach(cleanup);
 
+  it.each([0, 1, 3])('renders exactly %i returned upstream accounts', async (count) => {
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      const result = await original(command, args);
+      if (command !== 'get_bootstrap_state') return result;
+      const bootstrap = structuredClone(result);
+      bootstrap.settings.settings.providerNames.codex = 'My configured account';
+      const snapshot = bootstrap.usage.providers.codex.snapshot;
+      snapshot.accounts = Array.from({ length: count }, (_, index) => ({
+        id: String(index + 1),
+        name: 'Sub2API · Codex · Same name',
+        snapshot: {
+          ...structuredClone(snapshot),
+          accounts: undefined,
+          quotas: snapshot.quotas.map((quota: { usedPercent: number }) => ({
+            ...quota,
+            usedPercent: 10 + index,
+          })),
+        },
+      }));
+      return bootstrap;
+    });
+    const { container } = render(App);
+    await screen.findByRole('region', { name: 'Total Spend' });
+    await waitFor(() =>
+      expect(container.querySelectorAll('[data-provider-id="codex"]')).toHaveLength(count ? 1 : 0),
+    );
+    if (count > 0) {
+      expect(screen.getAllByRole('heading', { name: 'My configured account' })).toHaveLength(1);
+      expect(container.querySelectorAll('[data-provider-id="codex"] .provider-card')).toHaveLength(
+        1,
+      );
+      expect(screen.queryAllByRole('heading', { name: 'Same name', level: 2 })).toHaveLength(
+        count > 1 ? count : 0,
+      );
+      const header = container.querySelector('[data-provider-id="codex"] > .provider-header')!;
+      if (count === 1) {
+        expect(header.querySelector('h1 + .plan')).toHaveTextContent('Plus');
+        expect(screen.queryByText('Same name')).not.toBeInTheDocument();
+      } else {
+        expect(header.querySelector('.plan')).not.toBeInTheDocument();
+      }
+      for (let index = 0; index < count; index++) {
+        const card = container.querySelector<HTMLElement>(`[data-account-id="${index + 1}"]`)!;
+        if (count > 1) {
+          expect(
+            within(card).getByRole('heading', { name: 'Same name', level: 2 }),
+          ).toBeInTheDocument();
+          expect(card.querySelector('.upstream-account-header .plan')).toHaveTextContent('Plus');
+        }
+        expect(within(card).getByRole('progressbar', { name: 'Session used' })).toHaveAttribute(
+          'aria-valuenow',
+          String(10 + index),
+        );
+      }
+    }
+  });
+
   it('renders quota, total spend, and the 30-day trend from backend data', async () => {
     const { container } = render(App);
     expect(await screen.findByText('Plus')).toBeInTheDocument();
@@ -239,7 +297,7 @@ describe('OpenQuota dashboard', () => {
     expect(
       Array.from(
         provider.querySelectorAll(
-          '.provider-card > .metric-render-block .usage-scope-heading span, .provider-card > .metric-render-block .trend-row > strong, .provider-card > .metric-render-block .usage-row > span',
+          '.provider-card > section > .metric-render-block .usage-scope-heading span, .provider-card > section > .metric-render-block .trend-row > strong, .provider-card > section > .metric-render-block .usage-row > span',
         ),
         (label) => label.textContent?.trim(),
       ),

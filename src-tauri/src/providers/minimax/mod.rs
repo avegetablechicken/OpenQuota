@@ -166,6 +166,7 @@ impl MiniMaxProvider {
             })
             .unwrap_or_default();
         Ok(ProviderSnapshot {
+            accounts: None,
             provider_id: "minimax".into(),
             plan: mapped.plan,
             quotas: mapped.quotas,

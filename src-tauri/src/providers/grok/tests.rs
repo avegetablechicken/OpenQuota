@@ -345,6 +345,7 @@ fn local_scan_failure_keeps_cached_history_and_live_limits() {
     };
     storage
         .save_snapshot(&ProviderSnapshot {
+            accounts: None,
             provider_id: "grok".into(),
             plan: None,
             quotas: Vec::new(),

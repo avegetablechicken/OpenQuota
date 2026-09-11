@@ -246,6 +246,7 @@ mod tests {
 
     fn codex_snapshot(usage: UsageHistory) -> ProviderSnapshot {
         ProviderSnapshot {
+            accounts: None,
             provider_id: "codex".into(),
             plan: None,
             quotas: Vec::new(),

@@ -350,8 +350,6 @@ enum Sub2ApiError {
     Permission,
     #[error("Sub2API requires two-factor authentication, which is not supported yet.")]
     TwoFactorRequired,
-    #[error("No active {0} upstream account was found in Sub2API.")]
-    NoUpstreamAccount(Sub2ApiUpstream),
     #[error("Sub2API is rate limiting requests. Try again later.")]
     RateLimited,
     #[error("Sub2API request failed (HTTP {0}).")]
@@ -376,9 +374,7 @@ impl From<Sub2ApiError> for ProviderError {
             Sub2ApiError::RateLimited => Kind::RateLimited,
             Sub2ApiError::RequestFailed(_) | Sub2ApiError::ConnectionFailed => Kind::Network,
             Sub2ApiError::InvalidConfig | Sub2ApiError::ProviderWithCustomBaseUrl => Kind::Internal,
-            Sub2ApiError::NoUpstreamAccount(_) | Sub2ApiError::InvalidResponse => {
-                Kind::InvalidResponse
-            }
+            Sub2ApiError::InvalidResponse => Kind::InvalidResponse,
         };
         ProviderError::from_display(kind, error)
     }
@@ -410,7 +406,7 @@ struct Sub2ApiAccount {
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct AccountStats {
     #[serde(default)]
     history: Vec<AccountStatsDay>,
@@ -418,7 +414,7 @@ struct AccountStats {
     models: Vec<AccountStatsModel>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct AccountStatsDay {
     date: String,
     #[serde(default)]
@@ -435,7 +431,7 @@ impl AccountStatsDay {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct AccountStatsModel {
     model: String,
     #[serde(default)]
@@ -461,8 +457,6 @@ struct CachedSession {
     scope: String,
     token: Zeroizing<String>,
     expires_at: Instant,
-    account: Sub2ApiAccount,
-    account_count: usize,
 }
 
 struct Sub2ApiClient {
@@ -521,44 +515,58 @@ impl Sub2ApiClient {
         })
     }
 
-    fn first_account(
+    fn accounts(
         &self,
         token: &str,
         upstream: Sub2ApiUpstream,
-    ) -> Result<(Sub2ApiAccount, usize), Sub2ApiError> {
-        let mut url = self.endpoint(&["api", "v1", "admin", "accounts"])?;
-        url.query_pairs_mut()
-            .append_pair("page", "1")
-            .append_pair("page_size", "1")
-            .append_pair("platform", upstream.platform())
-            .append_pair("type", "oauth")
-            .append_pair("status", "active")
-            .append_pair("sort_by", "name")
-            .append_pair("sort_order", "asc");
-        let response = self
-            .client
-            .get(url)
-            .bearer_auth(token)
-            .header("Accept", "application/json")
-            .send()
-            .map_err(|error| transport_error("account discovery", &error))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(classify_status(status));
+    ) -> Result<Vec<Sub2ApiAccount>, Sub2ApiError> {
+        let mut accounts = Vec::new();
+        let mut page_number = 1;
+        loop {
+            let mut url = self.endpoint(&["api", "v1", "admin", "accounts"])?;
+            url.query_pairs_mut()
+                .append_pair("page", &page_number.to_string())
+                .append_pair("page_size", "100")
+                .append_pair("platform", upstream.platform())
+                .append_pair("type", "oauth")
+                .append_pair("status", "active")
+                .append_pair("sort_by", "name")
+                .append_pair("sort_order", "asc");
+            let response = self
+                .client
+                .get(url)
+                .bearer_auth(token)
+                .header("Accept", "application/json")
+                .send()
+                .map_err(|error| transport_error("account discovery", &error))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(classify_status(status));
+            }
+            let envelope = response
+                .json::<Envelope<AccountPage>>()
+                .map_err(|_| Sub2ApiError::InvalidResponse)?;
+            if envelope.code != 0 {
+                return Err(Sub2ApiError::InvalidResponse);
+            }
+            let page = envelope.data.ok_or(Sub2ApiError::InvalidResponse)?;
+            let previous_len = accounts.len();
+            for account in page.items {
+                if !accounts
+                    .iter()
+                    .any(|known: &Sub2ApiAccount| known.id == account.id)
+                {
+                    accounts.push(account);
+                }
+            }
+            if accounts.len() >= page.total {
+                return Ok(accounts);
+            }
+            if accounts.len() == previous_len {
+                return Err(Sub2ApiError::InvalidResponse);
+            }
+            page_number += 1;
         }
-        let envelope = response
-            .json::<Envelope<AccountPage>>()
-            .map_err(|_| Sub2ApiError::InvalidResponse)?;
-        if envelope.code != 0 {
-            return Err(Sub2ApiError::InvalidResponse);
-        }
-        let mut page = envelope.data.ok_or(Sub2ApiError::InvalidResponse)?;
-        let account = page
-            .items
-            .drain(..)
-            .next()
-            .ok_or(Sub2ApiError::NoUpstreamAccount(upstream))?;
-        Ok((account, page.total))
     }
 
     fn usage(
@@ -768,14 +776,10 @@ impl Sub2ApiProvider {
     fn connect(&self, config: &StoredConfig) -> Result<CachedSession, Sub2ApiError> {
         let client = Sub2ApiClient::new(&config.base_url)?;
         let login = client.login(&config.email, &config.password)?;
-        let (account, account_count) =
-            client.first_account(login.value.as_str(), config.upstream)?;
         Ok(CachedSession {
             scope: session_scope(config),
             token: login.value,
             expires_at: token_expiry(login.expires_in),
-            account,
-            account_count,
         })
     }
 
@@ -799,16 +803,75 @@ impl Sub2ApiProvider {
     fn refresh_snapshot(&self, config: &StoredConfig) -> Result<ProviderSnapshot, Sub2ApiError> {
         let client = Sub2ApiClient::new(&config.base_url)?;
         let mut session = self.session(config)?;
-        let body = match client.usage(session.token.as_str(), session.account.id, config.upstream) {
+        let accounts = match client.accounts(session.token.as_str(), config.upstream) {
             Err(Sub2ApiError::Authentication) => {
-                if let Ok(mut cached) = self.session.lock() {
-                    *cached = None;
-                }
                 session = self.connect(config)?;
-                client.usage(session.token.as_str(), session.account.id, config.upstream)?
+                if let Ok(mut cached) = self.session.lock() {
+                    *cached = Some(clone_session(&session));
+                }
+                client.accounts(session.token.as_str(), config.upstream)?
             }
             result => result?,
         };
+        let mut snapshots = Vec::new();
+        let mut all_stats = AccountStats {
+            history: Vec::new(),
+            models: Vec::new(),
+        };
+        for account in accounts {
+            let (snapshot, stats) = match self.refresh_account(config, &client, &session, &account)
+            {
+                Err(Sub2ApiError::Authentication) => {
+                    session = self.connect(config)?;
+                    if let Ok(mut cached) = self.session.lock() {
+                        *cached = Some(clone_session(&session));
+                    }
+                    self.refresh_account(config, &client, &session, &account)
+                }
+                result => result,
+            }?;
+            // Publish only complete connection snapshots. The service retains the last successful
+            // in-memory and persisted snapshot when any upstream request fails.
+            all_stats.history.extend(stats.history);
+            all_stats.models.extend(stats.models);
+            snapshots.push(crate::models::AccountSnapshot {
+                id: account.id.to_string(),
+                name: format!("Sub2API · {} · {}", config.upstream, account.name),
+                snapshot,
+            });
+        }
+        let mut snapshot = snapshots
+            .first()
+            .map(|account| account.snapshot.clone())
+            .unwrap_or_else(|| self.empty_snapshot(Vec::new()));
+        snapshot.usage_histories = UsageHistories::account(map_stats(all_stats, Utc::now()));
+        snapshot.accounts = Some(snapshots);
+        Ok(snapshot)
+    }
+
+    fn empty_snapshot(&self, warnings: Vec<String>) -> ProviderSnapshot {
+        ProviderSnapshot {
+            accounts: None,
+            provider_id: self.provider_id.clone(),
+            plan: None,
+            quotas: Vec::new(),
+            value_metrics: Vec::new(),
+            status_metrics: Vec::new(),
+            notices: Vec::new(),
+            usage_histories: UsageHistories::account(UsageHistory::default()),
+            warnings,
+            refreshed_at: Utc::now(),
+        }
+    }
+
+    fn refresh_account(
+        &self,
+        config: &StoredConfig,
+        client: &Sub2ApiClient,
+        session: &CachedSession,
+        account: &Sub2ApiAccount,
+    ) -> Result<(ProviderSnapshot, AccountStats), Sub2ApiError> {
+        let body = client.usage(session.token.as_str(), account.id, config.upstream)?;
         let now = Utc::now();
         let (plan, quotas, value_metrics) = match config.upstream {
             Sub2ApiUpstream::Codex => {
@@ -835,45 +898,23 @@ impl Sub2ApiProvider {
             }
         };
         let quotas = normalize_refreshed_quotas(config.upstream, quotas, now);
-        let mut warnings = (session.account_count > 1)
-            .then(|| {
-                format!(
-                    "Showing {} upstream {}. {} active {} accounts were found.",
-                    config.upstream, session.account.name, session.account_count, config.upstream
-                )
-            })
-            .into_iter()
-            .collect::<Vec<_>>();
-        let stats = match client.stats(session.token.as_str(), session.account.id) {
-            Err(Sub2ApiError::Authentication) => {
-                if let Ok(mut cached) = self.session.lock() {
-                    *cached = None;
-                }
-                session = self.connect(config)?;
-                client.stats(session.token.as_str(), session.account.id)
-            }
-            result => result,
-        };
-        let usage = match stats {
-            Ok(stats) => map_stats(stats, Utc::now()),
-            Err(error) => {
-                warnings.push(format!(
-                    "Sub2API server usage statistics are unavailable: {error}"
-                ));
-                UsageHistory::default()
-            }
-        };
-        Ok(ProviderSnapshot {
-            provider_id: self.provider_id.clone(),
-            plan,
-            quotas,
-            value_metrics,
-            status_metrics: Vec::new(),
-            notices: Vec::new(),
-            usage_histories: UsageHistories::account(usage),
-            warnings,
-            refreshed_at: now,
-        })
+        let stats = client.stats(session.token.as_str(), account.id)?;
+        let usage = map_stats(stats.clone(), now);
+        Ok((
+            ProviderSnapshot {
+                accounts: None,
+                provider_id: self.provider_id.clone(),
+                plan,
+                quotas,
+                value_metrics,
+                status_metrics: Vec::new(),
+                notices: Vec::new(),
+                usage_histories: UsageHistories::account(usage),
+                warnings: Vec::new(),
+                refreshed_at: now,
+            },
+            stats,
+        ))
     }
 
     fn credential_account(&self) -> &str {
@@ -1169,6 +1210,20 @@ fn normalize_refreshed_quotas(
 }
 
 fn map_stats(mut stats: AccountStats, now: chrono::DateTime<Utc>) -> UsageHistory {
+    let mut days: std::collections::BTreeMap<String, AccountStatsDay> = Default::default();
+    for day in stats.history {
+        if let Some(total) = days.get_mut(&day.date) {
+            total.actual_cost = total
+                .measured_cost()
+                .zip(day.measured_cost())
+                .map(|(a, b)| a + b);
+            total.cost = None;
+            total.tokens = total.tokens.saturating_add(day.tokens);
+        } else {
+            days.insert(day.date.clone(), day);
+        }
+    }
+    stats.history = days.into_values().collect();
     stats.history.retain(|day| {
         NaiveDate::parse_from_str(day.date.trim(), "%Y-%m-%d").is_ok()
             && (day.tokens > 0 || day.measured_cost().is_some_and(|cost| cost > 0.0))
@@ -1247,8 +1302,22 @@ fn stats_model_breakdown(
     models: Vec<AccountStatsModel>,
     source_note: &str,
 ) -> Option<ModelUsageBreakdown> {
-    let mut models = models
-        .into_iter()
+    let mut grouped: std::collections::BTreeMap<String, AccountStatsModel> = Default::default();
+    for model in models {
+        let name = model.model.trim().to_owned();
+        if let Some(total) = grouped.get_mut(&name) {
+            total.actual_cost = total
+                .measured_cost()
+                .zip(model.measured_cost())
+                .map(|(a, b)| a + b);
+            total.cost = None;
+            total.total_tokens = total.total_tokens.saturating_add(model.total_tokens);
+        } else {
+            grouped.insert(name, model);
+        }
+    }
+    let mut models = grouped
+        .into_values()
         .filter_map(|model| {
             let name = model.model.trim().to_owned();
             if name.is_empty()
@@ -1295,8 +1364,6 @@ fn clone_session(session: &CachedSession) -> CachedSession {
         scope: session.scope.clone(),
         token: Zeroizing::new(session.token.to_string()),
         expires_at: session.expires_at,
-        account: session.account.clone(),
-        account_count: session.account_count,
     }
 }
 
@@ -1364,11 +1431,17 @@ mod tests {
     fn serve_sequence(
         responses: Vec<String>,
     ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        serve_sequence_with_status(responses.into_iter().map(|body| (200, body)).collect())
+    }
+
+    fn serve_sequence_with_status(
+        responses: Vec<(u16, String)>,
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = mpsc::channel();
         let worker = thread::spawn(move || {
-            for body in responses {
+            for (status, body) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
                 loop {
@@ -1395,7 +1468,7 @@ mod tests {
                     .send(String::from_utf8_lossy(&request).into_owned())
                     .unwrap();
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 stream.write_all(response.as_bytes()).unwrap();
@@ -1640,6 +1713,7 @@ mod tests {
         let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
         storage
             .save_snapshot(&ProviderSnapshot {
+                accounts: None,
                 provider_id: "sub2api".into(),
                 plan: None,
                 quotas: Vec::new(),
@@ -1670,6 +1744,7 @@ mod tests {
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         storage
             .save_snapshot(&ProviderSnapshot {
+                accounts: None,
                 provider_id: "sub2api@2".into(),
                 plan: Some("Old plan".into()),
                 quotas: Vec::new(),
@@ -1703,7 +1778,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_upstream_is_reported_when_the_saved_connection_is_refreshed() {
+    fn empty_upstream_list_returns_no_account_cards() {
         let responses = vec![
             r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
             r#"{"code":0,"message":"success","data":{"items":[],"total":0,"page":1,"page_size":1,"pages":0}}"#.into(),
@@ -1726,10 +1801,12 @@ mod tests {
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
 
-        assert_eq!(
-            provider.refresh_snapshot(&config).unwrap_err(),
-            Sub2ApiError::NoUpstreamAccount(super::Sub2ApiUpstream::Codex)
-        );
+        assert!(provider
+            .refresh_snapshot(&config)
+            .unwrap()
+            .accounts
+            .unwrap()
+            .is_empty());
         worker.join().unwrap();
     }
 
@@ -1886,6 +1963,219 @@ mod tests {
     }
 
     #[test]
+    fn discovery_reads_every_page_and_rejects_non_advancing_pages() {
+        for repeated in [false, true] {
+            let second = if repeated { 1 } else { 2 };
+            let (base_url, requests, worker) = serve_sequence(vec![
+                r#"{"code":0,"data":{"items":[{"id":1,"name":"First"}],"total":2}}"#.into(),
+                format!(
+                    r#"{{"code":0,"data":{{"items":[{{"id":{second},"name":"Second"}}],"total":2}}}}"#
+                ),
+            ]);
+            let result = Sub2ApiClient::new(&base_url)
+                .unwrap()
+                .accounts("token", super::Sub2ApiUpstream::Codex);
+            if repeated {
+                assert!(matches!(result, Err(Sub2ApiError::InvalidResponse)));
+            } else {
+                assert_eq!(
+                    result.unwrap().iter().map(|a| a.id).collect::<Vec<_>>(),
+                    [1, 2]
+                );
+            }
+            worker.join().unwrap();
+            assert!(requests.recv().unwrap().contains("page=1&page_size=100"));
+            assert!(requests.recv().unwrap().contains("page=2&page_size=100"));
+        }
+    }
+
+    #[test]
+    fn refresh_keeps_all_accounts_and_rediscovers_with_a_cached_token() {
+        let stats = format!(r#"{{"code":0,"data":{STATS_DATA}}}"#);
+        let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
+        let (base_url, _requests, worker) = serve_sequence(vec![
+            r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
+            r#"{"code":0,"data":{"items":[{"id":7,"name":"Same name"},{"id":8,"name":"Same name"}],"total":2}}"#.into(),
+            quota.clone(), stats.clone(), quota, stats,
+            r#"{"code":0,"data":{"items":[{"id":9,"name":"Unavailable"}],"total":1}}"#.into(),
+            r#"{"code":1}"#.into(),
+            r#"{"code":0,"data":{"items":[],"total":0}}"#.into(),
+        ]);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("configured"),
+            true,
+        );
+        let config = StoredConfig {
+            base_url,
+            codex_provider: String::new(),
+            custom_base_url: true,
+            email: "admin@example.com".into(),
+            password: "password".into(),
+            upstream: super::Sub2ApiUpstream::Claude,
+            metric_template_version: super::METRIC_TEMPLATE_VERSION,
+        };
+        let snapshot = provider.refresh_snapshot(&config).unwrap();
+        let accounts = snapshot.accounts.unwrap();
+        assert_eq!(
+            accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["7", "8"]
+        );
+        assert!(accounts
+            .iter()
+            .all(|a| a.name == "Sub2API · Claude · Same name" && !a.snapshot.quotas.is_empty()));
+        let history = snapshot.usage_histories.account.unwrap();
+        assert_eq!(history.daily.len(), 2);
+        assert_eq!(history.last_30_days.as_ref().unwrap().tokens, 7000);
+        assert_eq!(
+            history
+                .last_30_days
+                .unwrap()
+                .model_breakdown
+                .unwrap()
+                .models
+                .len(),
+            2
+        );
+        assert_eq!(
+            provider.refresh_snapshot(&config).unwrap_err(),
+            Sub2ApiError::InvalidResponse
+        );
+        assert!(provider
+            .refresh_snapshot(&config)
+            .unwrap()
+            .accounts
+            .unwrap()
+            .is_empty());
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_preserves_all_cached_accounts_on_disk_and_recovers() {
+        use crate::{
+            models::{ProviderDefinition, SnapshotSource},
+            providers::{ProviderError, ProviderRegistry},
+            service::ProviderService,
+        };
+
+        struct ConfiguredProvider {
+            provider: Sub2ApiProvider,
+            config: StoredConfig,
+        }
+        impl UsageProvider for ConfiguredProvider {
+            fn definition(&self) -> ProviderDefinition {
+                let mut definition = self.provider.definition();
+                definition.fallback_enabled = true;
+                definition
+            }
+            fn has_local_credentials(&self) -> bool {
+                true
+            }
+            fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
+                self.provider
+                    .refresh_snapshot(&self.config)
+                    .map_err(ProviderError::from)
+            }
+        }
+
+        // Discovery, a later account's quota, and its statistics must all preserve the same cache.
+        for failed_stage in 0..3 {
+            let page = r#"{"code":0,"data":{"items":[{"id":7,"name":"First"},{"id":8,"name":"Second"}],"total":2}}"#.to_owned();
+            let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
+            let stats = format!(r#"{{"code":0,"data":{STATS_DATA}}}"#);
+            let mut responses = vec![
+                (
+                    200,
+                    r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
+                ),
+                (200, page.clone()),
+                (200, quota.clone()),
+                (200, stats.clone()),
+                (200, quota.clone()),
+                (200, stats.clone()),
+            ];
+            if failed_stage > 0 {
+                responses.extend([(200, page), (200, quota.clone()), (200, stats.clone())]);
+                if failed_stage == 2 {
+                    responses.push((200, quota.clone()));
+                }
+            }
+            responses.push((503, "temporary outage".into()));
+            responses.extend([
+                (
+                    200,
+                    r#"{"code":0,"data":{"items":[{"id":8,"name":"Recovered"}],"total":1}}"#.into(),
+                ),
+                (200, quota),
+                (200, stats),
+                (200, r#"{"code":0,"data":{"items":[],"total":0}}"#.into()),
+            ]);
+            let (base_url, _requests, worker) = serve_sequence_with_status(responses);
+            let directory = tempdir().unwrap();
+            let storage = Arc::new(Storage::open(&directory.path().join("cache.db")).unwrap());
+            let registry = Arc::new(
+                ProviderRegistry::new(vec![Arc::new(ConfiguredProvider {
+                    provider: Sub2ApiProvider::new(
+                        "sub2api".into(),
+                        "Sub2API · Claude".into(),
+                        directory.path().join("configured"),
+                        true,
+                    ),
+                    config: StoredConfig {
+                        base_url,
+                        codex_provider: String::new(),
+                        custom_base_url: true,
+                        email: "admin@example.com".into(),
+                        password: "password".into(),
+                        upstream: super::Sub2ApiUpstream::Claude,
+                        metric_template_version: super::METRIC_TEMPLATE_VERSION,
+                    },
+                })])
+                .unwrap(),
+            );
+            let service = Arc::new(ProviderService::new(registry.clone(), storage.clone()));
+            let successful = service.refresh("sub2api", true).await;
+            assert!(successful.error.is_none());
+            let cached = successful.snapshot.unwrap();
+            assert_eq!(cached.accounts.as_ref().unwrap().len(), 2);
+            assert_eq!(
+                cached
+                    .usage_histories
+                    .account
+                    .as_ref()
+                    .unwrap()
+                    .last_30_days
+                    .as_ref()
+                    .unwrap()
+                    .tokens,
+                7000
+            );
+
+            let failed = service.refresh("sub2api", true).await;
+            assert_eq!(
+                failed.error_kind,
+                Some(crate::models::ProviderErrorKind::Network)
+            );
+            assert_eq!(failed.snapshot.as_ref(), Some(&cached));
+            drop(service);
+            let restarted = Arc::new(ProviderService::new(registry, storage));
+            let restored = restarted.state().providers.remove("sub2api").unwrap();
+            assert_eq!(restored.source, SnapshotSource::Cache);
+            assert_eq!(restored.snapshot.as_ref(), Some(&cached));
+
+            let recovered = restarted.refresh("sub2api", true).await;
+            assert!(recovered.error.is_none());
+            assert_eq!(recovered.snapshot.unwrap().accounts.unwrap().len(), 1);
+            let empty = restarted.refresh("sub2api", true).await;
+            assert!(empty.error.is_none());
+            assert!(empty.snapshot.unwrap().accounts.unwrap().is_empty());
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
     fn login_discovers_one_codex_account_and_maps_its_quota() {
         let responses = vec![
             r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600,"token_type":"Bearer"}}"#.into(),
@@ -1897,20 +2187,20 @@ mod tests {
         let login = client
             .login("admin@example.com", "secret-password")
             .unwrap();
-        let (account, count) = client
-            .first_account(login.value.as_str(), super::Sub2ApiUpstream::Codex)
+        let accounts = client
+            .accounts(login.value.as_str(), super::Sub2ApiUpstream::Codex)
             .unwrap();
         let body = client
             .usage(
                 login.value.as_str(),
-                account.id,
+                accounts[0].id,
                 super::Sub2ApiUpstream::Codex,
             )
             .unwrap();
         worker.join().unwrap();
 
-        assert_eq!(account.name, "Codex upstream");
-        assert_eq!(count, 1);
+        assert_eq!(accounts[0].name, "Codex upstream");
+        assert_eq!(accounts.len(), 1);
         let login_request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(login_request.starts_with("POST /api/v1/auth/login HTTP/1.1"));
         assert!(login_request.contains("\"email\":\"admin@example.com\""));
@@ -1957,20 +2247,20 @@ mod tests {
         let login = client
             .login("admin@example.com", "secret-password")
             .unwrap();
-        let (account, count) = client
-            .first_account(login.value.as_str(), super::Sub2ApiUpstream::Claude)
+        let accounts = client
+            .accounts(login.value.as_str(), super::Sub2ApiUpstream::Claude)
             .unwrap();
         let body = client
             .usage(
                 login.value.as_str(),
-                account.id,
+                accounts[0].id,
                 super::Sub2ApiUpstream::Claude,
             )
             .unwrap();
         worker.join().unwrap();
 
-        assert_eq!(account.name, "Claude upstream");
-        assert_eq!(count, 1);
+        assert_eq!(accounts[0].name, "Claude upstream");
+        assert_eq!(accounts.len(), 1);
         let _login_request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
         let accounts_request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(accounts_request.contains("platform=anthropic"));

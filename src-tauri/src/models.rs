@@ -301,7 +301,17 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct AccountSnapshot {
+    pub id: String,
+    pub name: String,
+    pub snapshot: ProviderSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<AccountSnapshot>>,
     pub provider_id: String,
     pub plan: Option<String>,
     pub quotas: Vec<QuotaWindow>,

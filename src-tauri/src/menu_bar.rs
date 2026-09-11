@@ -88,16 +88,38 @@ struct RenderedStrip {
 struct GroupLayout<'a> {
     group: &'a TextGroup,
     text_width: f32,
+    separator_width: f32,
     width: f32,
+    icon_width: f32,
+    gap_before: f32,
 }
 
 #[derive(Debug, Clone)]
 struct BarGroupLayout<'a> {
     group: &'a BarGroup,
     width: f32,
+    icon_width: f32,
+    gap_before: f32,
+}
+
+// Consecutive upstream accounts share their connection's mark, with a compact gap between columns.
+fn column_spacing(previous_provider: Option<&str>, provider_id: &str) -> (f32, f32) {
+    if previous_provider == Some(provider_id) {
+        (0.0, ICON_TEXT_GAP)
+    } else {
+        (
+            PROVIDER_ICON_SIZE + ICON_TEXT_GAP,
+            if previous_provider.is_some() {
+                GROUP_GAP
+            } else {
+                0.0
+            },
+        )
+    }
 }
 
 fn render_text_strip(groups: &[TextGroup]) -> Option<RenderedStrip> {
+    let mut previous_provider = None;
     let groups = groups
         .iter()
         .filter(|group| !group.values.is_empty())
@@ -118,10 +140,27 @@ fn render_text_strip(groups: &[TextGroup]) -> Option<RenderedStrip> {
                 })
                 .fold(0.0_f32, f32::max)
                 .ceil();
+            let (icon_width, gap_before) = column_spacing(previous_provider, &group.provider_id);
+            let separator_width = if icon_width == 0.0
+                && crate::providers::provider_family(&group.provider_id) == "sub2api"
+            {
+                measure_text("+", STACKED_VALUE_SIZE).ceil()
+            } else {
+                0.0
+            };
+            let gap_before = if separator_width > 0.0 {
+                ICON_TEXT_GAP * 2.0 + separator_width
+            } else {
+                gap_before
+            };
+            previous_provider = Some(group.provider_id.as_str());
             GroupLayout {
                 group,
                 text_width,
-                width: PROVIDER_ICON_SIZE + ICON_TEXT_GAP + text_width,
+                separator_width,
+                width: icon_width + text_width,
+                icon_width,
+                gap_before,
             }
         })
         .collect::<Vec<_>>();
@@ -129,20 +168,34 @@ fn render_text_strip(groups: &[TextGroup]) -> Option<RenderedStrip> {
         return None;
     }
 
-    let content_width = groups.iter().map(|group| group.width).sum::<f32>()
-        + GROUP_GAP * groups.len().saturating_sub(1) as f32;
+    let content_width = groups
+        .iter()
+        .map(|group| group.width + group.gap_before)
+        .sum::<f32>();
     let width = (content_width + OUTER_PADDING * 2.0).ceil().max(1.0) as u32;
     let mut pixmap = Pixmap::new(width, TEXT_HEIGHT).expect("menu bar strip dimensions are valid");
     let mut x = OUTER_PADDING;
 
     for layout in groups {
-        draw_provider_icon(
-            &mut pixmap,
-            &layout.group.provider_id,
-            layout.group.upstream_provider_id.as_deref(),
-            x,
-        );
-        let text_x = x + PROVIDER_ICON_SIZE + ICON_TEXT_GAP;
+        if layout.separator_width > 0.0 {
+            draw_text(
+                &mut pixmap,
+                "+",
+                STACKED_VALUE_SIZE,
+                x + ICON_TEXT_GAP,
+                centered_baseline("+", STACKED_VALUE_SIZE, TEXT_HEIGHT as f32),
+            );
+        }
+        x += layout.gap_before;
+        if layout.icon_width > 0.0 {
+            draw_provider_icon(
+                &mut pixmap,
+                &layout.group.provider_id,
+                layout.group.upstream_provider_id.as_deref(),
+                x,
+            );
+        }
+        let text_x = x + layout.icon_width;
         if layout.group.values.len() == 1 {
             let value = &layout.group.values[0];
             let baseline = centered_baseline(value, SINGLE_VALUE_SIZE, TEXT_HEIGHT as f32);
@@ -159,7 +212,7 @@ fn render_text_strip(groups: &[TextGroup]) -> Option<RenderedStrip> {
                 );
             }
         }
-        x += layout.width + GROUP_GAP;
+        x += layout.width;
     }
 
     Some(RenderedStrip {
@@ -170,41 +223,53 @@ fn render_text_strip(groups: &[TextGroup]) -> Option<RenderedStrip> {
 
 fn render_bar_strip(groups: &[BarGroup]) -> Option<RenderedStrip> {
     const BAR_AREA_WIDTH: f32 = 36.0;
+    let mut previous_provider = None;
 
     let groups = groups
         .iter()
         .filter(|group| !group.fractions.is_empty())
-        .map(|group| BarGroupLayout {
-            group,
-            width: PROVIDER_ICON_SIZE + ICON_TEXT_GAP + BAR_AREA_WIDTH,
+        .map(|group| {
+            let (icon_width, gap_before) = column_spacing(previous_provider, &group.provider_id);
+            previous_provider = Some(group.provider_id.as_str());
+            BarGroupLayout {
+                group,
+                width: icon_width + BAR_AREA_WIDTH,
+                icon_width,
+                gap_before,
+            }
         })
         .collect::<Vec<_>>();
     if groups.is_empty() {
         return None;
     }
 
-    let content_width = groups.iter().map(|group| group.width).sum::<f32>()
-        + GROUP_GAP * groups.len().saturating_sub(1) as f32;
+    let content_width = groups
+        .iter()
+        .map(|group| group.width + group.gap_before)
+        .sum::<f32>();
     let width = (content_width + OUTER_PADDING * 2.0).ceil().max(1.0) as u32;
     let mut pixmap = Pixmap::new(width, TEXT_HEIGHT).expect("menu bar strip dimensions are valid");
     let mut x = OUTER_PADDING;
 
     for layout in groups {
-        draw_provider_icon(
-            &mut pixmap,
-            &layout.group.provider_id,
-            layout.group.upstream_provider_id.as_deref(),
-            x,
-        );
+        x += layout.gap_before;
+        if layout.icon_width > 0.0 {
+            draw_provider_icon(
+                &mut pixmap,
+                &layout.group.provider_id,
+                layout.group.upstream_provider_id.as_deref(),
+                x,
+            );
+        }
         draw_bar_rows(
             &mut pixmap,
             &layout.group.fractions,
-            x + PROVIDER_ICON_SIZE + ICON_TEXT_GAP,
+            x + layout.icon_width,
             0.0,
             BAR_AREA_WIDTH,
             TEXT_HEIGHT as f32,
         );
-        x += layout.width + GROUP_GAP;
+        x += layout.width;
     }
 
     Some(RenderedStrip {
@@ -995,6 +1060,36 @@ mod tests {
             .iter()
             .any(|pixel| pixel[3] == 255));
         assert!(bar_strip_icon(&[bar_group("codex", &[])]).is_none());
+    }
+
+    #[test]
+    fn upstream_columns_share_one_connection_mark_in_both_styles() {
+        let single_text = text_icon(&[text_group("sub2api", &["75%", "40%"])]).unwrap();
+        let grouped_text = text_icon(&[
+            text_group("sub2api", &["75%", "40%"]),
+            text_group("sub2api", &["75%", "40%"]),
+        ])
+        .unwrap();
+        let separate_text = text_icon(&[
+            text_group("sub2api", &["75%", "40%"]),
+            text_group("sub2api@2", &["75%", "40%"]),
+        ])
+        .unwrap();
+        assert!(grouped_text.width() > single_text.width());
+        assert!(grouped_text.width() < separate_text.width());
+        let single_bar = bar_strip_icon(&[bar_group("sub2api", &[0.75, 0.4])]).unwrap();
+        let grouped_bar = bar_strip_icon(&[
+            bar_group("sub2api", &[0.75, 0.4]),
+            bar_group("sub2api", &[0.75, 0.4]),
+        ])
+        .unwrap();
+        let separate_bar = bar_strip_icon(&[
+            bar_group("sub2api", &[0.75, 0.4]),
+            bar_group("sub2api@2", &[0.75, 0.4]),
+        ])
+        .unwrap();
+        assert!(grouped_bar.width() > single_bar.width());
+        assert!(grouped_bar.width() < separate_bar.width());
     }
 
     #[test]

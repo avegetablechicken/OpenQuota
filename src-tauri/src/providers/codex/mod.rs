@@ -293,6 +293,7 @@ impl CodexProvider {
         );
         Self::ensure_candidate_source_current(auth, account_identity)?;
         Ok(ProviderSnapshot {
+            accounts: None,
             provider_id: "codex".into(),
             plan: mapped.plan,
             quotas: mapped.quotas,
@@ -563,6 +564,7 @@ mod account_tests {
             ..UsageHistory::default()
         };
         let snapshot = ProviderSnapshot {
+            accounts: None,
             provider_id: "codex".into(),
             plan: Some("Plus".into()),
             quotas: Vec::new(),

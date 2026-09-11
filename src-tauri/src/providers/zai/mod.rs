@@ -205,6 +205,7 @@ impl ZaiProvider {
             account: account_usage.map(|usage| usage.history),
         };
         Ok(ProviderSnapshot {
+            accounts: None,
             provider_id: "zai".into(),
             plan: mapped.plan,
             quotas: mapped.quotas,

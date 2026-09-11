@@ -277,6 +277,7 @@ fn snapshot(
     refreshed_at: DateTime<Utc>,
 ) -> ProviderSnapshot {
     ProviderSnapshot {
+        accounts: None,
         provider_id: "opencode".into(),
         plan,
         quotas,
