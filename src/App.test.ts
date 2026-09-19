@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
+import * as shareCard from './lib/shareCard';
 import type { PanelHeightMode } from './lib/backend';
 import type {
   AppSettings,
@@ -172,6 +173,67 @@ describe('OpenQuota dashboard', () => {
       }
     }
   });
+
+  it.each(['provider', 'first', 'second'])(
+    'shares the matching upstream email and usage from the %s menu',
+    async (target) => {
+      const original = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(async (command, args) => {
+        const result = await original(command, args);
+        if (command !== 'get_bootstrap_state') return result;
+        const bootstrap = structuredClone(result);
+        const snapshot = bootstrap.usage.providers.codex.snapshot;
+        snapshot.accounts = ['first', 'second'].map((id, index) => ({
+          id,
+          name: `Sub2API · Codex · ${id}@example.com`,
+          snapshot: {
+            ...structuredClone(snapshot),
+            accounts: undefined,
+            quotas: snapshot.quotas.map((quota: { usedPercent: number }) => ({
+              ...quota,
+              usedPercent: 10 + index,
+            })),
+          },
+        }));
+        return bootstrap;
+      });
+      const canvas = document.createElement('canvas');
+      vi.spyOn(canvas, 'toBlob').mockImplementation((callback) => callback(new Blob()));
+      const renderCard = vi.spyOn(shareCard, 'renderProviderShareCard').mockReturnValue(canvas);
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      });
+      try {
+        const { container } = render(App);
+        await screen.findByRole('heading', { name: 'first@example.com' });
+        const selector =
+          target === 'provider'
+            ? '[data-provider-id="codex"] > .provider-header'
+            : `[data-provider-id="codex"] [data-account-id="${target}"]`;
+        const selected = container.querySelector<HTMLElement>(selector)!;
+        // jsdom does not implement innerText.
+        for (const card of container.querySelectorAll<HTMLElement>('[data-account-id]')) {
+          Object.defineProperty(card, 'innerText', { value: card.textContent });
+        }
+        await fireEvent.contextMenu(selected);
+        await fireEvent.click(screen.getByRole('menuitem', { name: 'Share Screenshot' }));
+        const expectedAccount = target === 'second' ? 'second' : 'first';
+        await waitFor(() => expect(renderCard).toHaveBeenCalled());
+        expect(renderCard.mock.calls[0][1]).toMatchObject({
+          plan: `${expectedAccount}@example.com · Plus`,
+          rows: expect.arrayContaining([
+            expect.objectContaining({ kind: 'quota', fillPercent: target === 'second' ? 89 : 90 }),
+          ]),
+        });
+        await waitFor(() => expect(writeText).toHaveBeenCalled());
+        expect(writeText.mock.calls[0][0]).toContain(`${expectedAccount}@example.com`);
+      } finally {
+        renderCard.mockRestore();
+      }
+    },
+  );
 
   it('renders quota, total spend, and the 30-day trend from backend data', async () => {
     const { container } = render(App);

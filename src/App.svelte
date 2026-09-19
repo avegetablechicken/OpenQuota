@@ -431,12 +431,15 @@
   ) {
     const current = settingsState;
     if (!current) return;
+    const parentSnapshot = viewState.providers[providerId]?.snapshot;
+    const resolvedAccountId =
+      accountId ??
+      ((parentSnapshot?.accounts?.length ?? 0) > 1 ? parentSnapshot?.accounts?.[0]?.id : undefined);
     const card = document.querySelector<HTMLElement>(
-      `[data-provider-id="${providerId}"]${accountId ? ` [data-account-id="${accountId}"]` : ''}`,
+      `[data-provider-id="${providerId}"]${resolvedAccountId ? ` [data-account-id="${resolvedAccountId}"]` : ''}`,
     );
     if (!card) return;
-    const parentSnapshot = viewState.providers[providerId]?.snapshot;
-    const account = parentSnapshot?.accounts?.find((account) => account.id === accountId);
+    const account = parentSnapshot?.accounts?.find((account) => account.id === resolvedAccountId);
     const provider = account?.snapshot ?? parentSnapshot;
     const layout = current.settings.providers.find((item) => item.id === providerId);
     if (!provider || !layout) return;
