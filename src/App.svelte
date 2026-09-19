@@ -432,33 +432,39 @@
     const current = settingsState;
     if (!current) return;
     const parentSnapshot = viewState.providers[providerId]?.snapshot;
-    const resolvedAccountId =
-      accountId ??
-      ((parentSnapshot?.accounts?.length ?? 0) > 1 ? parentSnapshot?.accounts?.[0]?.id : undefined);
     const card = document.querySelector<HTMLElement>(
-      `[data-provider-id="${providerId}"]${resolvedAccountId ? ` [data-account-id="${resolvedAccountId}"]` : ''}`,
+      `[data-provider-id="${providerId}"]${accountId ? ` [data-account-id="${accountId}"]` : ''}`,
     );
     if (!card) return;
-    const account = parentSnapshot?.accounts?.find((account) => account.id === resolvedAccountId);
+    const account = parentSnapshot?.accounts?.find((account) => account.id === accountId);
     const provider = account?.snapshot ?? parentSnapshot;
     const layout = current.settings.providers.find((item) => item.id === providerId);
     if (!provider || !layout) return;
     const snapshot = [providerDisplayName(providerId), card.innerText.trim()].join('\n');
     try {
-      const rows = buildProviderShareRows(
-        catalog,
-        provider,
-        layout,
-        current.settings,
-        now,
-        viewMode,
-      );
+      const accounts =
+        !accountId && (provider.accounts?.length ?? 0) > 1 ? provider.accounts : undefined;
+      const buildRows = (snapshot: import('./lib/types').ProviderSnapshot) =>
+        buildProviderShareRows(catalog, snapshot, layout, current.settings, now, viewMode);
+      const rows = accounts
+        ? accounts.flatMap((upstream) => [
+            {
+              kind: 'account' as const,
+              label: sub2ApiUpstreamAccountName(upstream.name),
+              plan: upstream.snapshot.plan,
+            },
+            ...buildRows(upstream.snapshot),
+          ])
+        : buildRows(provider);
+
       const canvas = renderProviderShareCard(catalog, {
         providerId,
         providerNames: current.settings.providerNames,
         plan: account
           ? [sub2ApiUpstreamAccountName(account.name), provider.plan].filter(Boolean).join(' · ')
-          : provider.plan,
+          : accounts
+            ? null
+            : provider.plan,
         rows,
       });
       await copyCanvas(canvas, snapshot);

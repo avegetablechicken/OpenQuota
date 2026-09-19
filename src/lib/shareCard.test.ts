@@ -6,6 +6,7 @@ import {
   buildProviderShareRows as buildProviderShareRowsWithCatalog,
   providerIconPlacement,
   providerShareCardHeight,
+  renderProviderShareCard,
   renderTotalSpendShareCard as renderTotalSpendShareCardWithCatalog,
   SHARE_CARD_SCALE,
   SHARE_CARD_WIDTH,
@@ -318,6 +319,44 @@ describe('share card layout', () => {
     expect(totalSpendSource).toContain('--total-switcher-height:');
     expect(totalSpendSource).toContain('--total-ring-size:');
     expect(totalSpendSource).toContain('ringSectorPath(segment, TOTAL_SPEND_GEOMETRY)');
+  });
+
+  it('draws upstream names and plans on the same baseline with normal matching typography', () => {
+    const drawn: { text: string; x: number; y: number; font: string; color: string }[] = [];
+    const context = {
+      scale: vi.fn(),
+      fillRect: vi.fn(),
+      beginPath: vi.fn(),
+      roundRect: vi.fn(),
+      fill: vi.fn(),
+      measureText: (value: string) => ({ width: value.length * 6 }),
+      fillText(text: string, x: number, y: number) {
+        drawn.push({ text, x, y, font: this.font, color: this.fillStyle });
+      },
+      font: '',
+      fillStyle: '',
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    renderProviderShareCard(providerCatalogIndex, {
+      providerId: 'codex',
+      plan: null,
+      rows: [
+        { kind: 'account', label: 'first@example.com', plan: 'Plus' },
+        { kind: 'account', label: 'second@example.com', plan: 'Pro' },
+      ],
+    });
+    for (const [email, plan] of [
+      ['first@example.com', 'Plus'],
+      ['second@example.com', 'Pro'],
+    ]) {
+      const nameDraw = drawn.find((item) => item.text === email)!;
+      const planDraw = drawn.find((item) => item.text === plan)!;
+      expect(nameDraw.font).toBe('400 11px system-ui');
+      expect(planDraw).toMatchObject({ y: nameDraw.y, font: nameDraw.font, color: nameDraw.color });
+      expect(planDraw.x - nameDraw.x - context.measureText(email).width).toBe(7);
+    }
   });
 
   it('does not add a title, selected-period caption, or marketing footer to Total Spend', () => {

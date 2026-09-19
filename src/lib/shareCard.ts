@@ -31,6 +31,13 @@ import type {
 export const SHARE_CARD_WIDTH = 360;
 export const SHARE_CARD_SCALE = 4;
 
+export const UPSTREAM_ACCOUNT_HEADER_STYLE = {
+  fontSize: 11,
+  fontWeight: 400,
+  gap: 7,
+  color: '--secondary',
+} as const;
+
 const OUTER_PADDING = 16;
 const CONTENT_GAP = 12;
 const CARD_GUTTER = 5;
@@ -62,6 +69,7 @@ export const TOTAL_SPEND_GEOMETRY = {
 export const TOTAL_SPEND_OUTER_PADDING = TOTAL_SPEND_GEOMETRY.outerPadding;
 
 export type ShareRow =
+  | { kind: 'account'; label: string; plan: string | null }
   | {
       kind: 'quota';
       label: string;
@@ -426,6 +434,7 @@ function usageReading(period: UsagePeriod | null) {
 }
 
 function shareRowHeight(row: ShareRow) {
+  if (row.kind === 'account') return 27;
   if (row.kind === 'quota') return 64;
   if (row.kind === 'trend') return 37;
   return row.condensed ? 23 : 27;
@@ -503,6 +512,20 @@ function drawShareRow(
 ) {
   const left = OUTER_PADDING + ROW_HORIZONTAL_PADDING;
   const right = SHARE_CARD_WIDTH - OUTER_PADDING - ROW_HORIZONTAL_PADDING;
+  if (row.kind === 'account') {
+    const style = UPSTREAM_ACCOUNT_HEADER_STYLE;
+    context.fillStyle = palette.secondary;
+    context.font = `${style.fontWeight} ${style.fontSize}px system-ui`;
+    const planWidth = row.plan ? context.measureText(row.plan).width : 0;
+    const labelWidth = right - left - (row.plan ? planWidth + style.gap : 0);
+    const label = ellipsize(context, row.label, Math.max(0, labelWidth));
+    context.fillText(label, left, top + 17);
+    if (row.plan) {
+      const planLeft = left + context.measureText(label).width + style.gap;
+      fitText(context, row.plan, planLeft, top + 17, Math.max(0, right - planLeft));
+    }
+    return;
+  }
   if (row.kind === 'quota') {
     context.fillStyle = palette.text;
     context.font = '600 13px system-ui';

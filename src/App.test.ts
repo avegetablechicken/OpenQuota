@@ -214,21 +214,38 @@ describe('OpenQuota dashboard', () => {
             : `[data-provider-id="codex"] [data-account-id="${target}"]`;
         const selected = container.querySelector<HTMLElement>(selector)!;
         // jsdom does not implement innerText.
-        for (const card of container.querySelectorAll<HTMLElement>('[data-account-id]')) {
+        for (const card of container.querySelectorAll<HTMLElement>(
+          '[data-provider-id], [data-account-id]',
+        )) {
           Object.defineProperty(card, 'innerText', { value: card.textContent });
         }
         await fireEvent.contextMenu(selected);
         await fireEvent.click(screen.getByRole('menuitem', { name: 'Share Screenshot' }));
-        const expectedAccount = target === 'second' ? 'second' : 'first';
         await waitFor(() => expect(renderCard).toHaveBeenCalled());
-        expect(renderCard.mock.calls[0][1]).toMatchObject({
-          plan: `${expectedAccount}@example.com · Plus`,
-          rows: expect.arrayContaining([
-            expect.objectContaining({ kind: 'quota', fillPercent: target === 'second' ? 89 : 90 }),
-          ]),
-        });
+        const options = renderCard.mock.calls[0][1];
+        const expectedAccounts = target === 'provider' ? ['first', 'second'] : [target];
+        expect(options.plan).toBe(target === 'provider' ? null : `${target}@example.com · Plus`);
+        expect(
+          options.rows.filter((row) => row.kind === 'quota').map((row) => row.fillPercent),
+        ).toEqual(expectedAccounts.flatMap((id) => (id === 'first' ? [90, 90] : [89, 89])));
+        expect(options.rows.filter((row) => row.kind === 'account')).toEqual(
+          target === 'provider'
+            ? expectedAccounts.map((id) => ({
+                kind: 'account',
+                label: `${id}@example.com`,
+                plan: 'Plus',
+              }))
+            : [],
+        );
         await waitFor(() => expect(writeText).toHaveBeenCalled());
-        expect(writeText.mock.calls[0][0]).toContain(`${expectedAccount}@example.com`);
+        for (const id of expectedAccounts) {
+          expect(writeText.mock.calls[0][0]).toContain(`${id}@example.com`);
+        }
+        if (target !== 'provider') {
+          expect(writeText.mock.calls[0][0]).not.toContain(
+            `${target === 'first' ? 'second' : 'first'}@example.com`,
+          );
+        }
       } finally {
         renderCard.mockRestore();
       }

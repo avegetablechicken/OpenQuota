@@ -11,6 +11,7 @@
   import Icon from './Icon.svelte';
   import MetricRenderer from './MetricRenderer.svelte';
   import TotalSpend from './TotalSpend.svelte';
+  import { UPSTREAM_ACCOUNT_HEADER_STYLE } from './shareCard';
   import type { SpendProjection } from './totalSpend';
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
@@ -687,7 +688,13 @@
             }}
           >
             {#if accountId && rows.length > 1}
-              <div class="upstream-account-header">
+              <div
+                class="upstream-account-header"
+                style:--account-font-size={`${UPSTREAM_ACCOUNT_HEADER_STYLE.fontSize}px`}
+                style:--account-font-weight={UPSTREAM_ACCOUNT_HEADER_STYLE.fontWeight}
+                style:--account-gap={`${UPSTREAM_ACCOUNT_HEADER_STYLE.gap}px`}
+                style:--account-color={`var(${UPSTREAM_ACCOUNT_HEADER_STYLE.color})`}
+              >
                 <h2 class="upstream-account-name">{upstreamAccountName}</h2>
                 {#if snapshot.plan}<span class="plan">{snapshot.plan}</span>{/if}
               </div>
@@ -968,7 +975,7 @@
     .upstream-account-header {
       display: flex;
       align-items: baseline;
-      gap: 7px;
+      gap: var(--account-gap);
       padding: 3px 2px 7px;
     }
 
@@ -976,9 +983,15 @@
       min-width: 0;
       margin: 0;
       overflow-wrap: anywhere;
-      color: var(--secondary);
-      font-size: 11px;
-      font-weight: 400;
+      color: var(--account-color);
+      font-size: var(--account-font-size);
+      font-weight: var(--account-font-weight);
+    }
+
+    .upstream-account-header .plan {
+      color: var(--account-color);
+      font-size: var(--account-font-size);
+      font-weight: var(--account-font-weight);
     }
 
     .plan {
