@@ -135,7 +135,8 @@
   }
 
   .settings-section h2,
-  .metric-section h2 {
+  .metric-section h2,
+  .customize-group h2 {
     padding: 0 8px 4px;
     font-size: 11px;
     font-weight: 600;

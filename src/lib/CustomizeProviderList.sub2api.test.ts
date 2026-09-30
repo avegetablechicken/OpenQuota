@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomizeProviderList from './CustomizeProviderList.svelte';
 import { ProviderCatalogIndex } from './metrics';
@@ -101,7 +101,10 @@ describe('CustomizeProviderList Sub2API labels', () => {
       });
 
       expect(await screen.findByText('Sub2API · Claude')).toBeInTheDocument();
-      expect(await screen.findByText('192.0.2.8:6060')).toBeInTheDocument();
+      expect(
+        within(screen.getByRole('group', { name: 'Unofficial' })).getByText('Sub2API · Claude'),
+      ).toBeInTheDocument();
+      expect(await screen.findByText('Claude relay · 192.0.2.8:6060')).toBeInTheDocument();
       expect(screen.queryByText(/Sub2API \d/)).not.toBeInTheDocument();
       expect(screen.queryByText(/\d+ metrics/)).not.toBeInTheDocument();
       expect(mocks.invoke).toHaveBeenCalledWith('get_sub2api_config_state', {
@@ -129,6 +132,7 @@ describe('CustomizeProviderList Sub2API labels', () => {
     });
 
     expect(await screen.findByText('Account name')).toBeInTheDocument();
+    expect(screen.getByText('Not configured')).toBeInTheDocument();
     expect(screen.queryByText(/Sub2API/)).not.toBeInTheDocument();
   });
 
@@ -173,8 +177,8 @@ describe('CustomizeProviderList Sub2API labels', () => {
       reducedMotion: false,
     });
 
-    expect(await screen.findByText('192.0.2.8:6060')).toBeInTheDocument();
-    expect(screen.getByText('claude.example.com')).toBeInTheDocument();
+    expect(await screen.findByText('Claude relay · 192.0.2.8:6060')).toBeInTheDocument();
+    expect(screen.getByText('Claude relay · claude.example.com')).toBeInTheDocument();
     expect(screen.getAllByText('Sub2API · Claude')).toHaveLength(2);
     expect(screen.queryByText(/Sub2API \d/)).not.toBeInTheDocument();
     expect(screen.queryByText('2 metrics')).not.toBeInTheDocument();

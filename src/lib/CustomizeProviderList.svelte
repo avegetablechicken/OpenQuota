@@ -12,6 +12,7 @@
     rememberSub2ApiUpstream,
     sub2ApiEndpoints,
     sub2ApiMetricSupported,
+    sub2ApiUpstreamLabel,
     sub2ApiUpstreams,
   } from './sub2ApiUpstreams';
 
@@ -48,10 +49,29 @@
   );
   function providerListSubtitle(provider: ProviderLayout) {
     if (catalog.supportsConnectionConfiguration(provider.id)) {
-      return $sub2ApiEndpoints[provider.id] ?? 'Base URL unavailable';
+      const upstream = $sub2ApiUpstreams[provider.id];
+      const endpoint = $sub2ApiEndpoints[provider.id];
+      if (!upstream || !endpoint) return 'Not configured';
+      return `${sub2ApiUpstreamLabel(upstream)} relay · ${endpoint}`;
     }
     return `${availableMetricCount(provider)} metrics`;
   }
+  const providerGroups = $derived([
+    {
+      id: 'providers',
+      title: 'Providers',
+      providers: visibleProviders.filter(
+        (provider) => !catalog.supportsConnectionConfiguration(provider.id),
+      ),
+    },
+    {
+      id: 'unofficial',
+      title: 'Unofficial',
+      providers: visibleProviders.filter((provider) =>
+        catalog.supportsConnectionConfiguration(provider.id),
+      ),
+    },
+  ]);
   function availableMetricCount(provider: ProviderLayout) {
     const upstream = $sub2ApiUpstreams[provider.id];
     return provider.metrics.filter((metric) =>
@@ -110,76 +130,86 @@
 </script>
 
 <section class="screen customize-screen" aria-label="Customize">
-  <div class="customize-list" role="list">
-    {#each visibleProviders as provider (provider.id)}
-      <div
-        role="listitem"
-        class:inactive={!provider.enabled}
-        class="provider-list-row"
-        data-reorder-group={provider.enabled ? 'customize-providers' : undefined}
-        data-reorder-id={provider.enabled ? provider.id : undefined}
-        use:pointerReorder={{
-          id: provider.id,
-          group: 'customize-providers',
-          label: providerListName(provider.id),
-          disabled: !provider.enabled,
-          gripOnly: true,
-          touchGripOnly: true,
-          onReorder: (targetId) => reorder(provider.id, targetId),
-          onStart: onReorderStart,
-          onEnd: onReorderEnd,
-        }}
-        animate:flip={reorderFlip(reducedMotion)}
-      >
-        <span
-          class="reorder-grip"
-          data-reorder-handle
-          data-reorder-touch-handle
-          role="button"
-          tabindex={provider.enabled ? 0 : undefined}
-          aria-label={`Move ${providerListName(provider.id)}`}
-          aria-describedby="reorder-instructions"
-          aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
-          ><Icon name="grip-lines" size={16} strokeWidth={2} /></span
-        >
-        <button class="provider-list-main" type="button" onclick={() => onOpen(provider.id)}
-          ><ProviderIcon providerId={provider.id} /><span
-            ><b>{providerListName(provider.id)}</b><small>{providerListSubtitle(provider)}</small
-            ></span
-          ></button
-        >
-        <label class="switch"
-          ><input
-            aria-label={`Enable ${provider.id}`}
-            type="checkbox"
-            checked={provider.enabled}
-            onchange={(event) =>
-              updateProvider({ ...provider, enabled: event.currentTarget.checked })}
-          /><span></span></label
-        >
-        <button
-          class="chevron"
-          type="button"
-          aria-label={`Customize ${provider.id}`}
-          onclick={() => onOpen(provider.id)}
-          ><Icon name="chevron-right" size={13} strokeWidth={2.2} /></button
-        >
-      </div>
-    {/each}
-    {#if addableProvider}
-      <div class="provider-add-shell" role="listitem">
-        <button
-          class="provider-add-row"
-          type="button"
-          aria-label={`Add ${addableProviderName}`}
-          onclick={() => addProvider(addableProvider)}
-        >
-          <span class="provider-add-icon"><Icon name="plus" size={18} strokeWidth={1.8} /></span>
-          <span>Add {addableProviderName}</span>
-        </button>
+  {#each providerGroups as group (group.id)}
+    {#if group.providers.length > 0 || (group.id === 'unofficial' && addableProvider)}
+      <div class="customize-group" role="group" aria-labelledby={`customize-group-${group.id}`}>
+        <h2 id={`customize-group-${group.id}`}>{group.title}</h2>
+        <div class="customize-list" role="list">
+          {#each group.providers as provider (provider.id)}
+            <div
+              role="listitem"
+              class:inactive={!provider.enabled}
+              class="provider-list-row"
+              data-reorder-group={provider.enabled ? `customize-${group.id}` : undefined}
+              data-reorder-id={provider.enabled ? provider.id : undefined}
+              use:pointerReorder={{
+                id: provider.id,
+                group: `customize-${group.id}`,
+                label: providerListName(provider.id),
+                disabled: !provider.enabled,
+                gripOnly: true,
+                touchGripOnly: true,
+                onReorder: (targetId) => reorder(provider.id, targetId),
+                onStart: onReorderStart,
+                onEnd: onReorderEnd,
+              }}
+              animate:flip={reorderFlip(reducedMotion)}
+            >
+              <span
+                class="reorder-grip"
+                data-reorder-handle
+                data-reorder-touch-handle
+                role="button"
+                tabindex={provider.enabled ? 0 : undefined}
+                aria-label={`Move ${providerListName(provider.id)}`}
+                aria-describedby="reorder-instructions"
+                aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                ><Icon name="grip-lines" size={16} strokeWidth={2} /></span
+              >
+              <button class="provider-list-main" type="button" onclick={() => onOpen(provider.id)}
+                ><ProviderIcon providerId={provider.id} /><span
+                  ><b>{providerListName(provider.id)}</b><small
+                    >{providerListSubtitle(provider)}</small
+                  ></span
+                ></button
+              >
+              <label class="switch"
+                ><input
+                  aria-label={`Enable ${provider.id}`}
+                  type="checkbox"
+                  checked={provider.enabled}
+                  onchange={(event) =>
+                    updateProvider({ ...provider, enabled: event.currentTarget.checked })}
+                /><span></span></label
+              >
+              <button
+                class="chevron"
+                type="button"
+                aria-label={`Customize ${provider.id}`}
+                onclick={() => onOpen(provider.id)}
+                ><Icon name="chevron-right" size={13} strokeWidth={2.2} /></button
+              >
+            </div>
+          {/each}
+          {#if group.id === 'unofficial' && addableProvider}
+            <div class="provider-add-shell" role="listitem">
+              <button
+                class="provider-add-row"
+                type="button"
+                aria-label={`Add ${addableProviderName}`}
+                onclick={() => addProvider(addableProvider)}
+              >
+                <span class="provider-add-icon"
+                  ><Icon name="plus" size={18} strokeWidth={1.8} /></span
+                >
+                <span>Add {addableProviderName}</span>
+              </button>
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
-  </div>
+  {/each}
   <button class="screen-cross-link" type="button" aria-label="Settings" onclick={onSettings}>
     <Icon name="gear" size={17} />
     <span><b>Settings</b><small>Notifications, appearance and more</small></span>
@@ -189,6 +219,10 @@
 
 <style>
   :global {
+    .customize-group {
+      margin-bottom: 14px;
+    }
+
     .provider-list-row {
       display: flex;
       min-height: 52px;

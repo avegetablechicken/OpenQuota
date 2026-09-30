@@ -93,7 +93,7 @@ export class ProviderCatalogIndex {
   }
 
   connectionConfigurationLabel() {
-    return 'Unofficial';
+    return 'Relay Account';
   }
 
   localUsageSourceNote(id: string, displayName?: string) {
