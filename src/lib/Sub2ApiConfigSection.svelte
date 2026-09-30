@@ -10,6 +10,7 @@
   } from './backend';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
+  import SelectMenu from './SelectMenu.svelte';
   import { saveShortcut } from './saveShortcut';
   import {
     forgetSub2ApiUpstream,
@@ -403,7 +404,7 @@
         <ProviderIcon
           {providerId}
           upstreamProvider={connectionState.configured ? connectionState.upstream : null}
-          size={20}
+          size={18}
         />
         <span>
           <b
@@ -425,27 +426,20 @@
 
       {#if open}
         <div class="sub2api-config-editor">
-          <fieldset class="upstream-field">
-            <legend>Upstream</legend>
-            <div class="upstream-options">
-              {#each upstreamOptions as option (option)}
-                <label class:active={upstream === option}>
-                  <input
-                    type="radio"
-                    name={`${providerId}-upstream`}
-                    value={option}
-                    checked={upstream === option}
-                    disabled={saving}
-                    onchange={() => selectUpstream(option)}
-                  />
-                  <ProviderIcon providerId={option} size={15} />
-                  <span>{sub2ApiUpstreamLabel(option)}</span>
-                </label>
-              {/each}
-            </div>
-          </fieldset>
+          <div class="config-row">
+            <span>Upstream</span>
+            <SelectMenu
+              label="Upstream"
+              value={upstream}
+              options={upstreamOptions.map((option) => ({
+                value: option,
+                label: sub2ApiUpstreamLabel(option),
+              }))}
+              onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
+            />
+          </div>
           {#if upstream === 'codex'}
-            <label>
+            <label class="config-row">
               <span>Provider</span>
               <input
                 type="text"
@@ -460,7 +454,7 @@
             </label>
             {#if providerError}<div class="config-error" role="alert">{providerError}</div>{/if}
           {/if}
-          <div class="custom-base-url-row">
+          <div class="config-row">
             <span>Custom Base URL</span>
             <label class="switch custom-base-url-switch">
               <input
@@ -474,22 +468,22 @@
               <span></span>
             </label>
           </div>
-          {#if upstream === 'claude' && claudeBaseUrlError}
-            <div class="config-error" role="alert">{claudeBaseUrlError}</div>
-          {/if}
-          <label>
+          <label class="config-row">
             <span>Base URL</span>
             <input
               type="url"
               bind:value={baseUrl}
               autocomplete="url"
               spellcheck="false"
-              placeholder="https://sub2api.example.com"
+              placeholder={customBaseUrl ? 'https://sub2api.example.com' : 'Resolved automatically'}
               aria-label="Base URL"
               disabled={saving || !customBaseUrl}
             />
           </label>
-          <label>
+          {#if upstream === 'claude' && claudeBaseUrlError}
+            <div class="config-error" role="alert">{claudeBaseUrlError}</div>
+          {/if}
+          <label class="config-row">
             <span>Email</span>
             <input
               type="email"
@@ -501,16 +495,14 @@
               disabled={saving}
             />
           </label>
-          <label>
+          <div class="config-row">
             <span>Password</span>
             <div class="password-field">
               <input
                 type={revealPassword ? 'text' : 'password'}
                 bind:value={password}
                 autocomplete="current-password"
-                placeholder={canReuseSavedPassword
-                  ? 'Leave blank to keep saved password'
-                  : 'Password'}
+                placeholder={canReuseSavedPassword ? 'Unchanged' : 'Password'}
                 aria-label="Sub2API administrator password"
                 disabled={saving}
               />
@@ -522,7 +514,7 @@
                 <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
               </button>
             </div>
-          </label>
+          </div>
 
           <div class="sub2api-config-actions">
             <button
@@ -535,15 +527,11 @@
             {#if connectionState.configured}
               <button
                 bind:this={clearButton}
-                class="clear"
                 type="button"
                 disabled={saving || confirmingClear}
-                aria-label="Clear Sub2API connection"
-                title="Clear Sub2API connection"
-                onclick={() => void requestClear()}
+                aria-label="Clear connection"
+                onclick={() => void requestClear()}>Clear…</button
               >
-                <Icon name="clear-filled" size={15} />
-              </button>
             {/if}
           </div>
 
@@ -554,9 +542,9 @@
               aria-labelledby="clear-sub2api-title"
               aria-describedby="clear-sub2api-message"
             >
-              <strong id="clear-sub2api-title">Clear Sub2API connection?</strong>
+              <strong id="clear-sub2api-title">Clear connection?</strong>
               <span id="clear-sub2api-message"
-                >The Base URL and saved login will be removed. This Sub2API item will remain.</span
+                >The Base URL and saved login will be removed. This account will remain.</span
               >
               <div>
                 <button
@@ -595,12 +583,7 @@
     disabled={saving || confirmingItemRemoval}
     onclick={() => void requestItemRemoval()}
   >
-    <Icon name="clear-filled" size={17} />
-    <span>
-      <b>Delete</b>
-      <small>Remove this provider and its connection</small>
-    </span>
-    <Icon name="chevron-right" size={13} strokeWidth={2.2} />
+    Delete Account
   </button>
 
   {#if confirmingItemRemoval}
@@ -610,11 +593,11 @@
       aria-labelledby="remove-sub2api-item-title"
       aria-describedby="remove-sub2api-item-message"
     >
-      <strong id="remove-sub2api-item-title">Delete this Sub2API item?</strong>
+      <strong id="remove-sub2api-item-title">Delete this account?</strong>
       <span id="remove-sub2api-item-message"
         >{connectionState.configured
-          ? 'The provider and its saved login will be removed.'
-          : 'This empty configuration item will be removed.'}</span
+          ? 'The account and its saved login will be removed.'
+          : 'This empty account will be removed.'}</span
       >
       <div>
         <button
@@ -690,8 +673,8 @@
   }
 
   .sub2api-config-summary i {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background: #34c759;
   }
@@ -704,100 +687,42 @@
   .sub2api-config-actions button,
   .clear-confirm button,
   .remove-item-confirm button {
-    min-height: 26px;
+    padding: 4px 8px;
     border: 0;
     border-radius: 6px;
     color: var(--text);
     background: var(--button-hover);
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 10px;
   }
 
-  .sub2api-config-summary > button {
-    padding: 0 10px;
+  .sub2api-config-actions button,
+  .clear-confirm button,
+  .remove-item-confirm button {
+    min-height: 26px;
+    padding: 5px 10px;
   }
 
   .sub2api-config-editor {
     display: grid;
-    gap: 10px;
-    padding: 11px 12px 12px;
     border-top: 1px solid var(--separator);
   }
 
-  .sub2api-config-editor > label {
-    display: grid;
-    gap: 4px;
-  }
-
-  .upstream-field {
-    display: grid;
-    gap: 4px;
-    min-width: 0;
-    margin: 0;
-    border: 0;
-    padding: 0;
-  }
-
-  .upstream-field legend {
-    padding: 0;
-    color: var(--secondary);
-    font-size: 10px;
-    font-weight: 600;
-  }
-
-  .upstream-options {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 2px;
-    border-radius: 7px;
-    padding: 2px;
-    background: var(--tray);
-  }
-
-  .upstream-options label {
-    position: relative;
+  .config-row {
     display: flex;
-    min-width: 0;
-    height: 28px;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    border-radius: 5px;
-    color: var(--secondary);
-    font-size: 11px;
-    font-weight: 600;
-  }
-
-  .upstream-options label.active {
-    color: var(--text);
-    background: var(--button-hover);
-  }
-
-  .upstream-options input {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-  }
-
-  .upstream-options label:has(input:focus-visible) {
-    outline: 2px solid color-mix(in srgb, var(--meter-fill) 35%, transparent);
-  }
-
-  .sub2api-config-editor > label > span {
-    color: var(--secondary);
-    font-size: 10px;
-    font-weight: 600;
-  }
-
-  .custom-base-url-row {
-    display: flex;
-    min-height: 24px;
+    min-height: 40px;
     align-items: center;
     justify-content: space-between;
-    color: var(--secondary);
-    font-size: 10px;
-    font-weight: 600;
+    gap: 10px;
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+
+  .config-row + .config-row {
+    border-top: 1px solid var(--separator);
+  }
+
+  .config-row > span {
+    flex: 0 0 auto;
   }
 
   .custom-base-url-switch {
@@ -824,18 +749,29 @@
     cursor: default;
   }
 
-  .sub2api-config-editor input {
+  .sub2api-config-editor input:not([type='checkbox']) {
     box-sizing: border-box;
     width: 100%;
-    height: 32px;
+    min-width: 0;
+    max-width: 190px;
+    height: 28px;
     border: 1px solid var(--separator);
-    border-radius: 6px;
+    border-radius: 7px;
     outline: none;
-    padding: 0 9px;
+    padding: 4px 8px;
     color: var(--text);
     background: var(--tray);
     font: inherit;
-    font-size: 12px;
+    font-size: 11px;
+  }
+
+  .sub2api-config-editor input:not([type='checkbox']):disabled {
+    opacity: 1;
+    border-color: transparent;
+    color: var(--secondary);
+    -webkit-text-fill-color: var(--secondary);
+    background: transparent;
+    text-align: right;
   }
 
   .sub2api-config-editor input:focus {
@@ -845,49 +781,41 @@
 
   .password-field {
     position: relative;
+    width: 100%;
+    max-width: 190px;
   }
 
   .password-field input {
-    padding-right: 34px;
+    padding-right: 30px;
   }
 
   .password-field button {
+    position: absolute;
+    top: 1px;
+    right: 1px;
     display: grid;
-    width: 28px;
-    height: 28px;
+    width: 26px;
+    height: 26px;
     place-items: center;
     border: 0;
     color: var(--secondary);
     background: transparent;
   }
 
-  .password-field button {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-  }
-
   .sub2api-config-actions {
     display: flex;
-    justify-content: flex-end;
-    gap: 6px;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 12px 12px;
+    border-top: 1px solid var(--separator);
   }
 
   .sub2api-config-actions .primary {
-    min-width: 62px;
-    padding: 0 12px;
+    min-width: 56px;
+    padding-inline: 12px;
     color: white;
     background: var(--meter-fill);
-  }
-
-  .sub2api-config-actions .clear {
-    display: grid;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    place-items: center;
-    color: var(--secondary);
-    background: transparent;
+    font-weight: 600;
   }
 
   .sub2api-config-actions button:disabled,
@@ -897,42 +825,37 @@
     opacity: 0.5;
   }
 
+  .clear-confirm {
+    margin: 0 12px 12px;
+  }
+
   .clear-confirm,
   .remove-item-confirm {
     display: grid;
-    gap: 7px;
-    border-radius: 7px;
+    gap: 6px;
+    border-radius: 8px;
     padding: 9px;
     background: color-mix(in srgb, var(--meter-critical) 8%, transparent);
-    font-size: 11px;
-  }
-
-  .clear-confirm strong,
-  .remove-item-confirm strong {
-    font-size: 11px;
+    font-size: 10px;
   }
 
   .clear-confirm span,
   .remove-item-confirm span {
     color: var(--secondary);
-    line-height: 15px;
+    line-height: 14px;
   }
 
   .clear-confirm > div,
   .remove-item-confirm > div {
     display: flex;
-    justify-content: flex-end;
-    gap: 6px;
-  }
-
-  .clear-confirm button,
-  .remove-item-confirm button {
-    padding: 0 10px;
+    gap: 7px;
   }
 
   .clear-confirm .destructive,
   .remove-item-confirm .destructive {
-    color: var(--error);
+    color: var(--tray);
+    background: var(--error);
+    font-weight: 600;
   }
 
   .sub2api-item-actions {
@@ -940,34 +863,21 @@
   }
 
   .remove-item-row {
-    display: flex;
+    display: block;
     width: 100%;
-    min-height: 48px;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 12px;
+    min-height: 42px;
+    padding: 8px 12px;
     border: 0;
     border-radius: 12px;
     color: var(--error);
     background: var(--card);
-    text-align: left;
-  }
-
-  .remove-item-row > span {
-    display: flex;
-    min-width: 0;
-    flex: 1;
-    flex-direction: column;
-  }
-
-  .remove-item-row b {
     font-size: 13px;
     font-weight: 600;
+    text-align: center;
   }
 
-  .remove-item-row small {
-    color: var(--secondary);
-    font-size: 10px;
+  .remove-item-row:hover:not(:disabled) {
+    background: var(--card-hover);
   }
 
   .remove-item-confirm {
@@ -980,7 +890,11 @@
     line-height: 14px;
   }
 
+  .sub2api-config-editor > .config-error {
+    padding: 0 12px 8px;
+  }
+
   .summary-error {
-    padding: 0 12px 10px 42px;
+    padding: 0 12px 10px 40px;
   }
 </style>

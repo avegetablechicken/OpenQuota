@@ -11,6 +11,11 @@ import {
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 
+async function chooseUpstream(name: 'Codex' | 'Claude') {
+  await fireEvent.click(screen.getByRole('combobox', { name: 'Upstream' }));
+  await fireEvent.click(screen.getByRole('option', { name }));
+}
+
 describe('Sub2ApiConfigSection', () => {
   beforeEach(() => {
     mocks.invoke.mockReset().mockImplementation((command: string) => {
@@ -84,7 +89,7 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api' });
     expect(await screen.findByRole('region', { name: 'Connection' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+    await chooseUpstream('Claude');
     const baseUrl = screen.getByLabelText('Base URL');
     await waitFor(() => expect(baseUrl).toHaveValue('https://resolved-claude.example.com'));
     expect(baseUrl).toBeDisabled();
@@ -119,7 +124,7 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+    await chooseUpstream('Claude');
     const baseUrl = screen.getByLabelText('Base URL');
     await waitFor(() => expect(baseUrl).toHaveValue('https://resolved-claude.example.com'));
 
@@ -198,10 +203,10 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('old@example.com');
     expect(screen.getByLabelText('Sub2API administrator password')).toHaveAttribute(
       'placeholder',
-      'Leave blank to keep saved password',
+      'Unchanged',
     );
 
-    await fireEvent.click(screen.getByRole('radio', { name: 'Codex' }));
+    await chooseUpstream('Codex');
 
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('');
     expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('');
@@ -223,19 +228,19 @@ describe('Sub2ApiConfigSection', () => {
     await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
       target: { value: 'new-password' },
     });
-    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+    await chooseUpstream('Claude');
 
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('old@example.com');
     expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('');
     expect(screen.getByLabelText('Sub2API administrator password')).toHaveAttribute(
       'placeholder',
-      'Leave blank to keep saved password',
+      'Unchanged',
     );
     expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).toBeChecked();
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://claude.example.com');
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
 
-    await fireEvent.click(screen.getByRole('radio', { name: 'Codex' }));
+    await chooseUpstream('Codex');
 
     expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).toBeChecked();
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://new-codex.example.com');
@@ -274,7 +279,7 @@ describe('Sub2ApiConfigSection', () => {
       target: { value: 'codex-draft-password' },
     });
 
-    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+    await chooseUpstream('Claude');
 
     expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).not.toBeChecked();
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('');
@@ -286,7 +291,7 @@ describe('Sub2ApiConfigSection', () => {
       target: { value: 'claude-draft-password' },
     });
 
-    await fireEvent.click(screen.getByRole('radio', { name: 'Codex' }));
+    await chooseUpstream('Codex');
 
     expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).toBeChecked();
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://draft-codex.example.com');
@@ -297,7 +302,7 @@ describe('Sub2ApiConfigSection', () => {
       'codex-draft-password',
     );
 
-    await fireEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+    await chooseUpstream('Claude');
 
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue(
       'claude-draft@example.com',
@@ -533,11 +538,9 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('admin@example.com');
     await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Clear Sub2API connection' }));
-    expect(
-      screen.getByRole('group', { name: 'Clear Sub2API connection?' }),
-    ).toHaveAccessibleDescription(
-      'The Base URL and saved login will be removed. This Sub2API item will remain.',
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear connection' }));
+    expect(screen.getByRole('group', { name: 'Clear connection?' })).toHaveAccessibleDescription(
+      'The Base URL and saved login will be removed. This account will remain.',
     );
     await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
     await waitFor(() =>
@@ -553,11 +556,11 @@ describe('Sub2ApiConfigSection', () => {
     const onRemove = vi.fn();
     render(Sub2ApiConfigSection, { providerId: 'sub2api@3', onRemove });
     await screen.findByRole('region', { name: 'Connection' });
-    await fireEvent.click(screen.getByRole('button', { name: /^Delete Remove/ }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete Account' }));
 
-    expect(
-      screen.getByRole('group', { name: 'Delete this Sub2API item?' }),
-    ).toHaveAccessibleDescription('This empty configuration item will be removed.');
+    expect(screen.getByRole('group', { name: 'Delete this account?' })).toHaveAccessibleDescription(
+      'This empty account will be removed.',
+    );
     await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 
     await waitFor(() =>
