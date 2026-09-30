@@ -120,16 +120,17 @@ describe('CustomizeProviderDetail Sub2API metric availability', () => {
     forgetSub2ApiUpstream('sub2api@2');
   });
 
-  it('locks Codex-only metrics for a Claude upstream', () => {
+  it('hides Codex-only metrics for a Claude upstream', () => {
     renderDetail('claude');
 
-    expect(screen.getByRole('checkbox', { name: 'Show Spark' })).toBeDisabled();
-    expect(screen.getByRole('checkbox', { name: 'Show Spark Weekly' })).toBeDisabled();
-    expect(screen.getByRole('checkbox', { name: 'Show Rate Limit Resets' })).toBeDisabled();
+    expect(screen.queryByRole('checkbox', { name: 'Show Spark' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Show Spark Weekly' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('checkbox', { name: 'Show Rate Limit Resets' }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Show Sonnet' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Fable' })).toBeEnabled();
-    expect(screen.getByRole('checkbox', { name: 'Show Extra Usage' })).toBeDisabled();
-    expect(screen.queryByRole('button', { name: 'Pin Spark' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Show Extra Usage' })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Name' })).not.toBeInTheDocument();
   });
 
@@ -144,15 +145,14 @@ describe('CustomizeProviderDetail Sub2API metric availability', () => {
     expect(screen.queryByText(/Sub2API \d/)).not.toBeInTheDocument();
   });
 
-  it('locks Claude-only metrics for a Codex upstream', () => {
+  it('hides Claude-only metrics for a Codex upstream', () => {
     renderDetail('codex');
 
-    expect(screen.getByRole('checkbox', { name: 'Show Sonnet' })).toBeDisabled();
-    expect(screen.getByRole('checkbox', { name: 'Show Fable' })).toBeDisabled();
+    expect(screen.queryByRole('checkbox', { name: 'Show Sonnet' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Show Fable' })).not.toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Show Spark' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Spark Weekly' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Rate Limit Resets' })).toBeEnabled();
-    expect(screen.getByRole('checkbox', { name: 'Show Extra Usage' })).toBeDisabled();
-    expect(screen.queryByRole('button', { name: 'Pin Sonnet' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Show Extra Usage' })).not.toBeInTheDocument();
   });
 });

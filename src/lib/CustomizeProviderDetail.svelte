@@ -142,7 +142,9 @@
       />
     {/if}
     {#each ['alwaysVisible', 'onDemand'] as section (section)}
-      {@const sectionMetrics = provider.metrics.filter((metric) => metric.section === section)}
+      {@const sectionMetrics = provider.metrics.filter(
+        (metric) => metric.section === section && metricSupported(metric.id),
+      )}
       <div
         class="metric-section"
         role="group"

@@ -74,11 +74,12 @@ export function sub2ApiMetricSupported(
   metricId: string,
   upstream?: Sub2ApiUpstream,
 ) {
-  if (sub2ApiDisplayName(providerId) === null || !upstream) return true;
+  if (sub2ApiDisplayName(providerId) === null) return true;
   const prefix = `${providerId}.`;
   if (!metricId.startsWith(prefix)) return true;
   const suffix = metricId.slice(prefix.length);
   if (suffix === 'extra') return false;
+  if (!upstream) return true;
   if (upstream === 'claude') {
     return !['spark', 'sparkWeekly', 'rateLimitResets'].includes(suffix);
   }
