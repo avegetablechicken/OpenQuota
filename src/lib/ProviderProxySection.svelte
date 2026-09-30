@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { slide } from 'svelte/transition';
   import { probeProviderProxy } from './backend';
+  import Icon from './Icon.svelte';
+  import { springMotion } from './motion';
   import SelectMenu from './SelectMenu.svelte';
   import type { AppSettings, ProviderLayout, ProxyExitLocation } from './types';
 
@@ -7,6 +10,8 @@
     settings: AppSettings;
     provider: ProviderLayout;
     onChange: (settings: AppSettings) => void;
+    onContentMorph?: () => void;
+    reducedMotion?: boolean;
   }
 
   type ProxyMode = 'system' | 'direct' | 'custom';
@@ -17,7 +22,14 @@
     { value: 'custom', label: 'Custom' },
   ];
 
-  let { settings, provider, onChange }: Props = $props();
+  let {
+    settings,
+    provider,
+    onChange,
+    onContentMorph = () => {},
+    reducedMotion = false,
+  }: Props = $props();
+  let expanded = $state(false);
   let mode = $state<ProxyMode>('system');
   const custom = $derived(mode === 'custom');
   let draft = $state('');
@@ -123,58 +135,82 @@
 </script>
 
 <section class="provider-proxy-section" aria-label="Proxy">
-  <h2>Proxy</h2>
-  <div class="provider-proxy-card">
-    <div class="proxy-row">
-      <span>Mode</span>
-      <SelectMenu
-        label="Proxy mode"
-        value={mode}
-        options={modeOptions}
-        onChange={(value) => selectMode(value as ProxyMode)}
-      />
-    </div>
-    {#if custom}
+  <h2>
+    <button
+      class="proxy-disclosure"
+      class:expanded
+      type="button"
+      aria-expanded={expanded}
+      aria-controls={`provider-proxy-card-${provider.id}`}
+      onclick={() => {
+        onContentMorph();
+        expanded = !expanded;
+      }}
+    >
+      <span>Proxy</span>
+      <Icon name="chevron-right" size={10} strokeWidth={2.4} />
+      {#if !expanded && mode !== 'system'}
+        <small>{modeOptions.find((option) => option.value === mode)?.label}</small>
+      {/if}
+    </button>
+  </h2>
+  {#if expanded}
+    <div
+      class="provider-proxy-card"
+      id={`provider-proxy-card-${provider.id}`}
+      transition:slide={springMotion(reducedMotion)}
+    >
       <div class="proxy-row">
-        <span>URL</span>
-        <input
-          class="proxy-url"
-          type="text"
-          bind:value={draft}
-          placeholder="http://127.0.0.1:7890"
-          aria-label="Proxy URL"
-          aria-invalid={!!error}
-          autocomplete="off"
-          spellcheck="false"
-          oninput={() => (error = '')}
-          onblur={commit}
-          onkeydown={(event) => {
-            if (event.key === 'Enter') event.currentTarget.blur();
-            else if (event.key === 'Escape') {
-              event.preventDefault();
-              event.stopPropagation();
-              draft = savedValue === 'direct' ? '' : savedValue;
-              error = '';
-              event.currentTarget.blur();
-            }
-          }}
+        <span>Mode</span>
+        <SelectMenu
+          label="Proxy mode"
+          value={mode}
+          options={modeOptions}
+          onChange={(value) => selectMode(value as ProxyMode)}
         />
-        {#if location}
-          <span class="proxy-location" role="img" aria-label={locationLabel} title={locationLabel}
-            >{flag}</span
-          >
-        {:else if checking}
-          <span
-            class="proxy-checking"
-            role="status"
-            aria-label="Checking proxy exit location"
-            title="Checking proxy exit location">…</span
-          >
-        {/if}
       </div>
-    {/if}
-    {#if error}<p class="provider-proxy-error" role="alert">{error}</p>{/if}
-  </div>
+      {#if custom}
+        <div class="proxy-row">
+          <span>URL</span>
+          <input
+            class="proxy-url"
+            type="text"
+            bind:value={draft}
+            placeholder="http://127.0.0.1:7890"
+            aria-label="Proxy URL"
+            aria-invalid={!!error}
+            autocomplete="off"
+            spellcheck="false"
+            oninput={() => (error = '')}
+            onblur={commit}
+            onkeydown={(event) => {
+              if (event.key === 'Enter') event.currentTarget.blur();
+              else if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                draft = savedValue === 'direct' ? '' : savedValue;
+                error = '';
+                event.currentTarget.blur();
+              }
+            }}
+          />
+          {#if location}
+            <span class="proxy-location" role="img" aria-label={locationLabel} title={locationLabel}
+              >{flag}</span
+            >
+          {:else if checking}
+            <span
+              class="proxy-checking"
+              role="status"
+              aria-label="Checking proxy exit location"
+              title="Checking proxy exit location">…</span
+            >
+          {/if}
+        </div>
+      {/if}
+      {#if error}<p class="provider-proxy-error" role="alert">{error}</p>{/if}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -183,10 +219,42 @@
   }
 
   h2 {
-    margin: 0 8px 5px;
-    color: var(--secondary);
+    margin: 0 0 5px;
     font-size: 11px;
     font-weight: 600;
+  }
+
+  .proxy-disclosure {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    border: 0;
+    color: var(--secondary);
+    background: none;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .proxy-disclosure:hover {
+    color: var(--text);
+  }
+
+  .proxy-disclosure :global(svg) {
+    transition: transform var(--motion-switch);
+  }
+
+  .proxy-disclosure.expanded :global(svg) {
+    transform: rotate(90deg);
+  }
+
+  .proxy-disclosure small {
+    margin-left: auto;
+    color: var(--tertiary);
+    font-size: 11px;
+    font-weight: 400;
   }
 
   .provider-proxy-card {

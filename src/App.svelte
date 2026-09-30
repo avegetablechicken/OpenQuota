@@ -980,6 +980,7 @@
                 onReorderStart={beginCustomizationGesture}
                 onReorderEnd={endCustomizationGesture}
                 onProviderRemoved={() => navigate('customize')}
+                onContentMorph={beginContentMorph}
                 {reducedMotion}
               />
             {/if}

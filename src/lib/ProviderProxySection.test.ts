@@ -23,6 +23,7 @@ async function setup(existing = '') {
   settings.providerProxies = { [provider.id]: existing, other: 'http://localhost:8888' };
   const onChange = vi.fn();
   const view = render(ProviderProxySection, { settings, provider, onChange });
+  await fireEvent.click(screen.getByRole('button', { name: /^Proxy/ }));
   return {
     get input() {
       return screen.getByLabelText('Proxy URL') as HTMLInputElement;
@@ -35,6 +36,40 @@ async function setup(existing = '') {
     view,
   };
 }
+
+it('lets the panel follow the disclosure animation in both directions', async () => {
+  const settings = structuredClone(settingsState.settings);
+  const provider = settings.providers[0];
+  const onContentMorph = vi.fn();
+  render(ProviderProxySection, { settings, provider, onChange: vi.fn(), onContentMorph });
+  const disclosure = screen.getByRole('button', { name: /^Proxy/ });
+  await fireEvent.click(disclosure);
+  await fireEvent.click(disclosure);
+  expect(onContentMorph).toHaveBeenCalledTimes(2);
+});
+
+it('omits the header summary while the system proxy is used', () => {
+  const settings = structuredClone(settingsState.settings);
+  const provider = settings.providers[0];
+  render(ProviderProxySection, { settings, provider, onChange: vi.fn() });
+  const disclosure = screen.getByRole('button', { name: /^Proxy/ });
+  expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+  expect(disclosure).not.toHaveTextContent('System');
+});
+
+it('starts collapsed and summarizes the saved mode in the header', async () => {
+  const settings = structuredClone(settingsState.settings);
+  const provider = settings.providers[0];
+  settings.providerProxies = { [provider.id]: 'direct' };
+  render(ProviderProxySection, { settings, provider, onChange: vi.fn() });
+  const disclosure = screen.getByRole('button', { name: /^Proxy/ });
+  expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+  expect(disclosure).toHaveTextContent('Direct');
+  expect(screen.queryByRole('combobox', { name: 'Proxy mode' })).toBeNull();
+  await fireEvent.click(disclosure);
+  expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('combobox', { name: 'Proxy mode' })).toHaveTextContent('Direct');
+});
 
 async function chooseMode(name: 'System' | 'Direct' | 'Custom') {
   await fireEvent.click(screen.getByRole('combobox', { name: 'Proxy mode' }));

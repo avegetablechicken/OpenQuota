@@ -23,6 +23,7 @@
     onReorderStart: () => void;
     onReorderEnd: (moved: boolean, cancelled?: boolean) => void;
     onProviderRemoved?: () => void;
+    onContentMorph?: () => void;
     reducedMotion: boolean;
   }
   let {
@@ -35,6 +36,7 @@
     onReorderStart,
     onReorderEnd,
     onProviderRemoved = () => {},
+    onContentMorph = () => {},
     reducedMotion,
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
@@ -238,14 +240,14 @@
     {/each}
     {#if catalog.supportsConnectionConfiguration(provider.id)}
       <Sub2ApiConfigSection providerId={provider.id} onRemove={onProviderRemoved}>
-        <ProviderProxySection {settings} {provider} {onChange} />
+        <ProviderProxySection {settings} {provider} {onChange} {onContentMorph} {reducedMotion} />
       </Sub2ApiConfigSection>
     {:else}
       <ProviderApiKeySection
         providerId={provider.id}
         providerName={providerDisplayName(provider.id)}
       />
-      <ProviderProxySection {settings} {provider} {onChange} />
+      <ProviderProxySection {settings} {provider} {onChange} {onContentMorph} {reducedMotion} />
     {/if}
     {#if message}
       <div class:denied={messageKind === 'denied'} class="customization-pill" role="status">
