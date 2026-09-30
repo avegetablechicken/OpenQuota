@@ -1,4 +1,5 @@
 mod child_process;
+mod codex_environment;
 mod commands;
 mod desktop_integration;
 mod hashing;

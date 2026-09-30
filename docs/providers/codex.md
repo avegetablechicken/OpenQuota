@@ -25,6 +25,23 @@ Codex usage recorded by pi (`~/.pi/agent/sessions`) or oh-my-pi (`~/.omp/agent/s
 included. OpenAI and OpenAI Codex usage recorded by local OpenCode sessions is included in the Codex
 history. OpenQuota does not upload these local records.
 
+## Environment file
+
+OpenQuota reads `$CODEX_HOME/.env`, or `~/.codex/.env` when `CODEX_HOME` is unset or
+empty, only when resolving proxy environment variables for Codex requests. A configured
+`CODEX_HOME` must point to an existing directory. File values take precedence over process
+values, including empty values. For proxy aliases, file values take precedence regardless of
+whether the name is uppercase or lowercase.
+
+The file is parsed with `dotenvy`, supporting `export`, comments, quoting, multiline values and
+variable substitution. Repeated assignments use the last value. `CODEX_` names are ignored.
+Missing files and invalid entries are ignored.
+
+The file is never loaded into the process environment. It does not change `PATH`, `HOME`, or
+the environment inherited by child processes. Other providers and general application requests do not read this file. Explicit per-provider proxy
+preferences retain their precedence. File changes are read on subsequent lookups; cached HTTP
+clients and proxy configuration may require restarting OpenQuota.
+
 ## Troubleshooting
 
 - **Not logged in** — run `codex`, sign in with ChatGPT, then refresh OpenQuota.

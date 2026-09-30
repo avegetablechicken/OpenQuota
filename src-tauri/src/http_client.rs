@@ -183,7 +183,11 @@ impl ProviderClient {
                 return Ok(client.clone());
             }
         }
-        let builder = client_builder_for_proxy(proxy.as_deref())?;
+        let builder = if self.provider_id == "codex" && proxy.is_none() {
+            platform::configure_codex(Client::builder())
+        } else {
+            client_builder_for_proxy(proxy.as_deref())?
+        };
         let client = (self.configure)(builder).build()?;
         *cached = Some((proxy, client.clone()));
         Ok(client)
@@ -200,6 +204,38 @@ mod platform {
     use reqwest::blocking::ClientBuilder;
 
     pub(super) fn configure(builder: ClientBuilder) -> ClientBuilder {
+        builder
+    }
+
+    pub(super) fn configure_codex(builder: ClientBuilder) -> ClientBuilder {
+        let read = |names: &[&str]| crate::codex_environment::first_value(names);
+        let bypass =
+            read(&["NO_PROXY", "no_proxy"]).and_then(|value| reqwest::NoProxy::from_string(&value));
+        let http_names: &[&str] = if std::env::var_os("REQUEST_METHOD").is_some() {
+            &["http_proxy"]
+        } else {
+            &["HTTP_PROXY", "http_proxy"]
+        };
+        let http = read(http_names);
+        let https = read(&["HTTPS_PROXY", "https_proxy"]);
+        let all = read(&["ALL_PROXY", "all_proxy"]);
+        if http.is_none() && https.is_none() && all.is_none() {
+            return builder;
+        }
+        let mut builder = builder.no_proxy();
+        for (scheme, value) in [("http", http), ("https", https), ("all", all)] {
+            let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+            let proxy = match scheme {
+                "http" => reqwest::Proxy::http(value),
+                "https" => reqwest::Proxy::https(value),
+                _ => reqwest::Proxy::all(value),
+            };
+            if let Ok(proxy) = proxy {
+                builder = builder.proxy(proxy.no_proxy(bypass.clone()));
+            }
+        }
         builder
     }
 }
@@ -276,6 +312,16 @@ mod platform {
         builder.proxy(Proxy::custom(move |url| resolver.proxy_for_url(url)))
     }
 
+    pub(super) fn configure_codex(builder: ClientBuilder) -> ClientBuilder {
+        let resolver = ProxyResolver {
+            environment: EnvironmentProxyConfig::from_env(true),
+            system: DynamicSystemProxyResolver::default(),
+        };
+        builder
+            .no_proxy()
+            .proxy(Proxy::custom(move |url| resolver.proxy_for_url(url)))
+    }
+
     pub(super) fn warm_system_proxy_credentials() {
         let Ok(url) = Url::parse("https://chatgpt.com/backend-api/wham/usage") else {
             return;
@@ -293,7 +339,7 @@ mod platform {
 
     impl ProxyResolver {
         fn from_sources() -> Self {
-            let environment = EnvironmentProxyConfig::from_env();
+            let environment = EnvironmentProxyConfig::from_env(false);
             Self {
                 environment,
                 system: DynamicSystemProxyResolver::default(),
@@ -317,17 +363,17 @@ mod platform {
     }
 
     impl EnvironmentProxyConfig {
-        fn from_env() -> Self {
+        fn from_env(codex: bool) -> Self {
             let http_names: &[&str] = if std::env::var_os("REQUEST_METHOD").is_some() {
                 &["http_proxy"]
             } else {
                 &["HTTP_PROXY", "http_proxy"]
             };
             Self {
-                http: proxy_from_env(http_names),
-                https: proxy_from_env(&["HTTPS_PROXY", "https_proxy"]),
-                all: proxy_from_env(&["ALL_PROXY", "all_proxy"]),
-                bypass: first_env(&["NO_PROXY", "no_proxy"])
+                http: proxy_from_env(http_names, codex),
+                https: proxy_from_env(&["HTTPS_PROXY", "https_proxy"], codex),
+                all: proxy_from_env(&["ALL_PROXY", "all_proxy"], codex),
+                bypass: first_env(&["NO_PROXY", "no_proxy"], codex)
                     .map(|value| BypassRules::from_comma_list(&value, false))
                     .unwrap_or_default(),
             }
@@ -342,8 +388,8 @@ mod platform {
         }
     }
 
-    fn proxy_from_env(names: &[&str]) -> Option<String> {
-        let value = first_env(names)?;
+    fn proxy_from_env(names: &[&str], codex: bool) -> Option<String> {
+        let value = first_env(names, codex)?;
         match normalize_proxy_url(&value, None) {
             Some(proxy) => Some(proxy),
             None => {
@@ -353,13 +399,19 @@ mod platform {
         }
     }
 
-    fn first_env(names: &[&str]) -> Option<String> {
-        names.iter().find_map(|name| {
-            std::env::var(name)
-                .ok()
+    fn first_env(names: &[&str], codex: bool) -> Option<String> {
+        if codex {
+            crate::codex_environment::first_value(names)
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
-        })
+        } else {
+            names.iter().find_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+            })
+        }
     }
 
     #[derive(Default)]
@@ -1394,6 +1446,68 @@ mod provider_proxy_tests {
     use super::{validate_provider_proxy, validate_proxy_url, ProviderClient, DIRECT_PROXY};
     use crate::providers::test_http::serve_once;
     use std::time::Duration;
+
+    #[test]
+    fn codex_dotenv_proxy_does_not_affect_other_providers() {
+        const CHILD: &str = "OPENQUOTA_TEST_CODEX_PROXY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "http_client::provider_proxy_tests::codex_dotenv_proxy_does_not_affect_other_providers", "--nocapture"])
+                .env(CHILD, "1")
+                .env("CODEX_HOME", directory.path())
+                .env("HTTP_PROXY", "http://127.0.0.1:9")
+                .env("http_proxy", "http://127.0.0.1:9")
+                .env("NO_PROXY", "*")
+                .env("no_proxy", "*")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let proxy = serve_once(200, &[], "codex-file-proxy");
+        let directory = std::env::var_os("CODEX_HOME").unwrap();
+        std::fs::write(
+            std::path::Path::new(&directory).join(".env"),
+            format!("HTTP_PROXY={proxy}\nhttp_proxy={proxy}\nNO_PROXY=\nno_proxy=\n"),
+        )
+        .unwrap();
+        let codex = ProviderClient::new("codex", |builder| builder.timeout(Duration::from_secs(3)))
+            .unwrap();
+        let response = codex
+            .current_with_proxy(None)
+            .unwrap()
+            .get("http://unresolvable.invalid/usage")
+            .send()
+            .unwrap()
+            .text()
+            .unwrap();
+        assert_eq!(response, "codex-file-proxy");
+        let claude = codex.for_provider("claude");
+        let endpoint = serve_once(200, &[], "claude-direct");
+        assert_eq!(
+            claude
+                .current_with_proxy(None)
+                .unwrap()
+                .get(endpoint)
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "claude-direct"
+        );
+        let endpoint = serve_once(200, &[], "codex-explicit-direct");
+        assert_eq!(
+            codex
+                .current_with_proxy(Some(DIRECT_PROXY.into()))
+                .unwrap()
+                .get(endpoint)
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "codex-explicit-direct"
+        );
+    }
 
     #[test]
     fn exit_location_requires_a_real_ip_and_country_not_the_datacenter() {
