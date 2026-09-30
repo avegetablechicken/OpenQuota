@@ -100,6 +100,9 @@
     const source = metricDefinition(metric.id)?.source.kind;
     return source === 'usage' || source === 'trend';
   }
+  function isUsagePeriodMetric(metric: MetricLayout) {
+    return metricDefinition(metric.id)?.source.kind === 'usage';
+  }
   function metricUsageScope(metric: MetricLayout) {
     return metricDefinition(metric.id)?.usageScope;
   }
@@ -125,17 +128,19 @@
     }
 
     const rows: MetricRenderRow[] = [];
-    const historyMetrics = scopedMetrics.filter(isHistoryMetric);
-    let historyMetricsInserted = false;
+    const periodMetrics = scopedMetrics.filter(isUsagePeriodMetric);
+    let periodMetricsInserted = false;
     const renderedScopeHeadings = new SvelteSet<UsageScope>();
     for (const metric of scopedMetrics) {
-      if (isHistoryMetric(metric)) {
-        if (historyMetricsInserted) continue;
+      if (isHistoryMetric(metric) && !isUsagePeriodMetric(metric)) {
+        rows.push({ key: metric.id, metric, groupedScope: false, reorderable: true });
+      } else if (isUsagePeriodMetric(metric)) {
+        if (periodMetricsInserted) continue;
         for (const [scopeIndex, usageScope] of scopes.entries()) {
-          for (const [metricIndex, historyMetric] of historyMetrics.entries()) {
+          for (const [metricIndex, periodMetric] of periodMetrics.entries()) {
             rows.push({
-              key: `${historyMetric.id}:${usageScope}`,
-              metric: historyMetric,
+              key: `${periodMetric.id}:${usageScope}`,
+              metric: periodMetric,
               usageScope,
               scopeHeading:
                 metricIndex === 0 && !renderedScopeHeadings.has(usageScope)
@@ -147,7 +152,7 @@
           }
           renderedScopeHeadings.add(usageScope);
         }
-        historyMetricsInserted = true;
+        periodMetricsInserted = true;
       } else {
         const usageScope = metricUsageScope(metric);
         rows.push({

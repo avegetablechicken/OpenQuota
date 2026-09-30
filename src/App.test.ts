@@ -370,7 +370,9 @@ describe('OpenQuota dashboard', () => {
     expect(accountSpend).toBeInTheDocument();
     expect(within(accountSpend).getByText('Codex')).toBeInTheDocument();
     expect(accountSpend.querySelectorAll('.spend-ring__segment')).toHaveLength(1);
-    expect(within(provider).getAllByRole('region', { name: 'Usage Trend' })).toHaveLength(2);
+    expect(within(provider).getByRole('region', { name: 'Device Trend' })).toBeInTheDocument();
+    expect(within(provider).getByRole('region', { name: 'Account Trend' })).toBeInTheDocument();
+    expect(within(provider).queryByRole('region', { name: 'Usage Trend' })).not.toBeInTheDocument();
     expect(within(provider).getAllByRole('heading', { name: 'Device' })).toHaveLength(2);
     expect(within(provider).getAllByRole('heading', { name: 'Account' })).toHaveLength(2);
     expect(
@@ -380,7 +382,7 @@ describe('OpenQuota dashboard', () => {
         ),
         (label) => label.textContent?.trim(),
       ),
-    ).toEqual(['Device', 'Usage Trend', 'Today', 'Account', 'Usage Trend', 'Today']);
+    ).toEqual(['Device Trend', 'Account Trend', 'Device', 'Today', 'Account', 'Today']);
     expect(
       Array.from(
         provider.querySelectorAll(

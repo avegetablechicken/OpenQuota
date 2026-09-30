@@ -5,7 +5,7 @@
   import UsageMetric from './UsageMetric.svelte';
   import UsageTrend from './UsageTrend.svelte';
   import ValueMetric from './ValueMetric.svelte';
-  import { usageHistoriesForMode } from './usageScopes';
+  import { PROVIDER_USAGE_SCOPE_LABELS, usageHistoriesForMode } from './usageScopes';
   import type {
     AppSettings,
     MetricLayout,
@@ -102,7 +102,9 @@
 {:else if definition?.source.kind === 'trend'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
     <UsageTrend
-      label={definition.label}
+      label={scopedUsageHistories.length > 1
+        ? `${PROVIDER_USAGE_SCOPE_LABELS[scoped.scope]} Trend`
+        : definition.label}
       daily={scoped.history.daily}
       sourceNote={usageSourceNote(
         catalog,
