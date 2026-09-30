@@ -204,7 +204,10 @@ pub(crate) fn runtimes(
     Ok(runtime_configs(discovery)
         .into_iter()
         .map(|config| {
-            let client = client.for_provider(&config.definition.id);
+            let client = client.for_provider(
+                &config.definition.id,
+                config::settings_path_for_scope(&config.credential_scope),
+            );
             Arc::new(ClaudeProvider::new_scoped(
                 config,
                 storage.clone(),
@@ -305,7 +308,7 @@ impl ClaudeProvider {
     }
 
     fn refresh_inner(&self) -> Result<ProviderSnapshot, ClaudeError> {
-        let config = oauth_config()?;
+        let config = oauth_config(&self.credential_scope)?;
         self.refresh_inner_with_config(&config)
     }
 

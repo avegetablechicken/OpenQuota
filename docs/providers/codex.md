@@ -33,9 +33,11 @@ empty, only when resolving proxy environment variables for Codex requests. A con
 values, including empty values. For proxy aliases, file values take precedence regardless of
 whether the name is uppercase or lowercase.
 
-The file is parsed with `dotenvy`, supporting `export`, comments, quoting, multiline values and
-variable substitution. Repeated assignments use the last value. `CODEX_` names are ignored.
-Missing files and invalid entries are ignored.
+The file uses parsing logic adapted from `dotenvy` 0.15.7, supporting `export`, comments, quoting,
+multiline values and variable substitution. A private in-memory environment simulates Codex's
+sequential assignments: earlier file values override inherited values for later substitutions,
+and repeated assignments use the last value. `CODEX_` assignments are not applied to this
+environment. Missing files and invalid entries are ignored.
 
 The file is never loaded into the process environment. It does not change `PATH`, `HOME`, or
 the environment inherited by child processes. Other providers and general application requests do not read this file. Explicit per-provider proxy

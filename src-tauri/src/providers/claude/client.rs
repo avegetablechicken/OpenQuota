@@ -34,9 +34,12 @@ impl ClaudeClient {
         })
     }
 
-    pub fn for_provider(&self, provider_id: &str) -> Self {
+    pub fn for_provider(&self, provider_id: &str, settings: std::path::PathBuf) -> Self {
         Self {
-            client: self.client.for_provider(provider_id),
+            client: self
+                .client
+                .for_provider(provider_id)
+                .with_claude_settings(settings),
         }
     }
 

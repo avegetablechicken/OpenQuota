@@ -37,6 +37,23 @@ usage recorded by pi (`~/.pi/agent/sessions`) or oh-my-pi (`~/.omp/agent/session
 recorded by local OpenCode sessions, and, on macOS, Claude's local agent-mode sessions. These local
 records are not uploaded by OpenQuota.
 
+## Environment settings
+
+Claude requests read proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`,
+including lowercase aliases) from the account's `settings.json` `env` object before checking the
+process environment. The default account uses `$CLAUDE_CONFIG_DIR/settings.json`, or
+`~/.claude/settings.json`; discovered accounts use their own configuration directory.
+Explicit proxy or direct-routing preferences in OpenQuota still take precedence.
+
+Claude OAuth environment lookups also consult the account's settings, preserving the existing
+rules for stored login credentials and inference-only tokens. Base URL discovery respects
+`CLAUDE_CONFIG_DIR`. These lookups do not export variables or affect Codex or other providers.
+Cached HTTP clients may require restarting OpenQuota after proxy changes.
+
+OpenQuota does not currently track Claude launch arguments, so arbitrary `--settings` paths,
+inline settings, and project-specific settings are not automatically selected. API keys do not
+replace the Claude login required for subscription-limit queries.
+
 ## Troubleshooting
 
 - **Not logged in** — run `claude`, complete sign-in, then refresh OpenQuota.

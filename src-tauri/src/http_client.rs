@@ -138,6 +138,7 @@ type CachedClient = Option<(Option<String>, Client)>;
 #[derive(Clone)]
 pub struct ProviderClient {
     provider_id: String,
+    claude_settings: Option<std::path::PathBuf>,
     configure: std::sync::Arc<ClientFactory>,
     cached: std::sync::Arc<std::sync::Mutex<CachedClient>>,
 }
@@ -149,6 +150,8 @@ impl ProviderClient {
     ) -> Result<Self, reqwest::Error> {
         let client = Self {
             provider_id: provider_id.to_owned(),
+            claude_settings: (provider_id == "claude")
+                .then(crate::providers::claude::config::settings_path),
             configure: std::sync::Arc::new(configure),
             cached: Default::default(),
         };
@@ -159,9 +162,16 @@ impl ProviderClient {
     pub fn for_provider(&self, provider_id: &str) -> Self {
         Self {
             provider_id: provider_id.to_owned(),
+            claude_settings: self.claude_settings.clone(),
             configure: self.configure.clone(),
             cached: Default::default(),
         }
+    }
+
+    pub(crate) fn with_claude_settings(mut self, path: std::path::PathBuf) -> Self {
+        self.claude_settings = Some(path);
+        self.cached = Default::default();
+        self
     }
 
     pub fn current(&self) -> Result<Client, reqwest::Error> {
@@ -184,7 +194,17 @@ impl ProviderClient {
             }
         }
         let builder = if self.provider_id == "codex" && proxy.is_none() {
-            platform::configure_codex(Client::builder())
+            platform::configure_environment(
+                Client::builder(),
+                crate::codex_environment::first_value,
+            )
+        } else if let Some(path) = self.claude_settings.as_ref().filter(|_| {
+            proxy.is_none()
+                && (self.provider_id == "claude" || self.provider_id.starts_with("claude@"))
+        }) {
+            platform::configure_environment(Client::builder(), |names| {
+                crate::providers::claude::config::environment_value(path, names)
+            })
         } else {
             client_builder_for_proxy(proxy.as_deref())?
         };
@@ -207,8 +227,10 @@ mod platform {
         builder
     }
 
-    pub(super) fn configure_codex(builder: ClientBuilder) -> ClientBuilder {
-        let read = |names: &[&str]| crate::codex_environment::first_value(names);
+    pub(super) fn configure_environment(
+        builder: ClientBuilder,
+        read: impl Fn(&[&str]) -> Option<String>,
+    ) -> ClientBuilder {
         let bypass =
             read(&["NO_PROXY", "no_proxy"]).and_then(|value| reqwest::NoProxy::from_string(&value));
         let http_names: &[&str] = if std::env::var_os("REQUEST_METHOD").is_some() {
@@ -312,9 +334,12 @@ mod platform {
         builder.proxy(Proxy::custom(move |url| resolver.proxy_for_url(url)))
     }
 
-    pub(super) fn configure_codex(builder: ClientBuilder) -> ClientBuilder {
+    pub(super) fn configure_environment(
+        builder: ClientBuilder,
+        read: impl Fn(&[&str]) -> Option<String>,
+    ) -> ClientBuilder {
         let resolver = ProxyResolver {
-            environment: EnvironmentProxyConfig::from_env(true),
+            environment: EnvironmentProxyConfig::from_reader(read),
             system: DynamicSystemProxyResolver::default(),
         };
         builder
@@ -339,7 +364,7 @@ mod platform {
 
     impl ProxyResolver {
         fn from_sources() -> Self {
-            let environment = EnvironmentProxyConfig::from_env(false);
+            let environment = EnvironmentProxyConfig::from_reader(first_env);
             Self {
                 environment,
                 system: DynamicSystemProxyResolver::default(),
@@ -363,17 +388,17 @@ mod platform {
     }
 
     impl EnvironmentProxyConfig {
-        fn from_env(codex: bool) -> Self {
+        fn from_reader(read: impl Fn(&[&str]) -> Option<String>) -> Self {
             let http_names: &[&str] = if std::env::var_os("REQUEST_METHOD").is_some() {
                 &["http_proxy"]
             } else {
                 &["HTTP_PROXY", "http_proxy"]
             };
             Self {
-                http: proxy_from_env(http_names, codex),
-                https: proxy_from_env(&["HTTPS_PROXY", "https_proxy"], codex),
-                all: proxy_from_env(&["ALL_PROXY", "all_proxy"], codex),
-                bypass: first_env(&["NO_PROXY", "no_proxy"], codex)
+                http: proxy_from_env(http_names, &read),
+                https: proxy_from_env(&["HTTPS_PROXY", "https_proxy"], &read),
+                all: proxy_from_env(&["ALL_PROXY", "all_proxy"], &read),
+                bypass: read(&["NO_PROXY", "no_proxy"])
                     .map(|value| BypassRules::from_comma_list(&value, false))
                     .unwrap_or_default(),
             }
@@ -388,8 +413,11 @@ mod platform {
         }
     }
 
-    fn proxy_from_env(names: &[&str], codex: bool) -> Option<String> {
-        let value = first_env(names, codex)?;
+    fn proxy_from_env(names: &[&str], read: impl Fn(&[&str]) -> Option<String>) -> Option<String> {
+        let value = read(names)?;
+        if value.trim().is_empty() {
+            return None;
+        }
         match normalize_proxy_url(&value, None) {
             Some(proxy) => Some(proxy),
             None => {
@@ -399,19 +427,13 @@ mod platform {
         }
     }
 
-    fn first_env(names: &[&str], codex: bool) -> Option<String> {
-        if codex {
-            crate::codex_environment::first_value(names)
+    fn first_env(names: &[&str]) -> Option<String> {
+        names.iter().find_map(|name| {
+            std::env::var(name)
+                .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
-        } else {
-            names.iter().find_map(|name| {
-                std::env::var(name)
-                    .ok()
-                    .map(|value| value.trim().to_owned())
-                    .filter(|value| !value.is_empty())
-            })
-        }
+        })
     }
 
     #[derive(Default)]
@@ -1494,6 +1516,50 @@ mod provider_proxy_tests {
                 .text()
                 .unwrap(),
             "claude-direct"
+        );
+        let claude_proxy = serve_once(200, &[], "claude-settings-proxy");
+        let settings = std::path::Path::new(&directory).join("work-settings.json");
+        std::fs::write(&settings, serde_json::json!({"env": {
+            "HTTP_PROXY": claude_proxy, "http_proxy": claude_proxy, "NO_PROXY": "", "no_proxy": ""
+        }}).to_string()).unwrap();
+        let scoped = claude
+            .for_provider("claude@work")
+            .with_claude_settings(settings);
+        assert_eq!(
+            scoped
+                .current_with_proxy(None)
+                .unwrap()
+                .get("http://unresolvable.invalid/usage")
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "claude-settings-proxy"
+        );
+        let unrelated = scoped.for_provider("kimi");
+        let endpoint = serve_once(200, &[], "kimi-direct");
+        assert_eq!(
+            unrelated
+                .current_with_proxy(None)
+                .unwrap()
+                .get(endpoint)
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "kimi-direct"
+        );
+        let endpoint = serve_once(200, &[], "claude-explicit-direct");
+        assert_eq!(
+            scoped
+                .current_with_proxy(Some(DIRECT_PROXY.into()))
+                .unwrap()
+                .get(endpoint)
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "claude-explicit-direct"
         );
         let endpoint = serve_once(200, &[], "codex-explicit-direct");
         assert_eq!(

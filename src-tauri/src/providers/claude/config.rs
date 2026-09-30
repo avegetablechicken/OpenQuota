@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -19,13 +22,43 @@ pub fn resolve_anthropic_base_url() -> Result<String, ClaudeConfigError> {
     )
 }
 
-fn settings_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+pub(crate) fn settings_path() -> PathBuf {
+    crate::provider_environment::value("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_default()
-        .join(".claude")
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude"))
         .join("settings.json")
+}
+
+pub(super) fn settings_path_for_scope(scope: &super::auth::ClaudeCredentialScope) -> PathBuf {
+    match scope {
+        super::auth::ClaudeCredentialScope::Standard => settings_path(),
+        super::auth::ClaudeCredentialScope::ConfigDir { path, .. } => path.join("settings.json"),
+    }
+}
+
+/// Resolve only this account's settings, without exporting values into the process.
+pub(crate) fn environment_value(path: &Path, names: &[&str]) -> Option<String> {
+    let text = fs::read_to_string(path).ok();
+    environment_value_from(text.as_deref(), names, crate::provider_environment::value)
+}
+
+fn environment_value_from(
+    settings: Option<&str>,
+    names: &[&str],
+    fallback: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let document = settings.and_then(|text| serde_json::from_str::<Value>(text).ok());
+    names
+        .iter()
+        .find_map(|name| {
+            document
+                .as_ref()?
+                .get("env")?
+                .get(*name)?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .or_else(|| names.iter().find_map(|name| fallback(name)))
 }
 
 fn resolve_anthropic_base_url_from(
@@ -58,6 +91,29 @@ fn nonempty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{resolve_anthropic_base_url_from, ClaudeConfigError};
+
+    #[test]
+    fn environment_overrides_aliases_and_empty_values_without_exporting() {
+        let before = std::env::var_os("HTTPS_PROXY");
+        let settings = r#"{"env":{"https_proxy":"http://file:8080","NO_PROXY":"","INVALID":42}}"#;
+        let process = |_: &str| Some("process".to_owned());
+        assert_eq!(
+            super::environment_value_from(Some(settings), &["HTTPS_PROXY", "https_proxy"], process)
+                .as_deref(),
+            Some("http://file:8080")
+        );
+        assert_eq!(
+            super::environment_value_from(Some(settings), &["NO_PROXY"], process).as_deref(),
+            Some("")
+        );
+        for input in [None, Some("broken"), Some(settings)] {
+            assert_eq!(
+                super::environment_value_from(input, &["INVALID"], process).as_deref(),
+                Some("process")
+            );
+        }
+        assert_eq!(std::env::var_os("HTTPS_PROXY"), before);
+    }
 
     #[test]
     fn settings_env_value_precedes_the_environment() {

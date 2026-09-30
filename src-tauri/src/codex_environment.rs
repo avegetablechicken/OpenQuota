@@ -1,3 +1,5 @@
+mod dotenv;
+
 use std::path::{Path, PathBuf};
 
 /// Read file overrides without modifying the process environment.
@@ -20,14 +22,10 @@ fn resolve_value(
     names: &[&str],
     process: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let mut values = std::collections::HashMap::new();
-    if let Some(path) = path {
-        load_from(path, |key, value| {
-            if names.contains(&key) {
-                values.insert(key.to_owned(), value.to_owned());
-            }
-        });
-    }
+    let mut values = path
+        .and_then(|path| std::fs::File::open(path).ok())
+        .map(|file| dotenv::load(file, &process))
+        .unwrap_or_default();
     names
         .iter()
         .find_map(|name| values.remove(*name))
@@ -44,12 +42,10 @@ fn codex_home(configured: Option<&str>, home: Option<PathBuf>) -> Option<PathBuf
     }
 }
 
+#[cfg(test)]
 fn load_from(path: &Path, mut set: impl FnMut(&str, &str)) {
-    let Ok(iter) = dotenvy::from_path_iter(path) else {
-        return;
-    };
-    for (key, value) in iter.flatten() {
-        if !key.to_ascii_uppercase().starts_with("CODEX_") {
+    if let Ok(file) = std::fs::File::open(path) {
+        for (key, value) in dotenv::load(file, |name| std::env::var(name).ok()) {
             set(&key, &value);
         }
     }

@@ -321,7 +321,7 @@ fn has_desktop_app_material_at(home: &Path) -> bool {
 }
 
 pub(super) fn load_candidates(scope: &ClaudeCredentialScope) -> Vec<ClaudeCredential> {
-    load_candidates_with_environment(scope, env_text("CLAUDE_CODE_OAUTH_TOKEN"))
+    load_candidates_with_environment(scope, settings_env_text(scope, "CLAUDE_CODE_OAUTH_TOKEN"))
 }
 
 fn load_candidates_with_environment(
@@ -400,38 +400,47 @@ fn load_candidates_with_environment(
     }
 }
 
-pub fn oauth_config() -> Result<ClaudeOAuthConfig, ClaudeError> {
-    let (base, refresh_url, default_client_id, _) = resolved_oauth_settings();
+pub(super) fn oauth_config(
+    scope: &ClaudeCredentialScope,
+) -> Result<ClaudeOAuthConfig, ClaudeError> {
+    let (base, refresh_url, default_client_id, _) = resolved_oauth_settings(scope);
     let usage_url = format!("{base}/api/oauth/usage");
     validate_http_url(&usage_url)?;
     validate_http_url(&refresh_url)?;
     Ok(ClaudeOAuthConfig {
         usage_url,
         refresh_url,
-        client_id: env_text("CLAUDE_CODE_OAUTH_CLIENT_ID").unwrap_or(default_client_id),
+        client_id: settings_env_text(scope, "CLAUDE_CODE_OAUTH_CLIENT_ID")
+            .unwrap_or(default_client_id),
     })
 }
 
-fn resolved_oauth_settings() -> (String, String, String, &'static str) {
+fn resolved_oauth_settings(
+    scope: &ClaudeCredentialScope,
+) -> (String, String, String, &'static str) {
     let mut base = DEFAULT_API_BASE.to_owned();
     let mut refresh = DEFAULT_REFRESH_URL.to_owned();
     let mut client_id = DEFAULT_CLIENT_ID.to_owned();
     let mut suffix = "";
-    if env_text("USER_TYPE").as_deref() == Some("ant") && env_flag("USE_LOCAL_OAUTH") {
-        base = env_text("CLAUDE_LOCAL_OAUTH_API_BASE")
+    if settings_env_text(scope, "USER_TYPE").as_deref() == Some("ant")
+        && settings_env_flag(scope, "USE_LOCAL_OAUTH")
+    {
+        base = settings_env_text(scope, "CLAUDE_LOCAL_OAUTH_API_BASE")
             .unwrap_or_else(|| "http://localhost:8000".into())
             .trim_end_matches('/')
             .to_owned();
         refresh = format!("{base}/v1/oauth/token");
         client_id = NON_PROD_CLIENT_ID.into();
         suffix = "-local-oauth";
-    } else if env_text("USER_TYPE").as_deref() == Some("ant") && env_flag("USE_STAGING_OAUTH") {
+    } else if settings_env_text(scope, "USER_TYPE").as_deref() == Some("ant")
+        && settings_env_flag(scope, "USE_STAGING_OAUTH")
+    {
         base = "https://api-staging.anthropic.com".into();
         refresh = "https://platform.staging.ant.dev/v1/oauth/token".into();
         client_id = NON_PROD_CLIENT_ID.into();
         suffix = "-staging-oauth";
     }
-    if let Some(custom) = env_text("CLAUDE_CODE_CUSTOM_OAUTH_URL") {
+    if let Some(custom) = settings_env_text(scope, "CLAUDE_CODE_CUSTOM_OAUTH_URL") {
         base = custom.trim_end_matches('/').to_owned();
         refresh = format!("{base}/v1/oauth/token");
         suffix = "-custom-oauth";
@@ -503,7 +512,7 @@ pub fn claude_home() -> PathBuf {
 }
 
 fn keychain_candidates(scope: &ClaudeCredentialScope) -> Vec<(String, String)> {
-    let suffix = resolved_oauth_settings().3;
+    let suffix = resolved_oauth_settings(scope).3;
     let service = format!("Claude Code{suffix}-credentials");
     let services = match scope {
         ClaudeCredentialScope::Standard => {
@@ -530,7 +539,11 @@ fn keychain_candidates(scope: &ClaudeCredentialScope) -> Vec<(String, String)> {
 }
 
 pub(super) fn scoped_keychain_service_name(config_dir_literal: &str) -> String {
-    let suffix = resolved_oauth_settings().3;
+    let scope = ClaudeCredentialScope::ConfigDir {
+        path: PathBuf::from(config_dir_literal),
+        keychain_literal: config_dir_literal.to_owned(),
+    };
+    let suffix = resolved_oauth_settings(&scope).3;
     let service = format!("Claude Code{suffix}-credentials");
     let normalized = config_dir_literal.replace('\\', "/");
     let hash = sha256_hex(normalized.as_bytes());
@@ -550,8 +563,14 @@ fn env_text(name: &str) -> Option<String> {
     crate::provider_environment::value(name)
 }
 
-fn env_flag(name: &str) -> bool {
-    env_text(name)
+fn settings_env_text(scope: &ClaudeCredentialScope, name: &str) -> Option<String> {
+    super::config::environment_value(&super::config::settings_path_for_scope(scope), &[name])
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn settings_env_flag(scope: &ClaudeCredentialScope, name: &str) -> bool {
+    settings_env_text(scope, name)
         .map(|value| {
             !matches!(
                 value.to_ascii_lowercase().as_str(),
@@ -581,6 +600,39 @@ mod tests {
         ClaudeCredentialScope, ClaudeCredentialsFile, ClaudeOAuth, CredentialSource,
     };
     use crate::providers::claude::ClaudeError;
+
+    #[test]
+    fn oauth_settings_are_resolved_per_account_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        for account in ["work", "personal"] {
+            let path = directory.path().join(account);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(
+                path.join("settings.json"),
+                serde_json::json!({"env": {
+                    "CLAUDE_CODE_CUSTOM_OAUTH_URL": format!("https://{account}.example.com"),
+                    "CLAUDE_CODE_OAUTH_CLIENT_ID": account,
+                    "CLAUDE_CODE_OAUTH_TOKEN": format!("{account}-token")
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            let scope = super::ClaudeCredentialScope::ConfigDir {
+                keychain_literal: path.to_string_lossy().into_owned(),
+                path,
+            };
+            let config = super::oauth_config(&scope).unwrap();
+            assert_eq!(
+                config.usage_url,
+                format!("https://{account}.example.com/api/oauth/usage")
+            );
+            assert_eq!(config.client_id, account);
+            assert_eq!(
+                super::settings_env_text(&scope, "CLAUDE_CODE_OAUTH_TOKEN"),
+                Some(format!("{account}-token"))
+            );
+        }
+    }
 
     #[test]
     fn parses_claude_credentials_and_hex_fallback() {
