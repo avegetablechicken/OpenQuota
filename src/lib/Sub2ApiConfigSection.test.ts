@@ -76,7 +76,7 @@ describe('Sub2ApiConfigSection', () => {
     await screen.findByText('Not configured');
     const connections = screen.getByRole('list', { name: 'Connection configurations' });
     expect(within(connections).getAllByRole('listitem')).toHaveLength(1);
-    expect(within(connections).getByText('Sub2API')).toBeInTheDocument();
+    expect(within(connections).getByText('Base URL and administrator login')).toBeInTheDocument();
     expect(get(sub2ApiUpstreams)['sub2api@2']).toBeUndefined();
   });
 
@@ -112,7 +112,7 @@ describe('Sub2ApiConfigSection', () => {
     );
     expect(screen.queryByDisplayValue('secret-password')).not.toBeInTheDocument();
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
-    expect(screen.getByText('Sub2API')).toBeInTheDocument();
+    expect(screen.getByText('Sub2API · Claude')).toBeInTheDocument();
   });
 
   it('allows a custom Claude Base URL only after its switch is enabled', async () => {
@@ -547,7 +547,6 @@ describe('Sub2ApiConfigSection', () => {
     );
     expect(mocks.invoke).not.toHaveBeenCalledWith('delete_sub2api_config', expect.anything());
     expect(screen.getByText('Not configured')).toBeInTheDocument();
-    expect(screen.getByText('Sub2API')).toBeInTheDocument();
   });
 
   it('deletes an item from the separate bottom action row', async () => {

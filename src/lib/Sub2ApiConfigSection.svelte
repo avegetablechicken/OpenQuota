@@ -11,7 +11,12 @@
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
   import { saveShortcut } from './saveShortcut';
-  import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
+  import {
+    forgetSub2ApiUpstream,
+    rememberSub2ApiUpstream,
+    sub2ApiPublicName,
+    sub2ApiUpstreamLabel,
+  } from './sub2ApiUpstreams';
   import type { Sub2ApiConfigState, Sub2ApiUpstream } from './types';
 
   interface Props {
@@ -393,7 +398,7 @@
 <section class="sub2api-config-section" aria-label="Connection">
   <h2>Connection</h2>
   <div class="sub2api-config-card" role="list" aria-label="Connection configurations">
-    <div class="sub2api-config-item" role="listitem" aria-label="Sub2API">
+    <div class="sub2api-config-item" role="listitem" aria-label="Connection">
       <div class="sub2api-config-summary">
         <ProviderIcon
           {providerId}
@@ -401,8 +406,16 @@
           size={20}
         />
         <span>
-          <b>Sub2API</b>
-          <small>{connectionState.configured ? connectionState.email : 'Not configured'}</small>
+          <b
+            >{connectionState.configured
+              ? sub2ApiPublicName(connectionState.upstream)
+              : 'Not configured'}</b
+          >
+          <small
+            >{connectionState.configured
+              ? connectionState.email
+              : 'Base URL and administrator login'}</small
+          >
         </span>
         <i class:missing={!connectionState.configured} aria-hidden="true"></i>
         <button bind:this={toggleButton} type="button" onclick={toggleEditor}
@@ -426,7 +439,7 @@
                     onchange={() => selectUpstream(option)}
                   />
                   <ProviderIcon providerId={option} size={15} />
-                  <span>{option === 'claude' ? 'Claude' : 'Codex'}</span>
+                  <span>{sub2ApiUpstreamLabel(option)}</span>
                 </label>
               {/each}
             </div>

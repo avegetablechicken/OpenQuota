@@ -35,7 +35,8 @@
     onSettings,
     reducedMotion,
   }: Props = $props();
-  const providerListName = (id: string) => catalog.resolvedDisplayName(id, settings.providerNames);
+  const providerListName = (id: string) =>
+    catalog.configurationDisplayName(id, settings.providerNames, $sub2ApiUpstreams[id]);
   const visibleProviders = $derived(
     settings.providers.filter(
       (provider) =>

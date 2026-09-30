@@ -42,7 +42,7 @@
   import { horizontalPageTransition, shouldSlideBetweenScreens } from './lib/pageTransition';
   import { desktopPlatform, shortcutLabels } from './lib/platform';
   import { withProviderName } from './lib/providerNames';
-  import { sub2ApiUpstreamAccountName } from './lib/sub2ApiUpstreams';
+  import { sub2ApiUpstreamAccountName, sub2ApiUpstreams } from './lib/sub2ApiUpstreams';
   import RenameProviderSheet from './lib/RenameProviderSheet.svelte';
   import {
     buildProviderShareRows,
@@ -500,7 +500,14 @@
     await openSystemLogFolder();
   }
   function topBarTitle() {
-    if (screen.startsWith('provider:')) return providerDisplayName(screen.slice(9));
+    if (screen.startsWith('provider:')) {
+      const id = screen.slice(9);
+      return catalog.configurationDisplayName(
+        id,
+        settingsState?.settings.providerNames,
+        $sub2ApiUpstreams[id],
+      );
+    }
     return screen === 'settings' ? 'Settings' : 'Customize';
   }
   async function openAbout() {

@@ -100,14 +100,37 @@ describe('CustomizeProviderList Sub2API labels', () => {
         reducedMotion: false,
       });
 
-      expect(await screen.findByText('Sub2API 2')).toBeInTheDocument();
+      expect(await screen.findByText('Sub2API · Claude')).toBeInTheDocument();
       expect(await screen.findByText('192.0.2.8:6060')).toBeInTheDocument();
+      expect(screen.queryByText(/Sub2API \d/)).not.toBeInTheDocument();
       expect(screen.queryByText(/\d+ metrics/)).not.toBeInTheDocument();
       expect(mocks.invoke).toHaveBeenCalledWith('get_sub2api_config_state', {
         providerId: 'sub2api@2',
       });
     },
   );
+
+  it('uses a neutral name until the upstream is configured', async () => {
+    mocks.invoke.mockResolvedValue({
+      configured: false,
+      baseUrl: '',
+      email: '',
+      upstream: 'codex',
+    });
+    render(CustomizeProviderList, {
+      settings,
+      catalog: new ProviderCatalogIndex(catalog),
+      onOpen: vi.fn(),
+      onChange: vi.fn(),
+      onReorderStart: vi.fn(),
+      onReorderEnd: vi.fn(),
+      onSettings: vi.fn(),
+      reducedMotion: false,
+    });
+
+    expect(await screen.findByText('Account name')).toBeInTheDocument();
+    expect(screen.queryByText(/Sub2API/)).not.toBeInTheDocument();
+  });
 
   it('shows endpoints for every configuration sharing an upstream category', async () => {
     const duplicateCatalog = structuredClone(catalog);
@@ -152,8 +175,8 @@ describe('CustomizeProviderList Sub2API labels', () => {
 
     expect(await screen.findByText('192.0.2.8:6060')).toBeInTheDocument();
     expect(screen.getByText('claude.example.com')).toBeInTheDocument();
-    expect(screen.getByText('Sub2API 2')).toBeInTheDocument();
-    expect(screen.getByText('Sub2API 3')).toBeInTheDocument();
+    expect(screen.getAllByText('Sub2API · Claude')).toHaveLength(2);
+    expect(screen.queryByText(/Sub2API \d/)).not.toBeInTheDocument();
     expect(screen.queryByText('2 metrics')).not.toBeInTheDocument();
   });
 });

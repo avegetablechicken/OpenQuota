@@ -4,9 +4,10 @@ import type {
   ProviderDefinition,
   ProviderSnapshot,
   UsageHistory,
+  Sub2ApiUpstream,
   UsageScope,
 } from './types';
-import { sub2ApiDisplayName } from './sub2ApiUpstreams';
+import { sub2ApiDisplayName, sub2ApiPublicName } from './sub2ApiUpstreams';
 
 export class ProviderCatalogIndex {
   readonly providers: ProviderDefinition[];
@@ -54,6 +55,17 @@ export class ProviderCatalogIndex {
     const customName = providerNames?.[id]?.trim();
     if (customName) return customName;
     return sub2ApiDisplayName(id) ?? this.displayName(id);
+  }
+
+  configurationDisplayName(
+    id: string,
+    providerNames?: Record<string, string>,
+    upstream?: Sub2ApiUpstream,
+  ) {
+    const customName = providerNames?.[id]?.trim();
+    if (customName) return customName;
+    if (this.supportsConnectionConfiguration(id)) return sub2ApiPublicName(upstream);
+    return this.displayName(id);
   }
 
   displayMessage(id: string, message: string, resolvedName?: string) {

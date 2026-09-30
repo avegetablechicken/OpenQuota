@@ -39,8 +39,9 @@
   }: Props = $props();
   const metricDefinition = (id: string) => catalog.metric(id);
   const providerDisplayName = (id: string) =>
-    catalog.resolvedDisplayName(id, settings.providerNames);
-  const providerNamePlaceholder = (id: string) => catalog.resolvedDisplayName(id);
+    catalog.configurationDisplayName(id, settings.providerNames, $sub2ApiUpstreams[id]);
+  const providerNamePlaceholder = (id: string) =>
+    catalog.configurationDisplayName(id, undefined, $sub2ApiUpstreams[id]);
   let message = $state('');
   let messageKind = $state<'success' | 'denied'>('success');
   let messageTimer: ReturnType<typeof setTimeout> | undefined;

@@ -61,6 +61,14 @@ export function sub2ApiDisplayName(providerId: string, customName?: string) {
   return slotName;
 }
 
+export function sub2ApiUpstreamLabel(upstream: Sub2ApiUpstream) {
+  return upstream === 'claude' ? 'Claude' : 'Codex';
+}
+
+export function sub2ApiPublicName(upstream?: Sub2ApiUpstream) {
+  return upstream ? `Sub2API · ${sub2ApiUpstreamLabel(upstream)}` : 'Account name';
+}
+
 export function sub2ApiMetricSupported(
   providerId: string,
   metricId: string,

@@ -137,10 +137,11 @@ describe('CustomizeProviderDetail Sub2API metric availability', () => {
     renderDetail('codex', ['sub2api@2']);
 
     expect(screen.getByRole('heading', { name: 'Name' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Name for Sub2API 2' })).toHaveAttribute(
+    expect(screen.getByRole('textbox', { name: 'Name for Sub2API · Codex' })).toHaveAttribute(
       'placeholder',
-      'Sub2API 2',
+      'Sub2API · Codex',
     );
+    expect(screen.queryByText(/Sub2API \d/)).not.toBeInTheDocument();
   });
 
   it('locks Claude-only metrics for a Codex upstream', () => {
