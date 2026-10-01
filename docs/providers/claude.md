@@ -46,8 +46,7 @@ process environment. The default account uses `$CLAUDE_CONFIG_DIR/settings.json`
 Explicit proxy or direct-routing preferences in OpenQuota still take precedence.
 
 Claude OAuth environment lookups also consult the account's settings, preserving the existing
-rules for stored login credentials and inference-only tokens. Base URL discovery respects
-`CLAUDE_CONFIG_DIR`. These lookups do not export variables or affect Codex or other providers.
+rules for stored login credentials and inference-only tokens. These lookups do not export variables or affect Codex or other providers.
 Cached HTTP clients may require restarting OpenQuota after proxy changes.
 
 OpenQuota does not currently track Claude launch arguments, so arbitrary `--settings` paths,

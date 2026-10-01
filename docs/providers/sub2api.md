@@ -27,10 +27,20 @@ Base URL from `[model_providers.<name>].base_url`; that URL is read-only in the 
 Enable **Custom Base URL** to enter an endpoint manually. Custom Base URL mode clears and disables
 Provider, so the two sources cannot be combined.
 
-For a Claude upstream, OpenQuota first reads `ANTHROPIC_BASE_URL` from
-`~/.claude/settings.json` (including its `env` object), then falls back to the environment. The
-resolved Base URL is read-only by default. Enable **Custom Base URL** to replace it with a manually
-entered endpoint.
+For a Claude upstream, enter a **Provider** name. OpenQuota searches `$CLAUDE_CONFIG_DIR`
+(default `~/.claude`) and its subdirectories, case-sensitively, without following symlinks.
+First, it looks for JSON filenames containing both `settings` and the entered name: for example,
+`work` matches `work.settings.json` or `settings-work.json`. Only when there are no such matches
+will it match an exact JSON filename stem: `api` matches `profiles/api.json`. Full filenames such
+as `api.json` also work, but use the same settings-first priority. Enter a name, not a path.
+Multiple matches at either stage produce an error instead of choosing one or falling back.
+
+The selected file's `env.ANTHROPIC_BASE_URL` supplies the endpoint, with a top-level
+`ANTHROPIC_BASE_URL` accepted only when `env.ANTHROPIC_BASE_URL` is absent. An empty value is an error;
+OpenQuota does not fall back to another file or the environment. The resolved Base URL is read-only
+and is resolved again when saving. Enable **Custom Base URL** to enter it manually instead.
+Administrator email and password must still be entered separately. Existing Claude connections
+without a Provider name open in custom-address mode with their saved URL preserved.
 
 Each complete connection is stored under its own entry in the operating system's credential store.
 The connection is stored and confirmed as soon as **Save** is selected, without first authenticating

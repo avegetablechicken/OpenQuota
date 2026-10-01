@@ -29,11 +29,11 @@ describe('Sub2ApiConfigSection', () => {
           upstream: 'codex',
         });
       }
+      if (command === 'resolve_sub2api_claude_provider') {
+        return Promise.resolve('https://resolved-claude.example.com');
+      }
       if (command === 'resolve_sub2api_codex_provider') {
         return Promise.resolve('https://resolved.example.com');
-      }
-      if (command === 'resolve_sub2api_claude_base_url') {
-        return Promise.resolve('https://resolved-claude.example.com');
       }
       if (command === 'save_sub2api_config') {
         return Promise.resolve({
@@ -91,9 +91,15 @@ describe('Sub2ApiConfigSection', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await chooseUpstream('Claude');
     const baseUrl = screen.getByLabelText('Base URL');
-    await waitFor(() => expect(baseUrl).toHaveValue('https://resolved-claude.example.com'));
     expect(baseUrl).toBeDisabled();
-    expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).not.toBeChecked();
+    expect(baseUrl).toHaveValue('');
+    await fireEvent.input(screen.getByLabelText('Claude settings provider'), {
+      target: { value: 'work' },
+    });
+    await waitFor(() => expect(baseUrl).toHaveValue('https://resolved-claude.example.com'));
+    expect(mocks.invoke).toHaveBeenCalledWith('resolve_sub2api_claude_provider', {
+      provider: 'work',
+    });
     await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
       target: { value: 'admin@example.com' },
     });
@@ -107,7 +113,7 @@ describe('Sub2ApiConfigSection', () => {
         providerId: 'sub2api',
         config: {
           baseUrl: 'https://resolved-claude.example.com',
-          codexProvider: '',
+          codexProvider: 'work',
           customBaseUrl: false,
           email: 'admin@example.com',
           password: 'secret-password',
@@ -120,51 +126,51 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByText('Sub2API · Claude')).toBeInTheDocument();
   });
 
-  it('allows a custom Claude Base URL only after its switch is enabled', async () => {
+  it('requires a Claude provider or a manually entered custom URL', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await chooseUpstream('Claude');
-    const baseUrl = screen.getByLabelText('Base URL');
-    await waitFor(() => expect(baseUrl).toHaveValue('https://resolved-claude.example.com'));
-
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'admin@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'secret' },
+    });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
-
-    expect(baseUrl).toBeEnabled();
-    expect(baseUrl).toHaveValue('');
-    await fireEvent.input(baseUrl, { target: { value: 'https://custom-claude.example.com' } });
-    expect(baseUrl).toHaveValue('https://custom-claude.example.com');
+    expect(screen.getByLabelText('Claude settings provider')).toBeDisabled();
+    await fireEvent.input(screen.getByLabelText('Base URL'), { target: { value: '   ' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    await fireEvent.input(screen.getByLabelText('Base URL'), {
+      target: { value: 'https://custom.example.com' },
+    });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+    expect(
+      mocks.invoke.mock.calls.some(
+        ([command]) =>
+          command === 'resolve_sub2api_claude_provider' ||
+          command === 'resolve_sub2api_codex_provider',
+      ),
+    ).toBe(false);
   });
 
-  it('resolves a saved non-custom Claude Base URL during initialization', async () => {
-    mocks.invoke.mockImplementation((command: string) => {
-      if (command === 'get_sub2api_config_state') {
-        return Promise.resolve({
-          configured: true,
-          baseUrl: 'https://previous.example.com',
-          codexProvider: '',
-          customBaseUrl: false,
-          email: 'admin@example.com',
-          upstream: 'claude',
-        });
-      }
-      if (command === 'resolve_sub2api_claude_base_url') {
-        return Promise.resolve('https://resolved-claude.example.com');
-      }
-      return Promise.reject(new Error(`unexpected command ${command}`));
+  it('uses the backend custom mode for a saved Claude connection', async () => {
+    mocks.invoke.mockResolvedValue({
+      configured: true,
+      baseUrl: 'https://previous.example.com',
+      codexProvider: '',
+      customBaseUrl: true,
+      email: 'admin@example.com',
+      upstream: 'claude',
     });
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
-
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith('resolve_sub2api_claude_base_url'),
-    );
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-
-    expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).not.toBeChecked();
-    expect(screen.getByLabelText('Base URL')).toBeDisabled();
-    await waitFor(() =>
-      expect(screen.getByLabelText('Base URL')).toHaveValue('https://resolved-claude.example.com'),
-    );
+    expect(screen.getByLabelText('Base URL')).toBeEnabled();
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://previous.example.com');
+    expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual([
+      'get_sub2api_config_state',
+    ]);
   });
 
   it('restores a saved account while keeping new upstream drafts separate', async () => {
@@ -179,11 +185,11 @@ describe('Sub2ApiConfigSection', () => {
           upstream: 'claude',
         });
       }
+      if (command === 'resolve_sub2api_claude_provider') {
+        return Promise.resolve('https://resolved-claude.example.com');
+      }
       if (command === 'resolve_sub2api_codex_provider') {
         return Promise.resolve('https://resolved.example.com');
-      }
-      if (command === 'resolve_sub2api_claude_base_url') {
-        return Promise.resolve('https://resolved-claude.example.com');
       }
       if (command === 'save_sub2api_config') {
         return Promise.resolve({

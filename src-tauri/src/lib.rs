@@ -716,7 +716,7 @@ pub fn run() {
             commands::provider::delete_provider_api_key,
             commands::provider::get_sub2api_config_state,
             commands::provider::resolve_sub2api_codex_provider,
-            commands::provider::resolve_sub2api_claude_base_url,
+            commands::provider::resolve_sub2api_claude_provider,
             commands::provider::save_sub2api_config,
             commands::provider::clear_sub2api_config,
             commands::provider::delete_sub2api_config,

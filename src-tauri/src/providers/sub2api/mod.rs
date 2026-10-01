@@ -25,7 +25,7 @@ use crate::storage::Storage;
 
 use super::{
     claude::{
-        config::{resolve_anthropic_base_url, ClaudeConfigError},
+        config::{resolve_provider_base_url as resolve_claude_provider, ClaudeConfigError},
         map_sub2api_usage,
     },
     codex::{
@@ -203,6 +203,7 @@ pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<Metr
 pub struct Sub2ApiConfigInput {
     pub base_url: String,
     #[serde(default)]
+    // Legacy wire key shared by both upstreams for stored-configuration compatibility.
     pub codex_provider: String,
     #[serde(default)]
     pub custom_base_url: bool,
@@ -223,6 +224,7 @@ impl Drop for Sub2ApiConfigInput {
 pub struct Sub2ApiConfigState {
     pub configured: bool,
     pub base_url: String,
+    // Legacy wire key shared by both upstreams for stored-configuration compatibility.
     pub codex_provider: String,
     pub custom_base_url: bool,
     pub email: String,
@@ -323,7 +325,8 @@ impl StoredConfig {
             configured: true,
             base_url: self.base_url.clone(),
             codex_provider: self.codex_provider.clone(),
-            custom_base_url: self.custom_base_url,
+            custom_base_url: self.custom_base_url
+                || (self.upstream == Sub2ApiUpstream::Claude && self.codex_provider.is_empty()),
             email: self.email.clone(),
             upstream: self.upstream,
         }
@@ -734,7 +737,7 @@ impl Sub2ApiProvider {
         let (base_url, codex_provider, custom_base_url) = connection_target(
             &input,
             resolve_codex_provider_base_url,
-            resolve_claude_base_url,
+            resolve_claude_provider_base_url,
         )?;
         let config = StoredConfig {
             base_url,
@@ -1099,12 +1102,12 @@ pub fn codex_provider_base_url(value: &str) -> Result<String, ProviderError> {
     resolve_codex_provider_base_url(value).map_err(ProviderError::from)
 }
 
-fn resolve_claude_base_url() -> Result<String, Sub2ApiError> {
-    normalized_base_url_text(&resolve_anthropic_base_url()?)
+fn resolve_claude_provider_base_url(name: &str) -> Result<String, Sub2ApiError> {
+    normalized_base_url_text(&resolve_claude_provider(name)?)
 }
 
-pub fn claude_base_url() -> Result<String, ProviderError> {
-    resolve_claude_base_url().map_err(ProviderError::from)
+pub fn claude_provider_base_url(name: &str) -> Result<String, ProviderError> {
+    resolve_claude_provider_base_url(name).map_err(ProviderError::from)
 }
 
 fn default_true() -> bool {
@@ -1124,12 +1127,12 @@ fn normalized_codex_provider_base_url_text(value: &str) -> Result<String, Sub2Ap
 fn connection_target(
     input: &Sub2ApiConfigInput,
     resolve_codex: impl FnOnce(&str) -> Result<String, Sub2ApiError>,
-    resolve_claude: impl FnOnce() -> Result<String, Sub2ApiError>,
+    resolve_claude: impl FnOnce(&str) -> Result<String, Sub2ApiError>,
 ) -> Result<(String, String, bool), Sub2ApiError> {
-    let codex_provider = input.codex_provider.trim().to_owned();
+    let provider_name = input.codex_provider.trim().to_owned();
     match input.upstream {
-        Sub2ApiUpstream::Codex if input.custom_base_url => {
-            if !codex_provider.is_empty() {
+        _ if input.custom_base_url => {
+            if !provider_name.is_empty() {
                 return Err(Sub2ApiError::ProviderWithCustomBaseUrl);
             }
             Ok((
@@ -1138,13 +1141,8 @@ fn connection_target(
                 true,
             ))
         }
-        Sub2ApiUpstream::Codex => Ok((resolve_codex(&codex_provider)?, codex_provider, false)),
-        Sub2ApiUpstream::Claude if input.custom_base_url => Ok((
-            normalized_base_url_text(&input.base_url)?,
-            String::new(),
-            true,
-        )),
-        Sub2ApiUpstream::Claude => Ok((resolve_claude()?, String::new(), false)),
+        Sub2ApiUpstream::Codex => Ok((resolve_codex(&provider_name)?, provider_name, false)),
+        Sub2ApiUpstream::Claude => Ok((resolve_claude(&provider_name)?, provider_name, false)),
     }
 }
 
@@ -1858,7 +1856,7 @@ mod tests {
                 assert_eq!(provider, "exact-provider");
                 Ok("https://resolved.example.com".into())
             },
-            || unreachable!(),
+            |_| unreachable!(),
         )
         .unwrap();
 
@@ -1884,9 +1882,24 @@ mod tests {
         };
 
         assert_eq!(
-            connection_target(&input, |_| unreachable!(), || unreachable!()).unwrap_err(),
+            connection_target(&input, |_| unreachable!(), |_| unreachable!()).unwrap_err(),
             Sub2ApiError::ProviderWithCustomBaseUrl
         );
+    }
+
+    #[test]
+    fn legacy_claude_connections_expose_custom_mode_without_changing_named_providers() {
+        let mut config: StoredConfig = serde_json::from_str(
+            r#"{"base_url":"https://saved.example.com","email":"admin@example.com","password":"secret","upstream":"claude","custom_base_url":false}"#,
+        ).unwrap();
+        let state = config.state();
+        assert!(state.custom_base_url);
+        assert_eq!(state.base_url, "https://saved.example.com");
+        config.codex_provider = "work".into();
+        assert!(!config.state().custom_base_url);
+        config.codex_provider.clear();
+        config.upstream = super::Sub2ApiUpstream::Codex;
+        assert!(!config.state().custom_base_url);
     }
 
     #[test]
@@ -1928,10 +1941,10 @@ mod tests {
     }
 
     #[test]
-    fn claude_connection_targets_require_resolution_unless_custom_is_enabled() {
-        let resolved = Sub2ApiConfigInput {
+    fn claude_provider_is_required_and_resolved_again_on_save() {
+        let mut input = Sub2ApiConfigInput {
             base_url: "https://ignored.example.com".into(),
-            codex_provider: String::new(),
+            codex_provider: " work ".into(),
             custom_base_url: false,
             email: "admin@example.com".into(),
             password: "secret".into(),
@@ -1939,33 +1952,41 @@ mod tests {
         };
         assert_eq!(
             connection_target(
-                &resolved,
+                &input,
                 |_| unreachable!(),
-                || Ok("https://resolved-claude.example.com".into())
+                |name| {
+                    assert_eq!(name, "work");
+                    Ok("https://selected.example.com".into())
+                }
             )
             .unwrap(),
-            (
-                "https://resolved-claude.example.com".into(),
-                String::new(),
-                false
-            )
+            ("https://selected.example.com".into(), "work".into(), false)
         );
-
-        let custom = Sub2ApiConfigInput {
-            base_url: "https://custom-claude.example.com/api/v1".into(),
-            codex_provider: String::new(),
-            custom_base_url: true,
-            email: "admin@example.com".into(),
-            password: "secret".into(),
-            upstream: super::Sub2ApiUpstream::Claude,
-        };
+        input.codex_provider.clear();
         assert_eq!(
-            connection_target(&custom, |_| unreachable!(), || unreachable!()).unwrap(),
-            (
-                "https://custom-claude.example.com".into(),
-                String::new(),
-                true
+            connection_target(
+                &input,
+                |_| unreachable!(),
+                |_| Err(super::ClaudeConfigError::MissingName.into())
             )
+            .unwrap_err(),
+            Sub2ApiError::ClaudeConfig(super::ClaudeConfigError::MissingName)
+        );
+        input.custom_base_url = true;
+        input.base_url = "   ".into();
+        assert_eq!(
+            connection_target(&input, |_| unreachable!(), |_| unreachable!()).unwrap_err(),
+            Sub2ApiError::InvalidConfig
+        );
+        input.base_url = "https://manual.example.com/api/v1".into();
+        assert_eq!(
+            connection_target(&input, |_| unreachable!(), |_| unreachable!()).unwrap(),
+            ("https://manual.example.com".into(), String::new(), true)
+        );
+        input.codex_provider = "work".into();
+        assert_eq!(
+            connection_target(&input, |_| unreachable!(), |_| unreachable!()).unwrap_err(),
+            Sub2ApiError::ProviderWithCustomBaseUrl
         );
     }
 

@@ -7,7 +7,6 @@ use std::{sync::Arc, time::Duration};
 use crate::{child_process, storage::Storage};
 
 const SNAPSHOT_KEYS: &[&str] = &[
-    "ANTHROPIC_BASE_URL",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
     "ZCODE_HOME",
@@ -185,11 +184,6 @@ mod tests {
         source.insert("CLAUDE_CONFIG_DIR".to_owned(), "/tmp/claude".to_owned());
         source.insert("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), "secret".to_owned());
 
-        source.insert(
-            "ANTHROPIC_BASE_URL".to_owned(),
-            "https://claude.example.com".to_owned(),
-        );
-
         let filtered = super::SNAPSHOT_KEYS
             .iter()
             .filter_map(|key| {
@@ -204,9 +198,5 @@ mod tests {
             Some("/tmp/claude")
         );
         assert!(!filtered.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
-        assert_eq!(
-            filtered.get("ANTHROPIC_BASE_URL").map(String::as_str),
-            Some("https://claude.example.com")
-        );
     }
 }

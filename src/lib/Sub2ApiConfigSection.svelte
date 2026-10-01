@@ -4,8 +4,8 @@
     clearSub2ApiConfig,
     deleteSub2ApiConfig,
     getSub2ApiConfigState,
-    resolveSub2ApiClaudeBaseUrl,
     resolveSub2ApiCodexProvider,
+    resolveSub2ApiClaudeProvider,
     saveSub2ApiConfig,
   } from './backend';
   import Icon from './Icon.svelte';
@@ -28,7 +28,7 @@
 
   interface ConnectionDraft {
     baseUrl: string;
-    codexProvider: string;
+    providerName: string;
     customBaseUrl: boolean;
     email: string;
     password: string;
@@ -38,7 +38,7 @@
   function emptyConnectionDraft(): ConnectionDraft {
     return {
       baseUrl: '',
-      codexProvider: '',
+      providerName: '',
       customBaseUrl: false,
       email: '',
       password: '',
@@ -58,7 +58,7 @@
   });
   let open = $state(false);
   let baseUrl = $state('');
-  let codexProvider = $state('');
+  let providerName = $state('');
   let customBaseUrl = $state(false);
   let email = $state('');
   let password = $state('');
@@ -76,9 +76,6 @@
   let resolvingProvider = $state(false);
   let providerResolution = 0;
   let providerResolutionTimer: number | undefined;
-  let claudeBaseUrlError = $state<string | null>(null);
-  let resolvingClaudeBaseUrl = $state(false);
-  let claudeBaseUrlResolution = 0;
   let toggleButton = $state<HTMLButtonElement>();
   let clearButton = $state<HTMLButtonElement>();
   let clearCancelButton = $state<HTMLButtonElement>();
@@ -89,9 +86,7 @@
 
   const endpointReady = $derived(
     !customBaseUrl
-      ? upstream === 'codex'
-        ? Boolean(codexProvider.trim() && baseUrl.trim() && !providerError && !resolvingProvider)
-        : Boolean(baseUrl.trim() && !claudeBaseUrlError && !resolvingClaudeBaseUrl)
+      ? Boolean(providerName.trim() && baseUrl.trim() && !providerError && !resolvingProvider)
       : Boolean(baseUrl.trim()),
   );
   const canReuseSavedPassword = $derived(
@@ -113,12 +108,12 @@
   }
 
   function currentDraft(): ConnectionDraft {
-    return { baseUrl, codexProvider, customBaseUrl, email, password, revealPassword };
+    return { baseUrl, providerName, customBaseUrl, email, password, revealPassword };
   }
 
   function applyDraft(draft: ConnectionDraft) {
     baseUrl = draft.baseUrl;
-    codexProvider = draft.codexProvider;
+    providerName = draft.providerName;
     customBaseUrl = draft.customBaseUrl;
     email = draft.email;
     password = draft.password;
@@ -132,8 +127,8 @@
     };
     drafts[next.upstream] = {
       baseUrl: next.baseUrl,
-      codexProvider: next.codexProvider ?? '',
-      customBaseUrl: Boolean(next.customBaseUrl),
+      providerName: next.codexProvider ?? '',
+      customBaseUrl: next.customBaseUrl,
       email: next.email,
       password: '',
       revealPassword: false,
@@ -147,9 +142,6 @@
     resolvingProvider = false;
     cancelProviderResolution();
     providerResolution += 1;
-    claudeBaseUrlError = null;
-    resolvingClaudeBaseUrl = false;
-    claudeBaseUrlResolution += 1;
   }
 
   function syncRememberedUpstream(next: Sub2ApiConfigState) {
@@ -161,13 +153,10 @@
     open = !open;
     if (open) {
       resetEditor();
-      if (upstream === 'claude' && !customBaseUrl) resolveClaudeBaseUrl();
     } else {
       cancelProviderResolution();
       resolvingProvider = false;
       providerResolution += 1;
-      resolvingClaudeBaseUrl = false;
-      claudeBaseUrlResolution += 1;
     }
   }
 
@@ -180,50 +169,44 @@
     resolvingProvider = false;
     cancelProviderResolution();
     providerResolution += 1;
-    claudeBaseUrlError = null;
-    resolvingClaudeBaseUrl = false;
-    claudeBaseUrlResolution += 1;
-    if (next === 'claude' && !customBaseUrl) resolveClaudeBaseUrl();
-    else if (next === 'codex' && !customBaseUrl && codexProvider.trim()) {
-      updateCodexProvider(codexProvider);
+    if (!customBaseUrl && providerName.trim()) {
+      updateProvider(providerName);
     }
   }
 
   function setCustomBaseUrl(next: boolean) {
     customBaseUrl = next;
     baseUrl = '';
-    codexProvider = '';
+    providerName = '';
     providerError = null;
     resolvingProvider = false;
     cancelProviderResolution();
     providerResolution += 1;
-    claudeBaseUrlError = null;
-    resolvingClaudeBaseUrl = false;
-    claudeBaseUrlResolution += 1;
-    if (!next && upstream === 'claude') resolveClaudeBaseUrl();
   }
 
-  function updateCodexProvider(value: string) {
-    codexProvider = value;
+  function updateProvider(value: string) {
+    providerName = value;
     baseUrl = '';
     providerError = null;
     cancelProviderResolution();
     const candidate = value.trim();
     const resolution = ++providerResolution;
-    if (!candidate || upstream !== 'codex' || customBaseUrl) {
+    if (!candidate || customBaseUrl) {
       resolvingProvider = false;
       return;
     }
     resolvingProvider = true;
+    const resolveProvider =
+      upstream === 'claude' ? resolveSub2ApiClaudeProvider : resolveSub2ApiCodexProvider;
     providerResolutionTimer = window.setTimeout(() => {
       providerResolutionTimer = undefined;
-      void resolveSub2ApiCodexProvider(candidate)
+      void resolveProvider(candidate)
         .then((resolved) => {
           if (resolution === providerResolution) baseUrl = resolved;
         })
         .catch((cause) => {
           if (resolution === providerResolution) {
-            providerError = errorMessage(cause, 'The Codex provider could not be resolved.');
+            providerError = errorMessage(cause, 'The provider could not be resolved.');
           }
         })
         .finally(() => {
@@ -232,31 +215,12 @@
     }, providerResolutionDelayMs);
   }
 
-  function resolveClaudeBaseUrl() {
-    const resolution = ++claudeBaseUrlResolution;
-    baseUrl = '';
-    claudeBaseUrlError = null;
-    resolvingClaudeBaseUrl = true;
-    void resolveSub2ApiClaudeBaseUrl()
-      .then((resolved) => {
-        if (resolution === claudeBaseUrlResolution) baseUrl = resolved;
-      })
-      .catch((cause) => {
-        if (resolution === claudeBaseUrlResolution) {
-          claudeBaseUrlError = errorMessage(cause, 'The Claude Base URL could not be resolved.');
-        }
-      })
-      .finally(() => {
-        if (resolution === claudeBaseUrlResolution) resolvingClaudeBaseUrl = false;
-      });
-  }
-
   async function save() {
     if (!canSave) return;
     const previousState = connectionState;
     const submitted = {
       baseUrl: baseUrl.trim(),
-      codexProvider: codexProvider.trim(),
+      codexProvider: providerName.trim(),
       customBaseUrl,
       email: email.trim(),
       password,
@@ -285,7 +249,7 @@
       connectionState = previousState;
       syncRememberedUpstream(previousState);
       baseUrl = submitted.baseUrl;
-      codexProvider = submitted.codexProvider;
+      providerName = submitted.codexProvider;
       customBaseUrl = submitted.customBaseUrl;
       email = submitted.email;
       upstream = submitted.upstream;
@@ -381,7 +345,6 @@
         connectionState = next;
         syncRememberedUpstream(next);
         resetEditor(next);
-        if (next.upstream === 'claude' && !next.customBaseUrl) resolveClaudeBaseUrl();
       })
       .catch((cause) => {
         error = errorMessage(cause, 'The Sub2API connection could not be read.');
@@ -392,7 +355,6 @@
   onDestroy(() => {
     cancelProviderResolution();
     providerResolution += 1;
-    claudeBaseUrlResolution += 1;
   });
 </script>
 
@@ -438,22 +400,22 @@
               onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
             />
           </div>
-          {#if upstream === 'codex'}
-            <label class="config-row">
-              <span>Provider</span>
-              <input
-                type="text"
-                value={codexProvider}
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="Provider or profile"
-                aria-label="Codex provider or profile"
-                disabled={saving || customBaseUrl}
-                oninput={(event) => updateCodexProvider(event.currentTarget.value)}
-              />
-            </label>
-            {#if providerError}<div class="config-error" role="alert">{providerError}</div>{/if}
-          {/if}
+          <label class="config-row">
+            <span>Provider</span>
+            <input
+              type="text"
+              value={providerName}
+              autocomplete="off"
+              spellcheck="false"
+              placeholder={upstream === 'claude' ? 'Settings name' : 'Provider or profile'}
+              aria-label={upstream === 'claude'
+                ? 'Claude settings provider'
+                : 'Codex provider or profile'}
+              disabled={saving || customBaseUrl}
+              oninput={(event) => updateProvider(event.currentTarget.value)}
+            />
+          </label>
+          {#if providerError}<div class="config-error" role="alert">{providerError}</div>{/if}
           <div class="config-row">
             <span>Custom Base URL</span>
             <label class="switch custom-base-url-switch">
@@ -480,9 +442,6 @@
               disabled={saving || !customBaseUrl}
             />
           </label>
-          {#if upstream === 'claude' && claudeBaseUrlError}
-            <div class="config-error" role="alert">{claudeBaseUrlError}</div>
-          {/if}
           <label class="config-row">
             <span>Email</span>
             <input
