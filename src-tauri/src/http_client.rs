@@ -1480,8 +1480,10 @@ mod provider_proxy_tests {
                 .env("CODEX_HOME", directory.path())
                 .env("HTTP_PROXY", "http://127.0.0.1:9")
                 .env("http_proxy", "http://127.0.0.1:9")
-                .env("NO_PROXY", "*")
-                .env("no_proxy", "*")
+                // reqwest's non-macOS matcher treats wildcard domains separately from IPs.
+                // Bypass the literal loopback address used by serve_once explicitly.
+                .env("NO_PROXY", "127.0.0.1")
+                .env("no_proxy", "127.0.0.1")
                 .status().unwrap();
             assert!(status.success());
             return;
