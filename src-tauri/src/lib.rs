@@ -38,7 +38,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
-    App, AppHandle, Emitter, Manager,
+    AppHandle, Emitter, Manager,
 };
 #[cfg(not(target_os = "linux"))]
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
@@ -247,8 +247,8 @@ pub(crate) fn update_tray_menu(app: &AppHandle, settings: &AppSettings) {
     }
 }
 
-fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
-    let menu = build_tray_menu(app.handle(), &app.state::<Arc<SettingsService>>().get())?;
+fn install_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let menu = build_tray_menu(app, &app.state::<Arc<SettingsService>>().get())?;
 
     let icon = app
         .default_window_icon()
@@ -357,7 +357,7 @@ fn apply_linux_tray_fallback(app: &AppHandle) {
     }
     app_warn!(
         "lifecycle",
-        "system tray became unavailable; using standalone window"
+        "system tray unavailable while unlocked for 30 seconds; using standalone window"
     );
     let _ = app.remove_tray_by_id("openquota-tray");
     app.state::<PopupDismissGuard>().cancel_pending();
@@ -382,6 +382,51 @@ fn apply_linux_tray_fallback(app: &AppHandle) {
 }
 
 #[cfg(target_os = "linux")]
+fn restore_linux_tray(app: &AppHandle) {
+    let integration = app.state::<DesktopIntegration>();
+    let was_available = integration.tray_available();
+    let _ = app.remove_tray_by_id(TRAY_ID);
+    if let Err(error) = install_tray(app) {
+        app_warn!(
+            "lifecycle",
+            "system tray recovery failed; will retry: {error}"
+        );
+        apply_linux_tray_fallback(app);
+        return;
+    }
+    integration.enable_tray();
+    app_info!("lifecycle", "system tray integration restored");
+
+    let settings = app.state::<Arc<SettingsService>>();
+    if !was_available {
+        if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+            let visible = window.is_visible().unwrap_or(true);
+            if let Err(error) =
+                window::apply_window_mode(&window, settings.get().window_mode, false)
+            {
+                app_warn!(
+                    "window",
+                    "recovered tray window mode could not be applied: {error}"
+                );
+            }
+            if !visible {
+                window::hide_main_window(&window);
+            }
+        }
+    }
+    tray_presentation::update(
+        app,
+        &app.state::<Arc<ProviderService>>().state(),
+        &settings.get(),
+        settings.registry(),
+    );
+    let _ = app.emit(
+        "settings-state",
+        commands::settings::settings_view_state(app, settings.inner().as_ref()),
+    );
+}
+
+#[cfg(target_os = "linux")]
 fn spawn_status_notifier_monitor(app: AppHandle) {
     if desktop_integration::status_notifier_monitor_forced_off() {
         return;
@@ -390,18 +435,56 @@ fn spawn_status_notifier_monitor(app: AppHandle) {
     if std::thread::Builder::new()
         .name("openquota-tray-monitor".to_owned())
         .spawn(move || {
-            if let Err(error) = desktop_integration::wait_for_status_notifier_loss() {
-                app_warn!("lifecycle", "system tray monitor stopped: {error}");
-            }
-            let fallback_app = monitor_app.clone();
-            if monitor_app
-                .run_on_main_thread(move || apply_linux_tray_fallback(&fallback_app))
-                .is_err()
-            {
-                app_warn!(
-                    "lifecycle",
-                    "standalone tray fallback could not be scheduled"
-                );
+            // Preserve the native indicator through lock/unlock and brief host
+            // restarts; only use a standalone window for persistent host loss.
+            let mut monitor = desktop_integration::TrayHostMonitor::default();
+            let mut query_failed = false;
+            loop {
+                match desktop_integration::status_notifier_state() {
+                    Ok((available, locked)) => {
+                        query_failed = false;
+                        let status_app = monitor_app.clone();
+                        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                        if monitor_app
+                            .run_on_main_thread(move || {
+                                let action = monitor.observe(
+                                    available,
+                                    locked,
+                                    status_app.state::<DesktopIntegration>().tray_available(),
+                                    std::time::Instant::now(),
+                                );
+                                match action {
+                                    desktop_integration::TrayHostAction::Unavailable => {
+                                        apply_linux_tray_fallback(&status_app)
+                                    }
+                                    desktop_integration::TrayHostAction::Recreate => {
+                                        restore_linux_tray(&status_app)
+                                    }
+                                    desktop_integration::TrayHostAction::Unchanged => {}
+                                }
+                                let _ = sender.send(monitor);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        // Serialize observations and avoid queuing work while the UI is busy.
+                        let Ok(next_monitor) = receiver.recv() else {
+                            break;
+                        };
+                        monitor = next_monitor;
+                    }
+                    Err(error) => {
+                        if !query_failed {
+                            app_warn!(
+                                "lifecycle",
+                                "system tray monitor query failed; will retry: {error}"
+                            );
+                        }
+                        query_failed = true;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
         })
         .is_err()
@@ -644,11 +727,10 @@ pub fn run() {
                 let _ = register_shortcut(app.handle(), &shortcut);
             }
 
-            let tray_installed = if desktop_integration.tray_available() {
-                match install_tray(app) {
+            if desktop_integration.tray_available() {
+                match install_tray(app.handle()) {
                     Ok(()) => {
                         app_info!("lifecycle", "system tray integration ready");
-                        true
                     }
                     Err(error) => {
                         app_warn!(
@@ -657,12 +739,9 @@ pub fn run() {
                         );
                         desktop_integration.disable_tray();
                         let _ = app.remove_tray_by_id("openquota-tray");
-                        false
                     }
                 }
-            } else {
-                false
-            };
+            }
 
             if desktop_integration.is_floating() {
                 if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
@@ -679,11 +758,7 @@ pub fn run() {
             }
 
             #[cfg(target_os = "linux")]
-            if tray_installed {
-                spawn_status_notifier_monitor(app.handle().clone());
-            }
-            #[cfg(not(target_os = "linux"))]
-            let _ = tray_installed;
+            spawn_status_notifier_monitor(app.handle().clone());
 
             tray_presentation::update(
                 app.handle(),
