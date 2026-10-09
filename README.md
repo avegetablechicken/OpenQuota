@@ -118,8 +118,16 @@ Build an installer for the current platform:
 ```sh
 corepack pnpm build:installer             # Windows
 corepack pnpm build:linux                 # Linux
-corepack pnpm tauri build --bundles dmg   # macOS
+bash scripts/build-macos.sh dmg          # macOS
 ```
+
+For a macOS app bundle only, run `bash scripts/build-macos.sh` (or
+`npm run build:macos`). Add `--check` to run the full quality checks first.
+The script uses the installed dependencies, preserves an explicit
+`APPLE_SIGNING_IDENTITY`, and otherwise signs the bundle ad hoc so notification
+authorization works. DMG builds fall back to packaging without Finder layout if
+Automation permission is unavailable, then verify the image contents and print
+its SHA-256 checksum. Artifacts are written under `src-tauri/target/release/bundle`.
 
 Maintainers can review updater and optional native-signing requirements in
 [docs/releasing.md](docs/releasing.md).

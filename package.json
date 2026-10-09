@@ -9,6 +9,7 @@
     "build": "vite build",
     "build:installer": "tauri build --bundles nsis",
     "build:linux": "tauri build --bundles deb,appimage",
+    "build:macos": "bash scripts/build-macos.sh",
     "check": "svelte-check --tsconfig ./tsconfig.app.json",
     "test": "vitest run",
     "test:watch": "vitest",
