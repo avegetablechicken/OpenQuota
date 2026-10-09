@@ -116,6 +116,8 @@ fn level_projection(_used: f64) -> PaceProjection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Milestone {
     AlmostOut,
+    FullyUsed,
+    UsageReset,
     CuttingItClose,
     WillRunOut,
 }
@@ -124,6 +126,8 @@ impl Milestone {
     pub fn title(self) -> &'static str {
         match self {
             Self::AlmostOut => "Almost Out",
+            Self::FullyUsed => "100% Usage",
+            Self::UsageReset => "Usage Reset",
             Self::CuttingItClose => "Cutting It Close",
             Self::WillRunOut => "Will Run Out",
         }
@@ -132,6 +136,8 @@ impl Milestone {
     pub fn body(self) -> &'static str {
         match self {
             Self::AlmostOut => "Under 10% usage remaining for this window.",
+            Self::FullyUsed => "You have used 100% of this window’s limit.",
+            Self::UsageReset => "Usage has reset after reaching 100%. Quota is available again.",
             Self::CuttingItClose => "Projected to finish close to your limit.",
             Self::WillRunOut => "Projected to run out before the limit resets.",
         }
@@ -155,6 +161,8 @@ struct NotificationState {
     previous: Option<PaceSeverity>,
     was_under_ten: bool,
     primed: bool,
+    exhausted: bool,
+    pending_reset: bool,
 }
 
 #[derive(Default)]
@@ -192,7 +200,9 @@ impl NotificationEvaluator {
             state.fired.remove(&alert.milestone);
             if alert.milestone == Milestone::AlmostOut {
                 state.was_under_ten = alert.previous_was_under_ten;
-            } else {
+            } else if alert.milestone == Milestone::UsageReset {
+                state.pending_reset = true;
+            } else if alert.milestone != Milestone::FullyUsed {
                 state.previous = alert.previous_severity;
             }
         }
@@ -278,6 +288,19 @@ fn transition(
     toggles: &NotificationPreferences,
     metric: &str,
 ) -> Vec<PaceAlert> {
+    let fully_used = remaining_percent <= 0.0;
+    // Observe actual quota recovery, including rolling windows without reset dates.
+    let recovered = state.exhausted && remaining_percent > 0.0;
+    if recovered {
+        state.pending_reset = toggles.usage_reset;
+        state.exhausted = false;
+        state.fired.remove(&Milestone::FullyUsed);
+        state.fired.remove(&Milestone::UsageReset);
+    }
+    if fully_used {
+        state.exhausted = true;
+        state.pending_reset = false;
+    }
     let severity = match severity {
         PaceSeverity::Spent => PaceSeverity::RunningOut,
         value => value,
@@ -292,6 +315,9 @@ fn transition(
         state.primed = true;
         state.previous = (severity != PaceSeverity::Untracked).then_some(severity);
         state.was_under_ten = remaining_percent < 10.0;
+        if fully_used {
+            state.fired.insert(Milestone::FullyUsed);
+        }
         return Vec::new();
     }
 
@@ -323,6 +349,16 @@ fn transition(
         if previous.is_some_and(|value| severity <= value) || !milestones.is_empty() {
             state.previous = Some(severity);
         }
+    }
+
+    if fully_used && toggles.fully_used && !state.fired.contains(&Milestone::FullyUsed) {
+        milestones.push(Milestone::FullyUsed);
+    }
+    if state.pending_reset {
+        if toggles.usage_reset {
+            milestones.push(Milestone::UsageReset);
+        }
+        state.pending_reset = false;
     }
 
     let under_ten = remaining_percent < 10.0;
@@ -479,11 +515,154 @@ mod tests {
     }
 
     #[test]
+    fn full_usage_and_recovery_notify_once_and_rearm() {
+        let toggles = NotificationPreferences {
+            fully_used: true,
+            usage_reset: true,
+            ..NotificationPreferences::default()
+        };
+        let mut state = NotificationState::default();
+        for (remaining, expected) in [
+            (50.0, None),
+            (0.49, None), // Display rounding must not count as 100% usage.
+            (0.0, Some(Milestone::FullyUsed)),
+            (0.0, None),
+            (80.0, Some(Milestone::UsageReset)),
+            (80.0, None),
+            (0.0, Some(Milestone::FullyUsed)),
+            (100.0, Some(Milestone::UsageReset)),
+        ] {
+            let alerts = transition(
+                &mut state,
+                PaceSeverity::Untracked,
+                remaining,
+                None,
+                &toggles,
+                "Session",
+            );
+            assert_eq!(
+                alerts
+                    .iter()
+                    .map(|alert| alert.milestone)
+                    .collect::<Vec<_>>(),
+                expected.into_iter().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn reset_requires_observed_exhaustion_even_when_full_alert_is_disabled() {
+        let toggles = NotificationPreferences {
+            usage_reset: true,
+            ..NotificationPreferences::default()
+        };
+        let mut state = NotificationState::default();
+        let reset = Utc::now();
+        for (remaining, date, expected) in [
+            (20.0, reset, None),
+            (100.0, reset + Duration::hours(5), None),
+            (0.0, reset + Duration::hours(5), None),
+            (0.0, reset + Duration::hours(10), None),
+            (
+                95.0,
+                reset + Duration::hours(10),
+                Some(Milestone::UsageReset),
+            ),
+        ] {
+            let alerts = transition(
+                &mut state,
+                PaceSeverity::Untracked,
+                remaining,
+                Some(date),
+                &toggles,
+                "Session",
+            );
+            assert_eq!(
+                alerts
+                    .iter()
+                    .map(|alert| alert.milestone)
+                    .collect::<Vec<_>>(),
+                expected.into_iter().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn initial_exhaustion_is_silent_but_recovery_and_failed_deliveries_are_tracked() {
+        let toggles = NotificationPreferences {
+            fully_used: true,
+            usage_reset: true,
+            ..NotificationPreferences::default()
+        };
+        let evaluator = NotificationEvaluator::default();
+        let mut state = NotificationState::default();
+        assert!(transition(
+            &mut state,
+            PaceSeverity::Spent,
+            0.0,
+            None,
+            &toggles,
+            "Session"
+        )
+        .is_empty());
+        let mut alerts = transition(
+            &mut state,
+            PaceSeverity::Healthy,
+            100.0,
+            None,
+            &toggles,
+            "Session",
+        );
+        assert_eq!(alerts[0].milestone, Milestone::UsageReset);
+        alerts[0].metric_id = "session".into();
+        evaluator
+            .states
+            .lock()
+            .unwrap()
+            .insert("session".into(), state);
+        evaluator.rollback(&alerts);
+        let mut states = evaluator.states.lock().unwrap();
+        let state = states.get_mut("session").unwrap();
+        assert_eq!(
+            transition(
+                state,
+                PaceSeverity::Healthy,
+                100.0,
+                None,
+                &toggles,
+                "Session"
+            )[0]
+            .milestone,
+            Milestone::UsageReset
+        );
+        assert!(transition(
+            state,
+            PaceSeverity::Healthy,
+            100.0,
+            None,
+            &toggles,
+            "Session"
+        )
+        .is_empty());
+        let mut alerts = transition(state, PaceSeverity::Spent, 0.0, None, &toggles, "Session");
+        alerts[0].metric_id = "session".into();
+        drop(states);
+        evaluator.rollback(&alerts);
+        let mut states = evaluator.states.lock().unwrap();
+        let state = states.get_mut("session").unwrap();
+        assert_eq!(
+            transition(state, PaceSeverity::Spent, 0.0, None, &toggles, "Session")[0].milestone,
+            Milestone::FullyUsed
+        );
+    }
+
+    #[test]
     fn notifications_prime_then_fire_once_on_worsening() {
         let toggles = NotificationPreferences {
             cutting_it_close: true,
             will_run_out: true,
             almost_out: true,
+            ..NotificationPreferences::default()
         };
         let reset = Some(Utc.timestamp_opt(1_800_010_000, 0).unwrap());
         let mut state = NotificationState::default();
@@ -522,6 +701,7 @@ mod tests {
             cutting_it_close: true,
             will_run_out: true,
             almost_out: false,
+            ..NotificationPreferences::default()
         };
         let reset = Utc.timestamp_opt(1_800_010_000, 0).unwrap();
         let mut state = NotificationState::default();

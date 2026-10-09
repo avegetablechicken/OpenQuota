@@ -1212,6 +1212,29 @@ describe('OpenQuota dashboard', () => {
     expect(screen.getByRole('checkbox', { name: /Almost Out/ })).toBeChecked();
   });
 
+  it.each([
+    ['100% Usage', 'fullyUsed'],
+    ['Usage Reset', 'usageReset'],
+  ])('saves the %s notification preference and requests permission', async (label, key) => {
+    render(App);
+    await screen.findByText('Plus');
+    await fireEvent.click(screen.getByLabelText('Open options'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(label) }));
+    await waitFor(() => {
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        'save_app_settings',
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            notifications: expect.objectContaining({ [key]: true }),
+          }),
+        }),
+      );
+      expect(mocks.invoke).toHaveBeenCalledWith('request_notification_permission');
+    });
+    expect(screen.getByRole('checkbox', { name: new RegExp(label) })).toBeChecked();
+  });
+
   it('confirms a full settings reset without deleting credentials or usage data', async () => {
     render(App);
     await screen.findByText('Plus');

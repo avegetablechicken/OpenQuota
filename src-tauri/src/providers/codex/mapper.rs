@@ -502,6 +502,7 @@ mod tests {
                 almost_out: false,
                 cutting_it_close: false,
                 will_run_out: true,
+                ..NotificationPreferences::default()
             },
             ..AppSettings::default()
         };

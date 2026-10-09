@@ -55,7 +55,9 @@
   const anyNotificationEnabled = $derived(
     settings.notifications.almostOut ||
       settings.notifications.cuttingItClose ||
-      settings.notifications.willRunOut,
+      settings.notifications.willRunOut ||
+      settings.notifications.fullyUsed ||
+      settings.notifications.usageReset,
   );
   const notificationsNeedAttention = $derived(
     anyNotificationEnabled && settingsView.notificationPermission !== 'granted',
@@ -319,6 +321,34 @@
         type="checkbox"
         checked={settings.notifications.almostOut}
         onchange={(event) => patchNotification('almostOut', event.currentTarget.checked)}
+      /></label
+    >
+    <label class="setting-row"
+      ><span
+        ><b>100% Usage</b><i
+          class="setting-info"
+          data-tooltip="Alert when a limit reaches 100% usage."
+          aria-label="Alert when a limit reaches 100% usage."
+          ><Icon name="about" size={12} strokeWidth={1.8} /></i
+        ></span
+      ><input
+        type="checkbox"
+        checked={settings.notifications.fullyUsed}
+        onchange={(event) => patchNotification('fullyUsed', event.currentTarget.checked)}
+      /></label
+    >
+    <label class="setting-row"
+      ><span
+        ><b>Usage Reset</b><i
+          class="setting-info"
+          data-tooltip="Alert when usage resets after reaching 100%."
+          aria-label="Alert when usage resets after reaching 100%."
+          ><Icon name="about" size={12} strokeWidth={1.8} /></i
+        ></span
+      ><input
+        type="checkbox"
+        checked={settings.notifications.usageReset}
+        onchange={(event) => patchNotification('usageReset', event.currentTarget.checked)}
       /></label
     >
     <label class="setting-row"

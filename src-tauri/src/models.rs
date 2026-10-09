@@ -855,6 +855,8 @@ pub enum WindowMode {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NotificationPreferences {
+    pub fully_used: bool,
+    pub usage_reset: bool,
     pub almost_out: bool,
     pub cutting_it_close: bool,
     pub will_run_out: bool,

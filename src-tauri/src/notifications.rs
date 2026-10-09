@@ -1,7 +1,11 @@
 use std::thread;
 
 use tauri::{AppHandle, Manager};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::{NotificationExt, PermissionState};
+
+#[cfg(target_os = "macos")]
+mod macos;
 
 use crate::{
     models::{ProviderSnapshot, ProviderViewState},
@@ -13,12 +17,32 @@ use crate::{
     window::{show_main_window, MAIN_WINDOW},
 };
 
+#[cfg(target_os = "macos")]
+pub fn permission(_app: &AppHandle) -> &'static str {
+    macos::permission()
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn permission(app: &AppHandle) -> &'static str {
     match app.notification().permission_state() {
         Ok(PermissionState::Granted) => "granted",
         Ok(PermissionState::Denied) => "denied",
         Ok(PermissionState::Prompt | PermissionState::PromptWithRationale) => "prompt",
         Err(_) => "unavailable",
+    }
+}
+
+pub async fn request_permission(_app: &AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::request_permission().await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        _app.notification()
+            .request_permission()
+            .map(|_| ())
+            .map_err(|_| "Notification permission could not be requested.".to_owned())
     }
 }
 

@@ -8,7 +8,6 @@ use std::{
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
-use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{
@@ -489,25 +488,21 @@ pub async fn reset_provider_customization(
 }
 
 #[tauri::command]
-pub fn request_notification_permission(
+pub async fn request_notification_permission(
     app: AppHandle,
     settings: State<'_, Arc<SettingsService>>,
-) -> SettingsViewState {
+) -> Result<SettingsViewState, String> {
     crate::app_info!("notifications", "notification permission requested");
-    let error = app
-        .notification()
-        .request_permission()
-        .err()
-        .map(|_| "Notification permission could not be requested.".to_owned());
+    let error = crate::notifications::request_permission(&app).await.err();
     if error.is_some() {
         crate::app_error!("notifications", "notification permission request failed");
     }
-    settings.view_state(
+    Ok(settings.view_state(
         notification_permission(&app),
         error,
         app.state::<DesktopIntegration>().tray_available(),
         app.state::<DesktopIntegration>().platform_summary(),
-    )
+    ))
 }
 
 #[tauri::command]

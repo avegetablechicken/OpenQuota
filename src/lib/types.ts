@@ -243,6 +243,8 @@ export interface ProviderLayout {
 }
 
 export interface NotificationPreferences {
+  fullyUsed: boolean;
+  usageReset: boolean;
   almostOut: boolean;
   cuttingItClose: boolean;
   willRunOut: boolean;
