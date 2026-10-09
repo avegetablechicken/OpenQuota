@@ -1476,14 +1476,34 @@ mod tls_tests {
         io::{Read, Write},
         net::TcpListener,
         thread,
-        time::Duration,
+        time::{Duration, SystemTime},
     };
 
-    const CERT: &[u8] = include_bytes!("../tests/fixtures/tls/localhost-ca.pem");
     const KEY: &[u8] = include_bytes!("../tests/fixtures/tls/localhost-key.pem");
 
-    fn request(trusted: bool, host: &str, direct: bool) -> Result<String, reqwest::Error> {
-        let identity = native_tls::Identity::from_pkcs8(CERT, KEY).unwrap();
+    fn request(
+        trusted: bool,
+        host: &str,
+        direct: bool,
+        expired: bool,
+    ) -> Result<String, reqwest::Error> {
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::KeyEncipherment,
+            rcgen::KeyUsagePurpose::KeyCertSign,
+        ];
+        // macOS limits server-certificate lifetimes even for roots supplied by
+        // a client. Generate a short-lived certificate so this fixture never ages out.
+        let now = SystemTime::now();
+        let day = Duration::from_secs(86400);
+        params.not_before = (now - day * 2).into();
+        params.not_after = if expired { now - day } else { now + day }.into();
+        let key = rcgen::KeyPair::from_pem(std::str::from_utf8(KEY).unwrap()).unwrap();
+        let cert = params.self_signed(&key).unwrap().pem();
+        let identity = native_tls::Identity::from_pkcs8(cert.as_bytes(), KEY).unwrap();
         let acceptor = native_tls::TlsAcceptor::new(identity).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1510,7 +1530,8 @@ mod tls_tests {
             super::blocking_client_builder().no_proxy()
         };
         if trusted {
-            builder = builder.tls_certs_merge([reqwest::Certificate::from_pem(CERT).unwrap()]);
+            builder =
+                builder.tls_certs_merge([reqwest::Certificate::from_pem(cert.as_bytes()).unwrap()]);
         }
         let result = builder
             .resolve("localhost", address)
@@ -1527,18 +1548,32 @@ mod tls_tests {
     #[test]
     fn trusted_self_signed_ca_server_works_with_native_tls() {
         for direct in [false, true] {
-            assert_eq!(request(true, "localhost", direct).unwrap(), "trusted");
+            assert_eq!(
+                request(true, "localhost", direct, false).unwrap(),
+                "trusted"
+            );
         }
     }
 
     #[test]
     fn untrusted_self_signed_server_is_rejected() {
-        assert!(request(false, "localhost", true).unwrap_err().is_connect());
+        assert!(request(false, "localhost", true, false)
+            .unwrap_err()
+            .is_connect());
     }
 
     #[test]
     fn trusted_server_with_wrong_hostname_is_rejected() {
-        assert!(request(true, "127.0.0.1", true).unwrap_err().is_connect());
+        assert!(request(true, "127.0.0.1", true, false)
+            .unwrap_err()
+            .is_connect());
+    }
+
+    #[test]
+    fn expired_trusted_server_is_rejected() {
+        assert!(request(true, "localhost", true, true)
+            .unwrap_err()
+            .is_connect());
     }
 }
 

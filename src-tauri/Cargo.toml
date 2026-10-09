@@ -69,4 +69,5 @@ zbus = "5.13"
 
 [dev-dependencies]
 native-tls = "0.2"
+rcgen = "0.14"
 fontdue = { version = "0.9.3", default-features = false, features = ["std"] }
