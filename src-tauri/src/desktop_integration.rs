@@ -89,11 +89,6 @@ impl DesktopIntegration {
         changed
     }
 
-    #[cfg(any(target_os = "linux", test))]
-    pub fn enable_tray(&self) {
-        self.tray_available.store(true, Ordering::SeqCst);
-    }
-
     pub(crate) fn set_floating(&self, floating: bool) {
         self.floating_window.store(floating, Ordering::SeqCst);
     }
@@ -169,7 +164,17 @@ fn status_notifier_host_available() -> bool {
         Ok("unavailable") => return false,
         _ => {}
     }
-    status_notifier_state().is_ok_and(|(available, _)| available)
+    let Ok(connection) = zbus::blocking::Connection::session() else {
+        return false;
+    };
+    let Ok(proxy) = zbus::blocking::fdo::DBusProxy::new(&connection) else {
+        return false;
+    };
+    proxy.list_names().is_ok_and(|names| {
+        names
+            .iter()
+            .any(|name| name.as_str() == "org.kde.StatusNotifierWatcher")
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -181,73 +186,35 @@ pub fn status_notifier_monitor_forced_off() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub fn status_notifier_state() -> Result<(bool, bool), String> {
+pub fn wait_for_status_notifier_loss() -> Result<(), String> {
     const WATCHER_NAME: &str = "org.kde.StatusNotifierWatcher";
 
     let connection = zbus::blocking::Connection::session()
         .map_err(|error| format!("session bus unavailable: {error}"))?;
     let proxy = zbus::blocking::fdo::DBusProxy::new(&connection)
         .map_err(|error| format!("session bus proxy unavailable: {error}"))?;
-    let available =
-        match proxy.get_name_owner(WATCHER_NAME.try_into().expect("valid watcher bus name")) {
-            Ok(_) => true,
-            Err(zbus::fdo::Error::NameHasNoOwner(_)) => false,
-            Err(error) => return Err(format!("watcher snapshot failed: {error}")),
-        };
-    // GNOME 3.36 disables AppIndicators while locked. The indicator library
-    // already re-registers the existing icon when the watcher returns.
-    let locked = zbus::blocking::Proxy::new(
-        &connection,
-        "org.gnome.ScreenSaver",
-        "/org/gnome/ScreenSaver",
-        "org.gnome.ScreenSaver",
-    )
-    .and_then(|proxy| proxy.call::<_, _, bool>("GetActive", &()))
-    .unwrap_or(false);
-    Ok((available, locked))
-}
+    let changes = proxy
+        .receive_name_owner_changed_with_args(&[(0, WATCHER_NAME)])
+        .map_err(|error| format!("watcher subscription failed: {error}"))?;
 
-#[cfg(any(target_os = "linux", test))]
-#[derive(Default)]
-pub struct TrayHostMonitor {
-    missing_since: Option<std::time::Instant>,
-}
-
-#[cfg(any(target_os = "linux", test))]
-#[derive(Debug, PartialEq, Eq)]
-pub enum TrayHostAction {
-    Unavailable,
-    Recreate,
-    Unchanged,
-}
-
-#[cfg(any(target_os = "linux", test))]
-impl TrayHostMonitor {
-    pub fn observe(
-        &mut self,
-        host_available: bool,
-        locked: bool,
-        tray_available: bool,
-        now: std::time::Instant,
-    ) -> TrayHostAction {
-        if host_available {
-            self.missing_since = None;
-            return if tray_available {
-                TrayHostAction::Unchanged
-            } else {
-                TrayHostAction::Recreate
-            };
-        }
-        if locked {
-            self.missing_since = None;
-            return TrayHostAction::Unchanged;
-        }
-        let missing_since = self.missing_since.get_or_insert(now);
-        if now.duration_since(*missing_since) >= std::time::Duration::from_secs(30) {
-            return TrayHostAction::Unavailable;
-        }
-        TrayHostAction::Unchanged
+    let available = proxy
+        .list_names()
+        .map_err(|error| format!("watcher snapshot failed: {error}"))?
+        .iter()
+        .any(|name| name.as_str() == WATCHER_NAME);
+    if !available {
+        return Ok(());
     }
+
+    for change in changes {
+        let arguments = change
+            .args()
+            .map_err(|error| format!("watcher signal invalid: {error}"))?;
+        if arguments.name().as_str() == WATCHER_NAME && arguments.new_owner().as_ref().is_none() {
+            return Ok(());
+        }
+    }
+    Err("watcher signal stream ended".to_owned())
 }
 
 #[cfg(test)]
@@ -301,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn tray_loss_and_recovery_restore_the_selected_window_mode() {
+    fn losing_the_tray_permanently_falls_back_to_a_visible_window_mode() {
         let integration = super::linux_integration(LinuxSessionType::X11, LinuxDesktop::Kde, true);
         assert!(!integration.apply_window_mode(WindowMode::Popup));
 
@@ -314,68 +281,5 @@ mod tests {
             Some("KDE Plasma · X11 · standalone window")
         );
         assert!(!integration.disable_tray());
-
-        integration.enable_tray();
-        assert!(!integration.apply_window_mode(WindowMode::Popup));
-        assert!(!integration.exits_on_close());
-        assert!(integration.apply_window_mode(WindowMode::Floating));
-        assert!(!integration.exits_on_close());
-    }
-
-    #[test]
-    fn lock_unlock_and_brief_host_restarts_preserve_the_native_tray() {
-        use super::{TrayHostAction::*, TrayHostMonitor};
-        use std::time::{Duration, Instant};
-        let mut monitor = TrayHostMonitor::default();
-        let now = Instant::now();
-        assert_eq!(monitor.observe(true, false, true, now), Unchanged);
-        // The watcher may disappear before the lock signal arrives.
-        assert_eq!(monitor.observe(false, false, true, now), Unchanged);
-        assert_eq!(
-            monitor.observe(false, true, true, now + Duration::from_secs(3600)),
-            Unchanged
-        );
-        // Allow the host time to start after unlocking.
-        assert_eq!(
-            monitor.observe(false, false, true, now + Duration::from_secs(3602)),
-            Unchanged
-        );
-        assert_eq!(
-            monitor.observe(true, false, true, now + Duration::from_secs(3604)),
-            Unchanged
-        );
-    }
-
-    #[test]
-    fn monitor_handles_late_startup_and_retries_failed_tray_creation() {
-        use super::{TrayHostAction::*, TrayHostMonitor};
-        use std::time::Instant;
-        let mut monitor = TrayHostMonitor::default();
-        let now = Instant::now();
-        assert_eq!(monitor.observe(false, false, false, now), Unchanged);
-        assert_eq!(monitor.observe(true, false, false, now), Recreate);
-        assert_eq!(monitor.observe(true, false, false, now), Recreate);
-        assert_eq!(monitor.observe(true, false, true, now), Unchanged);
-    }
-
-    #[test]
-    fn persistent_host_loss_only_falls_back_after_unlocked_grace_period() {
-        use super::{TrayHostAction::*, TrayHostMonitor};
-        use std::time::{Duration, Instant};
-        let mut monitor = TrayHostMonitor::default();
-        let now = Instant::now();
-        assert_eq!(monitor.observe(false, false, true, now), Unchanged);
-        assert_eq!(
-            monitor.observe(false, false, true, now + Duration::from_secs(29)),
-            Unchanged
-        );
-        assert_eq!(
-            monitor.observe(false, false, true, now + Duration::from_secs(30)),
-            Unavailable
-        );
-        assert_eq!(
-            monitor.observe(true, false, false, now + Duration::from_secs(32)),
-            Recreate
-        );
     }
 }
