@@ -5,14 +5,15 @@ import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstrea
 
 describe('Sub2API account colors', () => {
   it.each(['codex', 'claude'] as const)(
-    'gives all eight %s accounts distinct, matching icon and chart colors',
+    'gives all eight %s accounts distinct chart colors while preserving the original icon color',
     (upstream) => {
       const colors = Array.from({ length: 8 }, (_, index) => {
         const id = index === 0 ? 'sub2api' : `sub2api@${index + 1}`;
-        const color = providerIconColor(id, upstream)!;
         const variable = providerSpendColorVariable(id, upstream);
         expect(variable).toContain(`--provider-sub2api-${upstream}`);
-        expect(tokensCss).toContain(`${variable}: ${color.toLowerCase()};`);
+        const color = tokensCss.match(new RegExp(`${variable}: (#[a-f0-9]+);`))?.[1];
+        expect(color).toBeDefined();
+        expect(providerIconColor(id)).toBe('#39D9E7');
         return color;
       });
       expect(new Set(colors).size).toBe(8);
@@ -24,7 +25,7 @@ describe('Sub2API account colors', () => {
       rememberSub2ApiUpstream('sub2api@2', 'claude');
       const icon = providerIconColor('sub2api@2');
       const chart = providerSpendColorVariable('sub2api@2');
-      expect(icon).toBe(providerIconColor('sub2api@2', 'claude'));
+      expect(icon).toBe('#39D9E7');
       expect(chart).toBe('--provider-sub2api-claude-2');
       rememberSub2ApiUpstream('sub2api', 'claude');
       expect(providerIconColor('sub2api@2')).toBe(icon);

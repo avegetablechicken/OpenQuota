@@ -86,7 +86,7 @@ describe('native visual contract', () => {
     expect(container.querySelector('path[fill="#DE7356"]')).not.toBeNull();
     expect(container.querySelector('[data-icon-layer="sub2api"] path')).toHaveAttribute(
       'stroke',
-      '#F0B487',
+      '#39D9E7',
     );
   });
 

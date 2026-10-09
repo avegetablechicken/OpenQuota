@@ -32,11 +32,6 @@ const visuals: Record<string, { source: string; color: string | null }> = {
 };
 
 const SUB2API_SPEND_COLOR_SLOTS = 8;
-const sub2ApiColors: Record<Sub2ApiUpstream, readonly string[]> = {
-  codex: ['#74CDA8', '#23543E', '#65A64B', '#B5D8A4', '#287F71', '#81956A', '#38B86A', '#567B6E'],
-  claude: ['#F0B487', '#8E3F26', '#D89839', '#653D2B', '#E6C49D', '#C35D20', '#AC8368', '#B76D55'],
-};
-
 // Use the persistent account slot, so reordering or removing accounts cannot recolor others.
 function sub2ApiColorSlot(providerId: string) {
   const match = providerId.match(/^sub2api(?:@(\d+))?$/);
@@ -57,13 +52,7 @@ export function providerIconPath(providerId: string) {
   return [...source.matchAll(/<path\b[^>]*\bd="([^"]+)"/g)].map((match) => match[1]).join(' ');
 }
 
-export function providerIconColor(
-  providerId: string,
-  upstream: Sub2ApiUpstream | null | undefined = get(sub2ApiUpstreams)[providerId],
-) {
-  if (providerFamily(providerId) === 'sub2api' && upstream) {
-    return sub2ApiColors[upstream][sub2ApiColorSlot(providerId) - 1];
-  }
+export function providerIconColor(providerId: string) {
   return visuals[providerFamily(providerId)]?.color ?? null;
 }
 
