@@ -1,7 +1,14 @@
 use reqwest::blocking::{Client, ClientBuilder};
 
 pub fn blocking_client_builder() -> ClientBuilder {
-    platform::configure(Client::builder())
+    platform::configure(tls_client_builder())
+}
+
+fn tls_client_builder() -> ClientBuilder {
+    // Select explicitly: other dependencies can also enable reqwest's Rustls feature.
+    // Use the native trust verifier (Security Framework / SChannel / OpenSSL),
+    // including locally trusted self-signed server certificates with CA:TRUE.
+    Client::builder().tls_backend_native()
 }
 
 /// Persisted override: absent means system routing, `direct` disables every proxy,
@@ -47,8 +54,8 @@ pub fn validate_proxy_url(value: &str) -> Result<(), String> {
 
 fn client_builder_for_proxy(proxy: Option<&str>) -> Result<ClientBuilder, reqwest::Error> {
     Ok(match proxy {
-        Some(DIRECT_PROXY) => Client::builder().no_proxy(),
-        Some(url) => Client::builder()
+        Some(DIRECT_PROXY) => tls_client_builder().no_proxy(),
+        Some(url) => tls_client_builder()
             .no_proxy()
             .proxy(reqwest::Proxy::all(url)?),
         None => blocking_client_builder(),
@@ -195,14 +202,14 @@ impl ProviderClient {
         }
         let builder = if self.provider_id == "codex" && proxy.is_none() {
             platform::configure_environment(
-                Client::builder(),
+                tls_client_builder(),
                 crate::codex_environment::first_value,
             )
         } else if let Some(path) = self.claude_settings.as_ref().filter(|_| {
             proxy.is_none()
                 && (self.provider_id == "claude" || self.provider_id.starts_with("claude@"))
         }) {
-            platform::configure_environment(Client::builder(), |names| {
+            platform::configure_environment(tls_client_builder(), |names| {
                 crate::providers::claude::config::environment_value(path, names)
             })
         } else {
@@ -1040,7 +1047,7 @@ mod platform {
     }
 
     fn load_http_pac(url: Url) -> Result<String, &'static str> {
-        let client = reqwest::blocking::Client::builder()
+        let client = super::tls_client_builder()
             .no_proxy()
             .connect_timeout(PAC_FETCH_TIMEOUT)
             .timeout(PAC_FETCH_TIMEOUT)
@@ -1460,6 +1467,78 @@ mod platform {
                 .password()
                 .is_some_and(|password| !password.is_empty()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
+    const CERT: &[u8] = include_bytes!("../tests/fixtures/tls/localhost-ca.pem");
+    const KEY: &[u8] = include_bytes!("../tests/fixtures/tls/localhost-key.pem");
+
+    fn request(trusted: bool, host: &str, direct: bool) -> Result<String, reqwest::Error> {
+        let identity = native_tls::Identity::from_pkcs8(CERT, KEY).unwrap();
+        let acceptor = native_tls::TlsAcceptor::new(identity).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            if let Ok(mut stream) = acceptor.accept(socket) {
+                let mut buffer = [0; 4096];
+                if stream.read(&mut buffer).is_ok_and(|size| size > 0) {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ntrusted",
+                    );
+                }
+            }
+        });
+        let mut builder = if direct {
+            super::client_builder_for_proxy(Some(super::DIRECT_PROXY)).unwrap()
+        } else {
+            super::blocking_client_builder().no_proxy()
+        };
+        if trusted {
+            builder = builder.tls_certs_merge([reqwest::Certificate::from_pem(CERT).unwrap()]);
+        }
+        let result = builder
+            .resolve("localhost", address)
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("https://{host}:{}/", address.port()))
+            .send()
+            .and_then(|response| response.text());
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn trusted_self_signed_ca_server_works_with_native_tls() {
+        for direct in [false, true] {
+            assert_eq!(request(true, "localhost", direct).unwrap(), "trusted");
+        }
+    }
+
+    #[test]
+    fn untrusted_self_signed_server_is_rejected() {
+        assert!(request(false, "localhost", true).unwrap_err().is_connect());
+    }
+
+    #[test]
+    fn trusted_server_with_wrong_hostname_is_rejected() {
+        assert!(request(true, "127.0.0.1", true).unwrap_err().is_connect());
     }
 }
 

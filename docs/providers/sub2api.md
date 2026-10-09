@@ -57,6 +57,14 @@ administrator login can be saved even when the instance has no active Codex acco
 
 ## Troubleshooting
 
+HTTPS requests use native TLS verification: Security Framework on macOS, SChannel on
+Windows, and OpenSSL on Linux. A private or self-signed certificate must be trusted
+on each machine; the certificate must also be valid for the configured host and date.
+On Ubuntu, install a trusted PEM CA certificate as a `.crt` file under
+`/usr/local/share/ca-certificates/`, run `sudo update-ca-certificates`, and restart
+OpenQuota. A locally trusted self-signed server certificate with `CA:TRUE` is supported
+through native verification. OpenQuota does not disable certificate or hostname checks.
+
 - **Login rejected** — verify the administrator email and password in the Sub2API admin panel.
 - **Administrator access required** — the configured login must be a Sub2API administrator.
 - **Two-factor authentication required** — this initial integration does not complete a 2FA login.

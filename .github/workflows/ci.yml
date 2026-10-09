@@ -31,6 +31,7 @@ jobs:
             gnome-keyring \
             libayatana-appindicator3-dev \
             libsecret-tools \
+            libssl-dev \
             libwebkit2gtk-4.1-dev \
             openbox \
             librsvg2-dev \
