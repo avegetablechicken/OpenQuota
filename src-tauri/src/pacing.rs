@@ -149,9 +149,24 @@ pub struct PaceAlert {
     pub milestone: Milestone,
     pub provider: String,
     pub metric: String,
-    metric_id: String,
+    state_key: NotificationKey,
     previous_severity: Option<PaceSeverity>,
     previous_was_under_ten: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+struct NotificationKey {
+    metric_id: String,
+    account_id: Option<String>,
+}
+
+impl From<&str> for NotificationKey {
+    fn from(metric_id: &str) -> Self {
+        Self {
+            metric_id: metric_id.into(),
+            account_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -167,7 +182,7 @@ struct NotificationState {
 
 #[derive(Default)]
 pub struct NotificationEvaluator {
-    states: Mutex<HashMap<String, NotificationState>>,
+    states: Mutex<HashMap<NotificationKey, NotificationState>>,
 }
 
 impl NotificationEvaluator {
@@ -185,7 +200,7 @@ impl NotificationEvaluator {
             })
             .collect::<HashSet<_>>();
         if let Ok(mut states) = self.states.lock() {
-            states.retain(|metric_id, _| active.contains(metric_id));
+            states.retain(|key, _| active.contains(&key.metric_id));
         }
     }
 
@@ -194,7 +209,7 @@ impl NotificationEvaluator {
             return;
         };
         for alert in alerts {
-            let Some(state) = states.get_mut(&alert.metric_id) else {
+            let Some(state) = states.get_mut(&alert.state_key) else {
                 continue;
             };
             state.fired.remove(&alert.milestone);
@@ -234,47 +249,77 @@ impl NotificationEvaluator {
         let Ok(mut states) = self.states.lock() else {
             return Vec::new();
         };
+        let provider_name = registry
+            .display_name(&provider_definition.id, settings)
+            .unwrap_or_else(|| {
+                settings
+                    .provider_display_name(provider_definition)
+                    .to_owned()
+            });
+        let sources = match &snapshot.accounts {
+            Some(accounts) => accounts
+                .iter()
+                .map(|account| {
+                    (
+                        Some(account.id.as_str()),
+                        account.name.as_str(),
+                        &account.snapshot,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            None => vec![(None, provider_name.as_str(), snapshot)],
+        };
+        // Account lists are complete snapshots. Remove deleted accounts and the
+        // old aggregate baseline when a provider starts publishing accounts.
+        states.retain(|key, _| {
+            !provider_definition
+                .metrics
+                .iter()
+                .any(|metric| metric.id == key.metric_id)
+                || sources
+                    .iter()
+                    .any(|(account_id, _, _)| *account_id == key.account_id.as_deref())
+        });
         let mut alerts = Vec::new();
-        for window in &snapshot.quotas {
-            let Some(metric_definition) = provider_definition.metrics.iter().find(|metric| {
-                matches!(
-                    &metric.source,
-                    MetricSource::Quota { source_id, .. }
-                        | MetricSource::QuotaOrValue { source_id, .. }
-                        if source_id == &window.id
-                )
-            }) else {
-                continue;
-            };
-            if !enabled.contains(metric_definition.id.as_str()) {
-                continue;
+        for (account_id, name, source) in sources {
+            for window in &source.quotas {
+                let Some(metric_definition) = provider_definition.metrics.iter().find(|metric| {
+                    matches!(
+                        &metric.source,
+                        MetricSource::Quota { source_id, .. }
+                            | MetricSource::QuotaOrValue { source_id, .. }
+                            if source_id == &window.id
+                    )
+                }) else {
+                    continue;
+                };
+                if !enabled.contains(metric_definition.id.as_str()) {
+                    continue;
+                }
+                let state_key = NotificationKey {
+                    metric_id: metric_definition.id.clone(),
+                    account_id: account_id.map(str::to_owned),
+                };
+                let projection = project(window, now);
+                let state = states.entry(state_key.clone()).or_default();
+                let previous_severity = state.previous;
+                let previous_was_under_ten = state.was_under_ten;
+                let mut new_alerts = transition(
+                    state,
+                    projection.severity,
+                    100.0 - window.used_percent.clamp(0.0, 100.0),
+                    window.resets_at,
+                    &settings.notifications,
+                    &window.label,
+                );
+                for alert in &mut new_alerts {
+                    alert.provider = name.to_owned();
+                    alert.state_key.clone_from(&state_key);
+                    alert.previous_severity = previous_severity;
+                    alert.previous_was_under_ten = previous_was_under_ten;
+                }
+                alerts.extend(new_alerts);
             }
-            let metric_id = metric_definition.id.clone();
-            let projection = project(window, now);
-            let state = states.entry(metric_id.clone()).or_default();
-            let previous_severity = state.previous;
-            let previous_was_under_ten = state.was_under_ten;
-            let mut new_alerts = transition(
-                state,
-                projection.severity,
-                100.0 - window.used_percent.clamp(0.0, 100.0),
-                window.resets_at,
-                &settings.notifications,
-                &window.label,
-            );
-            for alert in &mut new_alerts {
-                alert.provider = registry
-                    .display_name(&provider_definition.id, settings)
-                    .unwrap_or_else(|| {
-                        settings
-                            .provider_display_name(provider_definition)
-                            .to_owned()
-                    });
-                alert.metric_id.clone_from(&metric_id);
-                alert.previous_severity = previous_severity;
-                alert.previous_was_under_ten = previous_was_under_ten;
-            }
-            alerts.extend(new_alerts);
         }
         alerts
     }
@@ -384,7 +429,7 @@ fn transition(
             milestone,
             provider: String::new(),
             metric: metric.into(),
-            metric_id: String::new(),
+            state_key: NotificationKey::default(),
             previous_severity: None,
             previous_was_under_ten: false,
         })
@@ -406,8 +451,8 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
 
     use super::{
-        project, transition, Milestone, NotificationEvaluator, NotificationState, PaceAlert,
-        PaceSeverity,
+        project, transition, Milestone, NotificationEvaluator, NotificationKey, NotificationState,
+        PaceAlert, PaceSeverity,
     };
     use crate::models::{
         AppSettings, MetricDefinition, MetricLayout, MetricSection, MetricSource,
@@ -614,7 +659,7 @@ mod tests {
             "Session",
         );
         assert_eq!(alerts[0].milestone, Milestone::UsageReset);
-        alerts[0].metric_id = "session".into();
+        alerts[0].state_key = "session".into();
         evaluator
             .states
             .lock()
@@ -622,7 +667,7 @@ mod tests {
             .insert("session".into(), state);
         evaluator.rollback(&alerts);
         let mut states = evaluator.states.lock().unwrap();
-        let state = states.get_mut("session").unwrap();
+        let state = states.get_mut(&NotificationKey::from("session")).unwrap();
         assert_eq!(
             transition(
                 state,
@@ -645,11 +690,11 @@ mod tests {
         )
         .is_empty());
         let mut alerts = transition(state, PaceSeverity::Spent, 0.0, None, &toggles, "Session");
-        alerts[0].metric_id = "session".into();
+        alerts[0].state_key = "session".into();
         drop(states);
         evaluator.rollback(&alerts);
         let mut states = evaluator.states.lock().unwrap();
-        let state = states.get_mut("session").unwrap();
+        let state = states.get_mut(&NotificationKey::from("session")).unwrap();
         assert_eq!(
             transition(state, PaceSeverity::Spent, 0.0, None, &toggles, "Session")[0].milestone,
             Milestone::FullyUsed
@@ -809,7 +854,7 @@ mod tests {
                 milestone: Milestone::WillRunOut,
                 provider: "Codex".into(),
                 metric: "Weekly".into(),
-                metric_id: "codex.weekly".into(),
+                state_key: "codex.weekly".into(),
                 previous_severity: Some(PaceSeverity::Healthy),
                 previous_was_under_ten: false,
             },
@@ -817,21 +862,20 @@ mod tests {
                 milestone: Milestone::AlmostOut,
                 provider: "Codex".into(),
                 metric: "Weekly".into(),
-                metric_id: "codex.weekly".into(),
+                state_key: "codex.weekly".into(),
                 previous_severity: Some(PaceSeverity::Healthy),
                 previous_was_under_ten: false,
             },
         ]);
 
         let states = evaluator.states.lock().unwrap();
-        let state = states.get("codex.weekly").unwrap();
+        let state = states.get(&NotificationKey::from("codex.weekly")).unwrap();
         assert!(state.fired.is_empty());
         assert_eq!(state.previous, Some(PaceSeverity::Healthy));
         assert!(!state.was_under_ten);
     }
 
-    #[test]
-    fn evaluator_resolves_metric_identity_from_registry_metadata() {
+    fn notification_fixture() -> (ProviderRegistry, AppSettings, ProviderSnapshot) {
         let registry = ProviderRegistry::from_definitions(vec![ProviderDefinition {
             id: "custom".into(),
             display_name: "Custom Provider".into(),
@@ -894,14 +938,90 @@ mod tests {
             warnings: Vec::new(),
             refreshed_at: Utc::now(),
         };
+        (registry, settings, snapshot)
+    }
+
+    #[test]
+    fn evaluator_resolves_metric_identity_from_registry_metadata() {
+        let (registry, settings, snapshot) = notification_fixture();
         let evaluator = NotificationEvaluator::default();
 
         assert!(evaluator
             .evaluate(&snapshot, &settings, &registry, Utc::now())
             .is_empty());
         let states = evaluator.states.lock().unwrap();
-        assert!(states.contains_key("custom.rolling"));
-        assert!(!states.contains_key("custom.bucket"));
+        assert!(states.contains_key(&NotificationKey::from("custom.rolling")));
+        assert!(!states.contains_key(&NotificationKey::from("custom.bucket")));
+    }
+
+    #[test]
+    fn account_alerts_track_each_account_without_duplicates_or_order_dependence() {
+        let (registry, mut settings, base) = notification_fixture();
+        settings.notifications.fully_used = true;
+        settings.notifications.usage_reset = true;
+        let evaluator = NotificationEvaluator::default();
+        let make_snapshot = |first: f64, second: f64| {
+            let accounts = [
+                ("a", "Sub2API · Claude · First", first),
+                ("b", "Sub2API · Claude · Second", second),
+            ]
+            .into_iter()
+            .map(|(id, name, used)| {
+                let mut snapshot = base.clone();
+                snapshot.quotas[0].used_percent = used;
+                crate::models::AccountSnapshot {
+                    id: id.into(),
+                    name: name.into(),
+                    snapshot,
+                }
+            })
+            .collect::<Vec<_>>();
+            // Sub2API mirrors the first account's quotas in the parent snapshot.
+            let mut snapshot = accounts[0].snapshot.clone();
+            snapshot.accounts = Some(accounts);
+            snapshot
+        };
+        let now = Utc::now();
+        assert!(evaluator
+            .evaluate(&make_snapshot(25.0, 25.0), &settings, &registry, now)
+            .is_empty());
+        let alerts = evaluator.evaluate(&make_snapshot(25.0, 100.0), &settings, &registry, now);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].milestone, Milestone::FullyUsed);
+        assert_eq!(alerts[0].provider, "Sub2API · Claude · Second");
+        evaluator.rollback(&alerts);
+        evaluator.prune(&settings);
+        assert_eq!(
+            evaluator.evaluate(&make_snapshot(25.0, 100.0), &settings, &registry, now),
+            alerts
+        );
+        assert!(evaluator
+            .evaluate(&make_snapshot(25.0, 100.0), &settings, &registry, now)
+            .is_empty());
+
+        let alerts = evaluator.evaluate(&make_snapshot(100.0, 0.0), &settings, &registry, now);
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0].milestone, Milestone::FullyUsed);
+        assert_eq!(alerts[0].provider, "Sub2API · Claude · First");
+        assert_eq!(alerts[1].milestone, Milestone::UsageReset);
+        assert_eq!(alerts[1].provider, "Sub2API · Claude · Second");
+        let mut reordered = make_snapshot(100.0, 0.0);
+        reordered.accounts.as_mut().unwrap().reverse();
+        assert!(evaluator
+            .evaluate(&reordered, &settings, &registry, now)
+            .is_empty());
+        let alerts = evaluator.evaluate(&make_snapshot(0.0, 0.0), &settings, &registry, now);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].milestone, Milestone::UsageReset);
+        assert_eq!(alerts[0].provider, "Sub2API · Claude · First");
+
+        let mut removed = make_snapshot(0.0, 0.0);
+        removed.accounts.as_mut().unwrap().pop();
+        evaluator.evaluate(&removed, &settings, &registry, now);
+        assert_eq!(evaluator.states.lock().unwrap().len(), 1);
+        settings.providers[0].metrics[0].enabled = false;
+        evaluator.prune(&settings);
+        assert!(evaluator.states.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1000,7 +1120,7 @@ mod tests {
             .states
             .lock()
             .unwrap()
-            .contains_key("switching.session"));
+            .contains_key(&NotificationKey::from("switching.session")));
 
         evaluator.evaluate(
             &snapshot("weekly", "Weekly", 20.0),
@@ -1009,8 +1129,8 @@ mod tests {
             now,
         );
         let states = evaluator.states.lock().unwrap();
-        assert!(states.contains_key("switching.session"));
-        assert!(states.contains_key("switching.weekly"));
+        assert!(states.contains_key(&NotificationKey::from("switching.session")));
+        assert!(states.contains_key(&NotificationKey::from("switching.weekly")));
         drop(states);
 
         let alerts = evaluator.evaluate(
@@ -1055,7 +1175,7 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec!["codex.weekly"]
+            vec![NotificationKey::from("codex.weekly")]
         );
 
         settings.providers[0].enabled = false;
