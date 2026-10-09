@@ -217,14 +217,16 @@
               </div>
               <div class="spend-legend">
                 {#each projection.slices as provider (provider.id)}
-                  <span
-                    ><i style={`background: ${providerSpendColor(provider.id)}`}
-                    ></i>{providerDisplayName(provider.id)}</span
-                  ><strong
-                    class:spend-legend__value--hidden={provider.showValue === false}
-                    aria-hidden={provider.showValue === false ? 'true' : undefined}
-                    >{display(provider.value)}</strong
-                  >
+                  <div class="spend-legend__row">
+                    <span
+                      ><i style={`background: ${providerSpendColor(provider.id)}`}
+                      ></i>{providerDisplayName(provider.id)}</span
+                    ><strong
+                      class:spend-legend__value--hidden={provider.showValue === false}
+                      aria-hidden={provider.showValue === false ? 'true' : undefined}
+                      >{display(provider.value)}</strong
+                    >
+                  </div>
                 {/each}
               </div>
             </div>
@@ -360,9 +362,17 @@
     .spend-legend {
       display: grid;
       flex: 1;
-      grid-template-columns: 1fr auto;
+      min-width: 0;
+      grid-template-columns: minmax(0, 1fr);
       gap: 2px 8px;
       font-size: 11px;
+    }
+
+    .spend-legend__row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
     }
 
     .spend-legend span i {
