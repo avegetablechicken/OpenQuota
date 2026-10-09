@@ -174,9 +174,53 @@ describe('OpenQuota dashboard', () => {
     }
   });
 
-  it.each(['provider', 'first', 'second'])(
-    'shares the matching upstream email and usage from the %s menu',
-    async (target) => {
+  it.each([false, true])(
+    'toggles upstream accounts independently when initially expanded=%s',
+    async (expanded) => {
+      const original = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(async (command, args) => {
+        const result = await original(command, args);
+        if (command !== 'get_bootstrap_state') return result;
+        const bootstrap = structuredClone(result);
+        bootstrap.settings.settings.providers[0].expanded = expanded;
+        const snapshot = bootstrap.usage.providers.codex.snapshot;
+        snapshot.accounts = ['first', 'second'].map((id) => ({
+          id,
+          name: 'Sub2API · Claude · Same name',
+          snapshot: { ...structuredClone(snapshot), accounts: undefined },
+        }));
+        return bootstrap;
+      });
+      const { container } = render(App);
+      await screen.findByRole('heading', { name: 'Codex' });
+      const first = container.querySelector<HTMLElement>('[data-account-id="first"]')!;
+      const second = container.querySelector<HTMLElement>('[data-account-id="second"]')!;
+      const firstToggle = within(first).getByRole('button', {
+        name: expanded ? 'Show less' : 'Show more',
+      });
+      const secondToggle = within(second).getByRole('button', {
+        name: expanded ? 'Show less' : 'Show more',
+      });
+      await fireEvent.click(firstToggle);
+      expect(firstToggle).toHaveAttribute('aria-expanded', String(!expanded));
+      expect(secondToggle).toHaveAttribute('aria-expanded', String(expanded));
+      await fireEvent.click(secondToggle);
+      expect(firstToggle).toHaveAttribute('aria-expanded', String(!expanded));
+      expect(secondToggle).toHaveAttribute('aria-expanded', String(!expanded));
+      await fireEvent.click(firstToggle);
+      expect(firstToggle).toHaveAttribute('aria-expanded', String(expanded));
+      expect(secondToggle).toHaveAttribute('aria-expanded', String(!expanded));
+      expect(mocks.invoke).not.toHaveBeenCalledWith('save_app_settings', expect.anything());
+    },
+  );
+
+  it.each(
+    ['provider', 'first', 'second'].flatMap((target) =>
+      [false, true].map((expanded) => ({ target, expanded })),
+    ),
+  )(
+    'shares matching upstream usage from $target with first account expanded=$expanded',
+    async ({ target, expanded }) => {
       const original = mocks.invoke.getMockImplementation()!;
       mocks.invoke.mockImplementation(async (command, args) => {
         const result = await original(command, args);
@@ -200,6 +244,7 @@ describe('OpenQuota dashboard', () => {
       const canvas = document.createElement('canvas');
       vi.spyOn(canvas, 'toBlob').mockImplementation((callback) => callback(new Blob()));
       const renderCard = vi.spyOn(shareCard, 'renderProviderShareCard').mockReturnValue(canvas);
+      const buildRows = vi.spyOn(shareCard, 'buildProviderShareRows');
       const writeText = vi.fn().mockResolvedValue(undefined);
       Object.defineProperty(navigator, 'clipboard', {
         configurable: true,
@@ -208,6 +253,10 @@ describe('OpenQuota dashboard', () => {
       try {
         const { container } = render(App);
         await screen.findByRole('heading', { name: 'first@example.com' });
+        if (expanded) {
+          const first = container.querySelector<HTMLElement>('[data-account-id="first"]')!;
+          await fireEvent.click(within(first).getByRole('button', { name: 'Show more' }));
+        }
         const selector =
           target === 'provider'
             ? '[data-provider-id="codex"] > .provider-header'
@@ -224,10 +273,17 @@ describe('OpenQuota dashboard', () => {
         await waitFor(() => expect(renderCard).toHaveBeenCalled());
         const options = renderCard.mock.calls[0][1];
         const expectedAccounts = target === 'provider' ? ['first', 'second'] : [target];
+        expect(buildRows.mock.calls.map((call) => call[2].expanded)).toEqual(
+          expectedAccounts.map((id) => id === 'first' && expanded),
+        );
         expect(options.plan).toBe(target === 'provider' ? null : `${target}@example.com · Plus`);
         expect(
           options.rows.filter((row) => row.kind === 'quota').map((row) => row.fillPercent),
-        ).toEqual(expectedAccounts.flatMap((id) => (id === 'first' ? [90, 90] : [89, 89])));
+        ).toEqual(
+          expectedAccounts.flatMap((id) =>
+            id === 'first' ? (expanded ? [90, 90, 0, 0] : [90, 90]) : [89, 89],
+          ),
+        );
         expect(options.rows.filter((row) => row.kind === 'account')).toEqual(
           target === 'provider'
             ? expectedAccounts.map((id) => ({
@@ -248,6 +304,7 @@ describe('OpenQuota dashboard', () => {
         }
       } finally {
         renderCard.mockRestore();
+        buildRows.mockRestore();
       }
     },
   );

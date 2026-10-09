@@ -428,6 +428,7 @@
     providerId: string,
     viewMode: import('./lib/types').UsageViewMode = 'all',
     accountId?: string,
+    accountExpansion: Record<string, boolean> = {},
   ) {
     const current = settingsState;
     if (!current) return;
@@ -444,8 +445,21 @@
     try {
       const accounts =
         !accountId && (provider.accounts?.length ?? 0) > 1 ? provider.accounts : undefined;
-      const buildRows = (snapshot: import('./lib/types').ProviderSnapshot) =>
-        buildProviderShareRows(catalog, snapshot, layout, current.settings, now, viewMode);
+      const buildRows = (snapshot: import('./lib/types').ProviderSnapshot, id?: string) =>
+        buildProviderShareRows(
+          catalog,
+          snapshot,
+          {
+            ...layout,
+            expanded:
+              id === undefined
+                ? layout.expanded
+                : (accountExpansion[`${providerId}/${id}`] ?? layout.expanded),
+          },
+          current.settings,
+          now,
+          viewMode,
+        );
       const rows = accounts
         ? accounts.flatMap((upstream) => [
             {
@@ -453,9 +467,9 @@
               label: sub2ApiUpstreamAccountName(upstream.name),
               plan: upstream.snapshot.plan,
             },
-            ...buildRows(upstream.snapshot),
+            ...buildRows(upstream.snapshot, upstream.id),
           ])
-        : buildRows(provider);
+        : buildRows(provider, account?.id ?? provider.accounts?.[0]?.id);
 
       const canvas = renderProviderShareCard(catalog, {
         providerId,

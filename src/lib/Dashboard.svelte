@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import { flip } from 'svelte/animate';
-  import { SvelteSet } from 'svelte/reactivity';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { scale, slide } from 'svelte/transition';
   import { reorderFlip, springMotion } from './motion';
   import { pointerReorder } from './pointerReorder';
@@ -48,7 +48,12 @@
     onCustomize: () => void;
     onOpenProviderCustomize: (providerId: string) => void;
     onRenameProvider: (providerId: string) => void;
-    onShare: (providerId: string, viewMode: UsageViewMode, accountId?: string) => void;
+    onShare: (
+      providerId: string,
+      viewMode: UsageViewMode,
+      accountId?: string,
+      accountExpansion?: Record<string, boolean>,
+    ) => void;
     onShareTotal: (projections: SpendProjection[]) => boolean | Promise<boolean>;
     onRefresh: (providerId: string) => void | Promise<void>;
     onOpenProviderLink: (providerId: string, linkIndex: number) => void;
@@ -205,6 +210,7 @@
   let metricMenu = $state<{ providerId: string; metricId: string; x: number; y: number } | null>(
     null,
   );
+  const accountExpansion = new SvelteMap<string, boolean>();
   let demandMorphing = $state(false);
   let usageViewMode = $state<UsageViewMode>('all');
   let demandMorphTimer: ReturnType<typeof setTimeout> | undefined;
@@ -264,6 +270,10 @@
           accountId,
           displayName,
           upstreamAccountName,
+          expanded:
+            accountId === undefined
+              ? provider.expanded
+              : (accountExpansion.get(key) ?? provider.expanded),
           key,
           error,
           warnings,
@@ -305,7 +315,7 @@
     };
     (customization ? onCustomizationChange : onSettingsChange)(changed);
   }
-  function toggleDemandMetrics(provider: ProviderLayout) {
+  function toggleDemandMetrics(provider: ProviderLayout, key: string, accountId?: string) {
     window.clearTimeout(demandMorphTimer);
     demandMorphing = !reducedMotion;
     if (demandMorphing) {
@@ -315,7 +325,11 @@
       );
     }
     onContentMorph();
-    updateProvider({ ...provider, expanded: !provider.expanded }, false);
+    if (accountId !== undefined) {
+      accountExpansion.set(key, !(accountExpansion.get(key) ?? provider.expanded));
+    } else {
+      updateProvider({ ...provider, expanded: !provider.expanded }, false);
+    }
   }
   onDestroy(() => window.clearTimeout(demandMorphTimer));
   function reorderProvider(draggedId: string, targetId: string) {
@@ -682,7 +696,7 @@
             </span>
           </div>
         {/if}
-        {#each rows as { snapshot, accountId, upstreamAccountName, alwaysMetrics, demandMetrics, links, key } (key)}
+        {#each rows as { snapshot, accountId, upstreamAccountName, alwaysMetrics, demandMetrics, links, key, expanded } (key)}
           <section
             class:upstream-account={Boolean(accountId)}
             data-account-id={accountId}
@@ -768,17 +782,13 @@
                 data-reorder-group={`dashboard-metrics:${key}`}
                 data-reorder-id="section:onDemand"
                 type="button"
-                aria-expanded={provider.expanded}
-                aria-label={provider.expanded ? 'Show less' : 'Show more'}
-                onclick={() => toggleDemandMetrics(provider)}
+                aria-expanded={expanded}
+                aria-label={expanded ? 'Show less' : 'Show more'}
+                onclick={() => toggleDemandMetrics(provider, key, accountId)}
               >
-                <Icon
-                  name={provider.expanded ? 'chevron-up' : 'chevron-down'}
-                  size={10}
-                  strokeWidth={2.2}
-                />
+                <Icon name={expanded ? 'chevron-up' : 'chevron-down'} size={10} strokeWidth={2.2} />
               </button>
-              {#if provider.expanded}
+              {#if expanded}
                 <div class="demand-metrics" transition:slide={springMotion(reducedMotion)}>
                   {#each metricRenderRows(demandMetrics, snapshot.usageHistories, usageViewMode) as row (row.key)}
                     <div
@@ -886,8 +896,13 @@
       <button
         type="button"
         role="menuitem"
-        onclick={() => onShare(menuProvider.id, usageViewMode, providerMenu?.accountId)}
-        ><Icon name="share" size={15} />Share Screenshot</button
+        onclick={() =>
+          onShare(
+            menuProvider.id,
+            usageViewMode,
+            providerMenu?.accountId,
+            Object.fromEntries(accountExpansion),
+          )}><Icon name="share" size={15} />Share Screenshot</button
       >
     </div>
   {/if}
