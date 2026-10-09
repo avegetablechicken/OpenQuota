@@ -11,6 +11,9 @@ import opencode from '../assets/provider-icons/opencode.svg?raw';
 import openrouter from '../assets/provider-icons/openrouter.svg?raw';
 import sub2api from '../assets/provider-icons/sub2api.svg?raw';
 import zai from '../assets/provider-icons/zai.svg?raw';
+import { get } from 'svelte/store';
+import { sub2ApiUpstreams } from './sub2ApiUpstreams';
+import type { Sub2ApiUpstream } from './types';
 
 const visuals: Record<string, { source: string; color: string | null }> = {
   antigravity: { source: antigravity, color: '#4285F4' },
@@ -29,6 +32,18 @@ const visuals: Record<string, { source: string; color: string | null }> = {
 };
 
 const SUB2API_SPEND_COLOR_SLOTS = 8;
+const sub2ApiColors: Record<Sub2ApiUpstream, readonly string[]> = {
+  codex: ['#74CDA8', '#23543E', '#65A64B', '#B5D8A4', '#287F71', '#81956A', '#38B86A', '#567B6E'],
+  claude: ['#F0B487', '#8E3F26', '#D89839', '#653D2B', '#E6C49D', '#C35D20', '#AC8368', '#B76D55'],
+};
+
+// Use the persistent account slot, so reordering or removing accounts cannot recolor others.
+function sub2ApiColorSlot(providerId: string) {
+  const match = providerId.match(/^sub2api(?:@(\d+))?$/);
+  const ordinal = match?.[1] ? Number(match[1]) : 1;
+  if (!Number.isSafeInteger(ordinal) || ordinal < 1) return 1;
+  return ((ordinal - 1) % SUB2API_SPEND_COLOR_SLOTS) + 1;
+}
 export const OTHERS_SPEND_ID = 'others';
 export const UNPRICED_OTHERS_SPEND_ID = 'others-unpriced';
 
@@ -42,20 +57,27 @@ export function providerIconPath(providerId: string) {
   return [...source.matchAll(/<path\b[^>]*\bd="([^"]+)"/g)].map((match) => match[1]).join(' ');
 }
 
-export function providerIconColor(providerId: string) {
+export function providerIconColor(
+  providerId: string,
+  upstream: Sub2ApiUpstream | null | undefined = get(sub2ApiUpstreams)[providerId],
+) {
+  if (providerFamily(providerId) === 'sub2api' && upstream) {
+    return sub2ApiColors[upstream][sub2ApiColorSlot(providerId) - 1];
+  }
   return visuals[providerFamily(providerId)]?.color ?? null;
 }
 
-export function providerSpendColorVariable(providerId: string) {
+export function providerSpendColorVariable(
+  providerId: string,
+  upstream: Sub2ApiUpstream | undefined = get(sub2ApiUpstreams)[providerId],
+) {
   if (providerId === OTHERS_SPEND_ID) return '--provider-others';
   if (providerId === UNPRICED_OTHERS_SPEND_ID) return '--provider-others-unpriced';
   const family = providerFamily(providerId);
   if (family !== 'sub2api') return `--provider-${family}`;
-  const match = providerId.match(/^sub2api(?:@(\d+))?$/);
-  const ordinal = match?.[1] ? Number(match[1]) : 1;
-  if (!Number.isSafeInteger(ordinal) || ordinal < 1) return '--provider-sub2api';
-  const slot = ((ordinal - 1) % SUB2API_SPEND_COLOR_SLOTS) + 1;
-  return slot === 1 ? '--provider-sub2api' : `--provider-sub2api-${slot}`;
+  const slot = sub2ApiColorSlot(providerId);
+  const base = upstream ? `--provider-sub2api-${upstream}` : '--provider-sub2api';
+  return slot === 1 ? base : `${base}-${slot}`;
 }
 
 export function providerIconViewBox(providerId: string) {

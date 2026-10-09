@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TotalSpend from './TotalSpend.svelte';
 import { ProviderCatalogIndex } from './metrics';
@@ -187,6 +187,15 @@ describe('TotalSpend Sub2API labels', () => {
         (segment) => segment.getAttribute('style'),
       );
 
+    expect(new Set(legendColors()).size).toBe(2);
+    expect(new Set(ringColors()).size).toBe(2);
+    expect(legendColors()[0]).toContain('--provider-sub2api-codex');
+    expect(legendColors()[1]).toContain('--provider-sub2api-claude');
+
+    rememberSub2ApiUpstream('sub2api', 'claude');
+    await waitFor(() => {
+      expect(legendColors()[0]).toContain('--provider-sub2api-claude');
+    });
     expect(new Set(legendColors()).size).toBe(2);
     expect(new Set(ringColors()).size).toBe(2);
 

@@ -22,7 +22,7 @@
   const path = $derived(providerIconPath(providerId));
   const upstreamPath = $derived(resolvedUpstream ? providerIconPath(resolvedUpstream) : '');
   const upstreamColor = $derived(resolvedUpstream ? providerIconColor(resolvedUpstream) : null);
-  const color = $derived(providerIconColor(providerId));
+  const color = $derived(providerIconColor(providerId, resolvedUpstream ?? null));
   const viewBox = $derived(composite ? '0 0 100 100' : providerIconViewBox(providerId));
 </script>
 

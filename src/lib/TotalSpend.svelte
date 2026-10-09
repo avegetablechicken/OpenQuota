@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import Icon from './Icon.svelte';
+  import { sub2ApiUpstreams } from './sub2ApiUpstreams';
   import { formatSpendValue, totalSpendRingCenter } from './metricFormat';
   import SelectMenu from './SelectMenu.svelte';
   import type { ProviderCatalogIndex } from './metrics';
@@ -63,7 +64,7 @@
     return formatSpendValue(value, settings.totalSpendMetric);
   }
   function providerSpendColor(providerId: string) {
-    return `var(${providerSpendColorVariable(providerId)}, var(--provider))`;
+    return `var(${providerSpendColorVariable(providerId, $sub2ApiUpstreams[providerId])}, var(--provider))`;
   }
   function ringCenter(value: number | null) {
     if (value === null) return { primary: '—', unit: '' };

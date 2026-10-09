@@ -84,6 +84,10 @@ describe('native visual contract', () => {
     });
     expect(container.querySelectorAll('path')).toHaveLength(2);
     expect(container.querySelector('path[fill="#DE7356"]')).not.toBeNull();
+    expect(container.querySelector('[data-icon-layer="sub2api"] path')).toHaveAttribute(
+      'stroke',
+      '#F0B487',
+    );
   });
 
   it('updates a Sub2API item icon from its remembered upstream', () => {
