@@ -5,6 +5,24 @@ use std::sync::{
 
 use crate::models::WindowMode;
 
+#[cfg(target_os = "linux")]
+pub fn initialize_x11_threads() {
+    #[link(name = "X11")]
+    extern "C" {
+        fn XInitThreads() -> std::os::raw::c_int;
+    }
+
+    // Xlib requires this before any other Xlib call. GTK and WebKit can open
+    // displays before Tao initializes its own X11 connection, so initialize
+    // here before constructing the Tauri runtime or starting plugin threads.
+    // This does not open a display and is also safe in a Wayland session.
+    assert_ne!(
+        unsafe { XInitThreads() },
+        0,
+        "Xlib thread initialization failed"
+    );
+}
+
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxSessionType {

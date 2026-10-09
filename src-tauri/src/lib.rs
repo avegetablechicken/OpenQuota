@@ -622,6 +622,9 @@ pub(crate) fn autostart_is_enabled(app: &AppHandle) -> Result<bool, ()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    desktop_integration::initialize_x11_threads();
+
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

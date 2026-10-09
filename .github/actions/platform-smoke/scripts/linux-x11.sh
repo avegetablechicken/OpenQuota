@@ -38,6 +38,15 @@ xvfb-run -a dbus-run-session -- bash -euo pipefail -c '
   watcher_log="${runner_temp}/openquota-x11-watcher-${RANDOM}.log"
   watcher_pid=""
 
+  report_app_exit() {
+    local status=0
+    wait "${app_pid}" || status=$?
+    echo "OpenQuota process ${app_pid} exited unexpectedly (status=${status})." >&2
+    cat "${stdio_log}" >&2 || true
+    cat "${runtime_log}" >&2 || true
+    cat "${wm_log}" >&2 || true
+  }
+
   if test "${OPENQUOTA_SMOKE_TRAY_HOST}" = available; then
     command -v dbus-test-tool >/dev/null || {
       echo "dbus-test-tool is required for the Linux tray-host smoke test." >&2
@@ -92,8 +101,7 @@ xvfb-run -a dbus-run-session -- bash -euo pipefail -c '
   ready=false
   for _ in $(seq 1 30); do
     if ! kill -0 "${app_pid}" 2>/dev/null; then
-      cat "${stdio_log}" >&2 || true
-      cat "${runtime_log}" >&2 || true
+      report_app_exit
       exit 1
     fi
     if test "${OPENQUOTA_SMOKE_TRAY_HOST}" = available; then
@@ -128,8 +136,7 @@ xvfb-run -a dbus-run-session -- bash -euo pipefail -c '
     fallback_ready=false
     for _ in $(seq 1 30); do
       if ! kill -0 "${app_pid}" 2>/dev/null; then
-        cat "${stdio_log}" >&2 || true
-        cat "${runtime_log}" >&2 || true
+        report_app_exit
         exit 1
       fi
       if grep -Fq "system tray became unavailable; using standalone window" "${runtime_log}" \
