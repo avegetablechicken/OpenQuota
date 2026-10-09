@@ -134,12 +134,15 @@ xvfb-run -a dbus-run-session -- bash -euo pipefail -c '
     wait "${watcher_pid}" 2>/dev/null || true
     watcher_pid=""
     fallback_ready=false
-    for _ in $(seq 1 30); do
+    # TrayHostMonitor deliberately allows 30 seconds for a locked desktop or
+    # restarting shell to restore its watcher. Allow that grace period plus
+    # the monitor polling interval and window-mapping time before failing.
+    for _ in $(seq 1 60); do
       if ! kill -0 "${app_pid}" 2>/dev/null; then
         report_app_exit
         exit 1
       fi
-      if grep -Fq "system tray became unavailable; using standalone window" "${runtime_log}" \
+      if grep -Fq "system tray unavailable while unlocked for 30 seconds; using standalone window" "${runtime_log}" \
         && xdotool search --onlyvisible --limit 1 --pid "${app_pid}" --name "^OpenQuota$" >/dev/null 2>&1; then
         fallback_ready=true
         break
