@@ -250,6 +250,10 @@ fn apply_panel_surface_for_theme(
     preference: ThemePreference,
     system_theme: Theme,
 ) -> tauri::Result<()> {
+    // The transparent macOS window shows the popover material; an opaque color would cover it.
+    if cfg!(target_os = "macos") {
+        return Ok(());
+    }
     window.set_background_color(Some(panel_surface_color(preference, system_theme)))
 }
 

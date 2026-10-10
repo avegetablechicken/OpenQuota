@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "OpenQuota",
+        "width": 320,
+        "height": 800,
+        "minWidth": 320,
+        "minHeight": 240,
+        "maxWidth": 320,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "shadow": true,
+        "center": true,
+        "windowEffects": {
+          "effects": ["popover"],
+          "state": "active",
+          "radius": 12
+        }
+      }
+    ]
+  }
+}

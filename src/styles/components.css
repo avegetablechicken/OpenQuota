@@ -205,7 +205,7 @@
     overflow: hidden;
     border: 0;
     border-radius: 12px;
-    background: var(--card);
+    background: var(--card-solid);
   }
 
   [data-reorder-touch-handle] {

@@ -13,7 +13,11 @@
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     --tray: #ececec;
-    --card: #f6f6f6;
+    --card-solid: #f6f6f6;
+    --card-material: rgba(255, 255, 255, 0.55);
+    --card: var(--card-solid);
+    --surface: var(--tray);
+    --surface-veil: color-mix(in srgb, var(--tray) 94%, transparent);
     --card-hover: color-mix(in srgb, var(--text) 4%, var(--card));
     --card-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 0 5px rgba(0, 0, 0, 0.06);
     --control: #ffffff;
@@ -76,7 +80,8 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --tray: #2a2a2c;
-    --card: #242425;
+    --card-solid: #242425;
+    --card-material: rgba(30, 30, 30, 0.5);
     --card-hover: color-mix(in srgb, var(--text) 6%, var(--card));
     --card-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 0 5px rgba(0, 0, 0, 0.18);
     --control: rgba(255, 255, 255, 0.14);
@@ -107,7 +112,8 @@
 
 :root[data-theme='light'] {
   --tray: #ececec;
-  --card: #f6f6f6;
+  --card-solid: #f6f6f6;
+  --card-material: rgba(255, 255, 255, 0.55);
   --card-hover: color-mix(in srgb, var(--text) 4%, var(--card));
   --card-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 0 5px rgba(0, 0, 0, 0.06);
   --control: #ffffff;
@@ -135,7 +141,8 @@
 
 :root[data-theme='dark'] {
   --tray: #2a2a2c;
-  --card: #242425;
+  --card-solid: #242425;
+  --card-material: rgba(30, 30, 30, 0.5);
   --card-hover: color-mix(in srgb, var(--text) 6%, var(--card));
   --card-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 0 5px rgba(0, 0, 0, 0.18);
   --control: rgba(255, 255, 255, 0.14);
@@ -161,4 +168,28 @@
   --error: #ff6961;
   --error-bg: color-mix(in srgb, #ff453a 16%, var(--card));
   color-scheme: dark;
+}
+
+/* macOS: the transparent window shows the system popover material, with
+   light blocks on it, as in a native status menu. */
+:root[data-platform='macos'] {
+  --surface: transparent;
+  --surface-veil: color-mix(in srgb, var(--tray) 60%, transparent);
+  --card: var(--card-material);
+}
+
+/* AppKit semantic colors, exposed by WebKit, follow the window appearance
+   and the system accent color. */
+@supports (color: -apple-system-label) {
+  :root,
+  :root[data-theme='light'],
+  :root[data-theme='dark'] {
+    --text: -apple-system-label;
+    --secondary: -apple-system-secondary-label;
+    --tertiary: -apple-system-tertiary-label;
+    --separator: -apple-system-separator;
+    --meter-fill: -apple-system-control-accent;
+    --meter-warning: -apple-system-orange;
+    --meter-critical: -apple-system-red;
+  }
 }
