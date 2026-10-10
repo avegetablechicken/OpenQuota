@@ -242,7 +242,7 @@
       border: 1px solid var(--separator);
       border-radius: 7px;
       color: var(--text);
-      background: var(--card);
+      background: var(--control);
       font-size: 12px;
       line-height: 18px;
       cursor: pointer;

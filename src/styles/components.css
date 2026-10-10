@@ -13,6 +13,21 @@
     min-height: 0;
   }
 
+  /* Light blocks on the window material: a hairline edge and a soft halo. */
+  .provider-card,
+  .total-card,
+  .hint-card,
+  .detection-card,
+  .customize-list,
+  .metric-list,
+  .screen-cross-link,
+  .api-key-card,
+  .provider-proxy-card,
+  .provider-name-card,
+  .sub2api-config-card {
+    box-shadow: var(--card-shadow);
+  }
+
   .provider-section + .provider-section,
   .provider-reorder-shell + .provider-reorder-shell,
   .total-spend-section + .provider-section,

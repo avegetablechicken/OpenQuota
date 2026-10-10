@@ -288,8 +288,8 @@
       left: 3px;
       width: calc((100% - 6px) / 3);
       border-radius: 999px;
-      background: var(--tray);
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+      background: var(--control);
+      box-shadow: var(--control-shadow);
       transition: transform var(--motion-spring);
     }
 
@@ -475,8 +475,8 @@
 
     .spend-scope-switcher button.active {
       color: var(--text);
-      background: var(--tray);
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+      background: var(--control);
+      box-shadow: var(--control-shadow);
       font-weight: 600;
     }
 

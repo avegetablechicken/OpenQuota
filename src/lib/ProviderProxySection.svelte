@@ -288,7 +288,7 @@
     border: 1px solid var(--separator);
     border-radius: 7px;
     color: var(--text);
-    background: var(--tray);
+    background: var(--control);
     font: inherit;
     font-size: 11px;
     outline: none;

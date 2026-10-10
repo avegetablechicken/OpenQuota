@@ -719,7 +719,7 @@
     outline: none;
     padding: 4px 8px;
     color: var(--text);
-    background: var(--tray);
+    background: var(--control);
     font: inherit;
     font-size: 11px;
   }

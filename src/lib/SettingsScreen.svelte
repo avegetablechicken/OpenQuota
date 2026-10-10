@@ -538,7 +538,7 @@
       border: 1px solid var(--separator);
       border-radius: 6px;
       color: var(--secondary);
-      background: var(--tray);
+      background: var(--control);
       font-family: ui-monospace, monospace;
       font-size: 12px;
       text-overflow: ellipsis;
@@ -573,7 +573,7 @@
       border: 1px solid var(--separator);
       border-radius: 6px;
       color: var(--text);
-      background: var(--tray);
+      background: var(--control);
       font-size: 12px;
       font-weight: 500;
     }

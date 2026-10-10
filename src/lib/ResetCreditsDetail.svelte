@@ -314,7 +314,7 @@
       border: 1px solid var(--separator);
       border-radius: 6px;
       color: var(--text);
-      background: var(--card);
+      background: var(--control);
       font: inherit;
       font-size: 10px;
       cursor: default;

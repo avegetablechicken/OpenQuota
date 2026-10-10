@@ -28,8 +28,8 @@ pub const PANEL_WIDTH: f64 = 320.0;
 pub const PANEL_MIN_HEIGHT: u32 = 240;
 const PANEL_SCREEN_FRACTION: f64 = 0.85;
 const PANEL_RESIZE_SAVE_DELAY: Duration = Duration::from_millis(120);
-const LIGHT_PANEL_SURFACE: Color = Color(0xff, 0xff, 0xff, 0xff);
-const DARK_PANEL_SURFACE: Color = Color(0x1d, 0x1d, 0x1f, 0xff);
+const LIGHT_PANEL_SURFACE: Color = Color(0xec, 0xec, 0xec, 0xff);
+const DARK_PANEL_SURFACE: Color = Color(0x2a, 0x2a, 0x2c, 0xff);
 
 #[derive(Clone, Copy)]
 struct PendingPanelHeight {
