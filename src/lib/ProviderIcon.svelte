@@ -38,14 +38,6 @@
         stroke-linejoin="round"
       />
     </g>
-    <circle
-      cx="72"
-      cy="72"
-      r="28"
-      fill="var(--card)"
-      stroke="var(--separator)"
-      stroke-width="3.5"
-    />
     <g data-icon-layer="upstream" transform="translate(44 44) scale(.56)">
       <path d={upstreamPath} fill={upstreamColor ?? 'currentColor'} />
     </g>
