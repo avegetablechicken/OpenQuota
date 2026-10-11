@@ -1400,7 +1400,7 @@
       padding: 4px;
       border: 1px solid var(--separator);
       border-radius: 9px;
-      background: var(--tray);
+      background: var(--menu-surface);
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
     }
 
@@ -1408,7 +1408,7 @@
       width: 100%;
       padding: 6px 8px;
       border: 0;
-      border-radius: 6px;
+      border-radius: 3px;
       color: var(--text);
       background: none;
       font-size: 11px;
@@ -1416,7 +1416,12 @@
     }
 
     .options-menu button:hover {
-      background: var(--button-hover);
+      color: #ffffff;
+      background: var(--meter-fill);
+    }
+
+    .options-menu .menu-item:hover kbd {
+      color: inherit;
     }
 
     .screen-header {
@@ -1612,10 +1617,12 @@
     .options-menu > div {
       bottom: 34px;
       width: 172px;
-      padding: 6px;
+      padding: 4px;
       border: 0;
-      border-radius: 10px;
-      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.28);
+      border-radius: 6px;
+      box-shadow: var(--menu-shadow);
+      -webkit-backdrop-filter: var(--menu-backdrop);
+      backdrop-filter: var(--menu-backdrop);
       transform-origin: bottom right;
       animation: menu-in 180ms ease-out both;
     }
@@ -1685,7 +1692,7 @@
       gap: 8px;
       padding: 7px 9px;
       border: 0;
-      border-radius: 6px;
+      border-radius: 3px;
       color: var(--text);
       background: transparent;
       font-size: 11px;
@@ -1741,11 +1748,13 @@
       bottom: -5px;
       width: 130px;
       max-width: calc(100vw - 16px);
-      padding: 5px;
-      border: 1px solid var(--separator);
-      border-radius: 9px;
-      background: var(--tray);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+      padding: 4px;
+      border: 0;
+      border-radius: 6px;
+      background: var(--menu-surface);
+      box-shadow: var(--menu-shadow);
+      -webkit-backdrop-filter: var(--menu-backdrop);
+      backdrop-filter: var(--menu-backdrop);
       transform-origin: bottom right;
       animation: menu-in 160ms ease-out both;
     }
@@ -1755,7 +1764,7 @@
       min-height: 30px;
       padding: 7px 9px;
       border: 0;
-      border-radius: 5px;
+      border-radius: 3px;
       color: var(--text);
       background: transparent;
       font-size: 11px;

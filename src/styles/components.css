@@ -288,14 +288,17 @@
   .options-menu__panel hr,
   .context-menu hr {
     height: 1px;
-    margin: 5px 4px;
+    margin: 4px 2px;
     border: 0;
     background: var(--separator);
   }
 
+  /* Native menus highlight the hovered item, and a submenu's parent, in the accent color. */
   .share-menu button:hover,
-  .share-menu > summary:hover {
-    background: var(--button-hover);
+  .share-menu > summary:hover,
+  .share-menu[open] > summary {
+    color: #ffffff;
+    background: var(--meter-fill);
   }
 
   .share-menu > summary:focus,
@@ -409,12 +412,10 @@
   @keyframes menu-in {
     from {
       opacity: 0;
-      transform: translateY(4px) scale(0.96);
     }
 
     to {
       opacity: 1;
-      transform: translateY(0) scale(1);
     }
   }
 }

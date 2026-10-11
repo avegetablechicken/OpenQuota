@@ -1526,11 +1526,12 @@
       z-index: 80;
       width: 190px;
       padding: 4px;
-      border: 1px solid var(--separator);
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--tray) 97%, transparent);
-      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
-      backdrop-filter: blur(18px);
+      border: 0;
+      border-radius: 6px;
+      background: var(--menu-surface);
+      box-shadow: var(--menu-shadow);
+      -webkit-backdrop-filter: var(--menu-backdrop);
+      backdrop-filter: var(--menu-backdrop);
       animation: menu-in 180ms ease-out both;
     }
 
@@ -1545,7 +1546,7 @@
       gap: 8px;
       padding: 6px 8px;
       border: 0;
-      border-radius: 6px;
+      border-radius: 3px;
       color: var(--text);
       background: transparent;
       font-size: 11px;
@@ -1559,7 +1560,8 @@
     .context-menu button:not(:disabled):hover,
     .context-menu button:not(:disabled):focus-visible {
       outline: none;
-      background: var(--button-hover);
+      color: #ffffff;
+      background: var(--meter-fill);
     }
 
     .context-menu button:disabled {

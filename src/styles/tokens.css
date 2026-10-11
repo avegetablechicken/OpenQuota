@@ -22,6 +22,10 @@
     --card-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 0 5px rgba(0, 0, 0, 0.06);
     --control: #ffffff;
     --control-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.12), 0 0.5px 1px rgba(0, 0, 0, 0.1);
+    --menu-border: rgba(0, 0, 0, 0.12);
+    --menu-shadow: 0 0 0 1px var(--menu-border), 0 4px 16px rgba(0, 0, 0, 0.25);
+    --menu-surface: var(--tray);
+    --menu-backdrop: none;
     --text: rgba(0, 0, 0, 0.85);
     --secondary: rgba(0, 0, 0, 0.5);
     --tertiary: rgba(0, 0, 0, 0.26);
@@ -87,6 +91,7 @@
     --card-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 0 5px rgba(0, 0, 0, 0.18);
     --control: rgba(255, 255, 255, 0.14);
     --control-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.2);
+    --menu-border: transparent;
     --text: rgba(255, 255, 255, 0.85);
     --secondary: rgba(255, 255, 255, 0.55);
     --tertiary: rgba(255, 255, 255, 0.25);
@@ -119,6 +124,7 @@
   --card-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 0 5px rgba(0, 0, 0, 0.06);
   --control: #ffffff;
   --control-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.12), 0 0.5px 1px rgba(0, 0, 0, 0.1);
+  --menu-border: rgba(0, 0, 0, 0.12);
   --text: rgba(0, 0, 0, 0.85);
   --secondary: rgba(0, 0, 0, 0.5);
   --tertiary: rgba(0, 0, 0, 0.26);
@@ -148,6 +154,7 @@
   --card-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 0 5px rgba(0, 0, 0, 0.18);
   --control: rgba(255, 255, 255, 0.14);
   --control-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.2);
+  --menu-border: transparent;
   --text: rgba(255, 255, 255, 0.85);
   --secondary: rgba(255, 255, 255, 0.55);
   --tertiary: rgba(255, 255, 255, 0.25);
@@ -177,6 +184,10 @@
   --surface: transparent;
   --surface-veil: color-mix(in srgb, var(--tray) 60%, transparent);
   --card: var(--card-material);
+  /* Menus are frosted like NSMenu: page content below them blurs, and the
+     window material shows through where the page is clear. */
+  --menu-surface: color-mix(in srgb, var(--tray) 68%, transparent);
+  --menu-backdrop: blur(20px) saturate(1.8);
 }
 
 /* AppKit semantic colors, exposed by WebKit, follow the window appearance

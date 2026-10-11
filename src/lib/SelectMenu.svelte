@@ -153,10 +153,7 @@
     return {
       duration: reducedMotion ? 0 : duration,
       easing: cubicOut,
-      css: (progress) => `
-        opacity: ${progress};
-        transform: translateY(${(1 - progress) * (openAbove ? 4 : -4)}px) scale(${0.96 + progress * 0.04});
-      `,
+      css: (progress) => `opacity: ${progress};`,
     };
   }
 
@@ -274,16 +271,15 @@
       min-width: max(var(--select-menu-trigger-width), 132px);
       max-width: min(240px, calc(100vw - 16px));
       max-height: min(var(--select-menu-max-height), calc(100vh - 16px));
-      padding: 5px;
+      padding: 4px;
       overflow-y: auto;
       overscroll-behavior: contain;
-      border: 1px solid var(--separator);
-      border-radius: 8px;
-      background: color-mix(in srgb, var(--tray) 90%, transparent);
-      box-shadow:
-        0 12px 32px rgba(0, 0, 0, 0.2),
-        0 2px 8px rgba(0, 0, 0, 0.1);
-      backdrop-filter: blur(22px) saturate(1.35);
+      border: 0;
+      border-radius: 6px;
+      background: var(--menu-surface);
+      box-shadow: var(--menu-shadow);
+      -webkit-backdrop-filter: var(--menu-backdrop);
+      backdrop-filter: var(--menu-backdrop);
       transform-origin: top right;
       will-change: transform, opacity;
     }
@@ -305,7 +301,7 @@
       gap: 5px;
       padding: 3px 8px 3px 3px;
       border: 0;
-      border-radius: 6px;
+      border-radius: 3px;
       color: var(--text);
       background: transparent;
       font-size: 13px;
