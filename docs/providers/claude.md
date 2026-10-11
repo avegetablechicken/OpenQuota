@@ -44,9 +44,16 @@ including lowercase aliases) from the account's `settings.json` `env` object bef
 process environment. The default account uses `$CLAUDE_CONFIG_DIR/settings.json`, or
 `~/.claude/settings.json`; discovered accounts use their own configuration directory.
 Explicit proxy or direct-routing preferences in OpenQuota still take precedence.
+Explicit proxies bypass loopback destinations (`localhost`, `127.0.0.0/8`, and `::1`).
 
-Claude OAuth environment lookups also consult the account's settings, preserving the existing
-rules for stored login credentials and inference-only tokens. These lookups do not export variables or affect Codex or other providers.
+Subscription queries and token refreshes always use the official Claude endpoints and OAuth
+client ID. Custom, local, and staging OAuth settings do not redirect these requests.
+Only the proxy fields listed above are returned by the environment configuration reader.
+Other settings do not change credential selection. On macOS, the official Claude Code keychain
+namespace is used, including per-directory accounts; CLI credential files remain supported.
+Keep an official Claude Code login available for subscription limits. Tokens in `settings.json.env` are not imported;
+process-environment OAuth tokens retain their inference-only behavior.
+These lookups do not export variables or affect Codex or other providers.
 Cached HTTP clients may require restarting OpenQuota after proxy changes.
 
 OpenQuota does not currently track Claude launch arguments, so arbitrary `--settings` paths,

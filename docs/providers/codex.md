@@ -37,7 +37,9 @@ The file uses parsing logic adapted from `dotenvy` 0.15.7, supporting `export`, 
 multiline values and variable substitution. A private in-memory environment simulates Codex's
 sequential assignments: earlier file values override inherited values for later substitutions,
 and repeated assignments use the last value. `CODEX_` assignments are not applied to this
-environment. Missing files and invalid entries are ignored.
+environment. After expansion, only `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and
+their lowercase aliases are retained. Helper variables are discarded and cannot be retrieved
+through the proxy configuration reader. Missing files and invalid entries are ignored.
 
 The file is never loaded into the process environment. It does not change `PATH`, `HOME`, or
 the environment inherited by child processes. Other providers and general application requests do not read this file. Explicit per-provider proxy

@@ -6,16 +6,26 @@ use std::{sync::Arc, time::Duration};
 #[cfg(unix)]
 use crate::{child_process, storage::Storage};
 
+/// Only these fields may leave a provider's proxy configuration resolver.
+pub(crate) fn is_proxy_variable(name: &str) -> bool {
+    matches!(
+        name,
+        "HTTP_PROXY"
+            | "http_proxy"
+            | "HTTPS_PROXY"
+            | "https_proxy"
+            | "ALL_PROXY"
+            | "all_proxy"
+            | "NO_PROXY"
+            | "no_proxy"
+    )
+}
+
 const SNAPSHOT_KEYS: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
     "ZCODE_HOME",
     "XDG_CONFIG_HOME",
-    "USER_TYPE",
-    "USE_LOCAL_OAUTH",
-    "USE_STAGING_OAUTH",
-    "CLAUDE_LOCAL_OAUTH_API_BASE",
-    "CLAUDE_CODE_CUSTOM_OAUTH_URL",
 ];
 
 static ENVIRONMENT: OnceLock<ProviderEnvironment> = OnceLock::new();

@@ -4,7 +4,16 @@ mod parse;
 
 use std::collections::HashMap;
 
-pub(super) fn load(
+pub(super) fn load_proxy_values(
+    reader: impl std::io::Read,
+    process: impl Fn(&str) -> Option<String>,
+) -> HashMap<String, String> {
+    let mut values = load(reader, process);
+    values.retain(|name, _| crate::provider_environment::is_proxy_variable(name));
+    values
+}
+
+fn load(
     reader: impl std::io::Read,
     process: impl Fn(&str) -> Option<String>,
 ) -> HashMap<String, String> {

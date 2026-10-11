@@ -149,8 +149,6 @@ pub enum ClaudeError {
     SessionExpired,
     #[error("Your Claude token expired. Run `claude` to sign in again.")]
     TokenExpired,
-    #[error("Claude OAuth settings contain an invalid URL.")]
-    InvalidOAuthUrl,
     #[error("Refreshed Claude credentials could not be saved.")]
     AuthWrite,
     #[error("Claude login changed during refresh. Refresh again.")]
@@ -308,7 +306,7 @@ impl ClaudeProvider {
     }
 
     fn refresh_inner(&self) -> Result<ProviderSnapshot, ClaudeError> {
-        let config = oauth_config(&self.credential_scope)?;
+        let config = oauth_config();
         self.refresh_inner_with_config(&config)
     }
 
@@ -737,9 +735,7 @@ impl crate::providers::UsageProvider for ClaudeProvider {
                 | ClaudeError::TokenExpired
                 | ClaudeError::CredentialsChanged
                 | ClaudeError::AccountChanged => Kind::Authentication,
-                ClaudeError::InvalidOAuthUrl | ClaudeError::InvalidResponse => {
-                    Kind::InvalidResponse
-                }
+                ClaudeError::InvalidResponse => Kind::InvalidResponse,
                 ClaudeError::AuthWrite => Kind::CredentialStorage,
                 ClaudeError::RequestFailed(429) => Kind::RateLimited,
                 ClaudeError::RequestFailed(_) | ClaudeError::ConnectionFailed => Kind::Network,

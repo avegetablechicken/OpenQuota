@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// Read file overrides without modifying the process environment.
 /// File aliases take precedence over all process aliases, including empty values.
-pub fn first_value(names: &[&str]) -> Option<String> {
+pub fn proxy_value(names: &[&str]) -> Option<String> {
     let configured_home = std::env::var("CODEX_HOME").ok();
     let directory = codex_home(configured_home.as_deref(), dirs::home_dir());
     resolve_value(
@@ -22,9 +22,14 @@ fn resolve_value(
     names: &[&str],
     process: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
+    let names: Vec<_> = names
+        .iter()
+        .copied()
+        .filter(|name| crate::provider_environment::is_proxy_variable(name))
+        .collect();
     let mut values = path
         .and_then(|path| std::fs::File::open(path).ok())
-        .map(|file| dotenv::load(file, &process))
+        .map(|file| dotenv::load_proxy_values(file, &process))
         .unwrap_or_default();
     names
         .iter()
@@ -45,7 +50,7 @@ fn codex_home(configured: Option<&str>, home: Option<PathBuf>) -> Option<PathBuf
 #[cfg(test)]
 fn load_from(path: &Path, mut set: impl FnMut(&str, &str)) {
     if let Ok(file) = std::fs::File::open(path) {
-        for (key, value) in dotenv::load(file, |name| std::env::var(name).ok()) {
+        for (key, value) in dotenv::load_proxy_values(file, |name| std::env::var(name).ok()) {
             set(&key, &value);
         }
     }
@@ -84,40 +89,23 @@ mod tests {
     }
 
     #[test]
-    fn dotenv_overrides_existing_values_and_filters_codex_keys() {
+    fn retains_only_proxies_after_expanding_helper_variables() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(".env");
-        fs::write(
-            &path,
-            "KEY=first\nexport KEY=last # comment\nEMPTY=\nCODEX_HOME=/ignored\ncodex_key=ignored\nINVALID LINE\nAFTER='quoted # value'\n",
-        )
-        .unwrap();
-        let mut values = HashMap::from([("KEY".to_owned(), "process-value".to_owned())]);
-        load_from(&path, |key, value| {
-            values.insert(key.to_owned(), value.to_owned());
-        });
-        assert_eq!(values.get("KEY").unwrap(), "last");
-        assert_eq!(values.get("EMPTY").unwrap(), "");
-        assert_eq!(values.get("AFTER").unwrap(), "quoted # value");
-        assert_eq!(values.len(), 3);
-    }
-
-    #[test]
-    fn dotenv_uses_codex_parser_for_substitution_and_multiline_values() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(".env");
-        fs::write(
-            &path,
-            "OPENQUOTA_DOTENV_BASE=hello\nEXPANDED=${OPENQUOTA_DOTENV_BASE}-world\nLITERAL='${OPENQUOTA_DOTENV_BASE}'\nMULTILINE=\"first\nsecond\"\n",
-        )
-        .unwrap();
+        fs::write(&path, "PORT=7890\nPORT=7892\nHTTPS_PROXY=http://127.0.0.1:${PORT}\nNO_PROXY=\nAPI_KEY=secret\nCODEX_HOME=/ignored\n").unwrap();
         let mut values = HashMap::new();
         load_from(&path, |key, value| {
             values.insert(key.to_owned(), value.to_owned());
         });
-        assert_eq!(values.get("EXPANDED").unwrap(), "hello-world");
-        assert_eq!(values.get("LITERAL").unwrap(), "${OPENQUOTA_DOTENV_BASE}");
-        assert_eq!(values.get("MULTILINE").unwrap(), "first\nsecond");
+        assert_eq!(values.len(), 2);
+        assert_eq!(values["HTTPS_PROXY"], "http://127.0.0.1:7892");
+        assert_eq!(values["NO_PROXY"], "");
+        for name in ["PORT", "API_KEY", "CODEX_HOME", "PATH", "Http_Proxy"] {
+            assert_eq!(
+                super::resolve_value(Some(&path), &[name], |_| Some("inherited".into())),
+                None
+            );
+        }
     }
 
     #[test]

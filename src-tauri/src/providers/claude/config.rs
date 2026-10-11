@@ -109,17 +109,22 @@ pub(super) fn settings_path_for_scope(scope: &super::auth::ClaudeCredentialScope
     }
 }
 
-/// Resolve only this account's settings, without exporting values into the process.
-pub(crate) fn environment_value(path: &Path, names: &[&str]) -> Option<String> {
+/// Resolve only proxy fields from this account, without exporting process variables.
+pub(crate) fn proxy_value(path: &Path, names: &[&str]) -> Option<String> {
     let text = fs::read_to_string(path).ok();
-    environment_value_from(text.as_deref(), names, crate::provider_environment::value)
+    proxy_value_from(text.as_deref(), names, crate::provider_environment::value)
 }
 
-fn environment_value_from(
+fn proxy_value_from(
     settings: Option<&str>,
     names: &[&str],
     fallback: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
+    let names: Vec<_> = names
+        .iter()
+        .copied()
+        .filter(|name| crate::provider_environment::is_proxy_variable(name))
+        .collect();
     let document = settings.and_then(|text| serde_json::from_str::<Value>(text).ok());
     names
         .iter()
@@ -272,18 +277,34 @@ mod tests {
         let settings = r#"{"env":{"https_proxy":"http://file:8080","NO_PROXY":"","INVALID":42}}"#;
         let process = |_: &str| Some("process".to_owned());
         assert_eq!(
-            super::environment_value_from(Some(settings), &["HTTPS_PROXY", "https_proxy"], process)
+            super::proxy_value_from(Some(settings), &["HTTPS_PROXY", "https_proxy"], process)
                 .as_deref(),
             Some("http://file:8080")
         );
         assert_eq!(
-            super::environment_value_from(Some(settings), &["NO_PROXY"], process).as_deref(),
+            super::proxy_value_from(Some(settings), &["NO_PROXY"], process).as_deref(),
             Some("")
         );
         for input in [None, Some("broken"), Some(settings)] {
             assert_eq!(
-                super::environment_value_from(input, &["INVALID"], process).as_deref(),
+                super::proxy_value_from(input, &["INVALID"], process).as_deref(),
+                None
+            );
+            assert_eq!(
+                super::proxy_value_from(input, &["ALL_PROXY"], process).as_deref(),
                 Some("process")
+            );
+        }
+        let unrelated = r#"{"env":{"CLAUDE_CODE_CUSTOM_OAUTH_URL":"https://custom.example","CLAUDE_CODE_OAUTH_TOKEN":"token","PATH":"/custom","PORT":"7892"}}"#;
+        for name in [
+            "CLAUDE_CODE_CUSTOM_OAUTH_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "PATH",
+            "PORT",
+        ] {
+            assert_eq!(
+                super::proxy_value_from(Some(unrelated), &[name], process),
+                None
             );
         }
         assert_eq!(std::env::var_os("HTTPS_PROXY"), before);

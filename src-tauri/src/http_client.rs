@@ -55,9 +55,10 @@ pub fn validate_proxy_url(value: &str) -> Result<(), String> {
 fn client_builder_for_proxy(proxy: Option<&str>) -> Result<ClientBuilder, reqwest::Error> {
     Ok(match proxy {
         Some(DIRECT_PROXY) => tls_client_builder().no_proxy(),
-        Some(url) => tls_client_builder()
-            .no_proxy()
-            .proxy(reqwest::Proxy::all(url)?),
+        Some(url) => tls_client_builder().no_proxy().proxy(
+            reqwest::Proxy::all(url)?
+                .no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.0/8,::1")),
+        ),
         None => blocking_client_builder(),
     })
 }
@@ -203,14 +204,14 @@ impl ProviderClient {
         let builder = if self.provider_id == "codex" && proxy.is_none() {
             platform::configure_environment(
                 tls_client_builder(),
-                crate::codex_environment::first_value,
+                crate::codex_environment::proxy_value,
             )
         } else if let Some(path) = self.claude_settings.as_ref().filter(|_| {
             proxy.is_none()
                 && (self.provider_id == "claude" || self.provider_id.starts_with("claude@"))
         }) {
             platform::configure_environment(tls_client_builder(), |names| {
-                crate::providers::claude::config::environment_value(path, names)
+                crate::providers::claude::config::proxy_value(path, names)
             })
         } else {
             client_builder_for_proxy(proxy.as_deref())?
@@ -1582,6 +1583,32 @@ mod provider_proxy_tests {
     use super::{validate_provider_proxy, validate_proxy_url, ProviderClient, DIRECT_PROXY};
     use crate::providers::test_http::serve_once;
     use std::time::Duration;
+
+    #[test]
+    fn explicit_proxy_bypasses_loopback_but_routes_remote_requests() {
+        let proxy = serve_once(200, &[], "remote-via-proxy");
+        let client = super::client_builder_for_proxy(Some(&proxy))
+            .unwrap()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        for hostname in ["127.0.0.1", "localhost"] {
+            let local = serve_once(200, &[], "local-direct").replace("127.0.0.1", hostname);
+            assert_eq!(
+                client.get(local).send().unwrap().text().unwrap(),
+                "local-direct"
+            );
+        }
+        assert_eq!(
+            client
+                .get("http://unresolvable.invalid/usage")
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "remote-via-proxy"
+        );
+    }
 
     #[test]
     fn codex_dotenv_proxy_does_not_affect_other_providers() {

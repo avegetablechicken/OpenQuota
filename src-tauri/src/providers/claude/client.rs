@@ -75,7 +75,20 @@ impl ClaudeClient {
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| parse_retry_after(value, Utc::now()));
-        let body = response.json().map_err(|_| ClaudeError::InvalidResponse)?;
+        let body = response.json().or_else(|_| {
+            crate::app_warn!(
+                "http",
+                "claude usage response is not JSON (HTTP {})",
+                status.as_u16()
+            );
+            if status.is_success() {
+                Err(ClaudeError::InvalidResponse)
+            } else {
+                // Preserve HTTP failures, including authentication and rate-limit handling,
+                // even when a proxy returns an empty body or an HTML error page.
+                Ok(Value::Null)
+            }
+        })?;
         Ok((status, body, retry_after))
     }
 
@@ -198,6 +211,25 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ClaudeError::ConnectionFailed));
         assert!(!error.to_string().contains("secret-token"));
+    }
+
+    #[test]
+    fn non_json_usage_errors_preserve_http_status_and_retry_after() {
+        for (code, response) in [
+            (502, ""),
+            (401, "unauthorized"),
+            (403, "<html>denied</html>"),
+            (429, "busy"),
+        ] {
+            let base = test_http::serve_once(code, &[("retry-after", "120")], response);
+            let (status, body, retry_after) = ClaudeClient::new()
+                .unwrap()
+                .fetch_usage("fake-access-token", &config(&base))
+                .unwrap();
+            assert_eq!(status.as_u16(), code);
+            assert_eq!(body, serde_json::Value::Null);
+            assert_eq!(retry_after, Some(120));
+        }
     }
 
     #[test]
