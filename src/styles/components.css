@@ -309,7 +309,10 @@
   :root[data-density='compact'] .provider-section + .provider-section,
   :root[data-density='compact'] .provider-reorder-shell + .provider-reorder-shell,
   :root[data-density='compact'] .total-spend-section + .provider-section,
-  :root[data-density='compact'] .total-spend-section + .provider-reorder-shell,
+  :root[data-density='compact'] .total-spend-section + .provider-reorder-shell {
+    margin-top: 8px;
+  }
+
   :root[data-density='compact'] .settings-section {
     margin-top: 0;
     margin-bottom: 8px;
