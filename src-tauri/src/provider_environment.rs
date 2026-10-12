@@ -26,6 +26,11 @@ const SNAPSHOT_KEYS: &[&str] = &[
     "CODEX_HOME",
     "ZCODE_HOME",
     "XDG_CONFIG_HOME",
+    "USER_TYPE",
+    "USE_LOCAL_OAUTH",
+    "USE_STAGING_OAUTH",
+    "CLAUDE_LOCAL_OAUTH_API_BASE",
+    "CLAUDE_CODE_CUSTOM_OAUTH_URL",
 ];
 
 static ENVIRONMENT: OnceLock<ProviderEnvironment> = OnceLock::new();

@@ -18,6 +18,7 @@ use super::ClaudeError;
 const DEFAULT_API_BASE: &str = "https://api.anthropic.com";
 const DEFAULT_REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const DEFAULT_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const NON_PROD_CLIENT_ID: &str = "22422756-60c9-4084-8eb7-27705fd5cf9a";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -399,12 +400,73 @@ fn load_candidates_with_environment(
     }
 }
 
-pub(super) fn oauth_config() -> ClaudeOAuthConfig {
-    ClaudeOAuthConfig {
-        usage_url: format!("{DEFAULT_API_BASE}/api/oauth/usage"),
-        refresh_url: DEFAULT_REFRESH_URL.into(),
-        client_id: DEFAULT_CLIENT_ID.into(),
+pub(super) fn oauth_config() -> Result<ClaudeOAuthConfig, ClaudeError> {
+    oauth_config_from(env_text)
+}
+
+fn oauth_config_from(
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<ClaudeOAuthConfig, ClaudeError> {
+    let (base, refresh_url, default_client_id, _) = resolved_oauth_settings_from(&env);
+    let usage_url = format!("{base}/api/oauth/usage");
+    validate_http_url(&usage_url)?;
+    validate_http_url(&refresh_url)?;
+    Ok(ClaudeOAuthConfig {
+        usage_url,
+        refresh_url,
+        client_id: env("CLAUDE_CODE_OAUTH_CLIENT_ID").unwrap_or(default_client_id),
+    })
+}
+
+fn resolved_oauth_settings() -> (String, String, String, &'static str) {
+    resolved_oauth_settings_from(env_text)
+}
+
+fn resolved_oauth_settings_from(
+    env: impl Fn(&str) -> Option<String>,
+) -> (String, String, String, &'static str) {
+    let flag = |name: &str| {
+        env(name)
+            .map(|value| {
+                !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+            })
+            .unwrap_or(false)
+    };
+    let mut base = DEFAULT_API_BASE.to_owned();
+    let mut refresh = DEFAULT_REFRESH_URL.to_owned();
+    let mut client_id = DEFAULT_CLIENT_ID.to_owned();
+    let mut suffix = "";
+    if env("USER_TYPE").as_deref() == Some("ant") && flag("USE_LOCAL_OAUTH") {
+        base = env("CLAUDE_LOCAL_OAUTH_API_BASE")
+            .unwrap_or_else(|| "http://localhost:8000".into())
+            .trim_end_matches('/')
+            .to_owned();
+        refresh = format!("{base}/v1/oauth/token");
+        client_id = NON_PROD_CLIENT_ID.into();
+        suffix = "-local-oauth";
+    } else if env("USER_TYPE").as_deref() == Some("ant") && flag("USE_STAGING_OAUTH") {
+        base = "https://api-staging.anthropic.com".into();
+        refresh = "https://platform.staging.ant.dev/v1/oauth/token".into();
+        client_id = NON_PROD_CLIENT_ID.into();
+        suffix = "-staging-oauth";
     }
+    if let Some(custom) = env("CLAUDE_CODE_CUSTOM_OAUTH_URL") {
+        base = custom.trim_end_matches('/').to_owned();
+        refresh = format!("{base}/v1/oauth/token");
+        suffix = "-custom-oauth";
+    }
+    (base, refresh, client_id, suffix)
+}
+
+fn validate_http_url(value: &str) -> Result<(), ClaudeError> {
+    let url = reqwest::Url::parse(value).map_err(|_| ClaudeError::InvalidOAuthUrl)?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return Err(ClaudeError::InvalidOAuthUrl);
+    }
+    Ok(())
 }
 
 fn parse_candidate(
@@ -463,7 +525,8 @@ pub fn claude_home() -> PathBuf {
 }
 
 fn keychain_candidates(scope: &ClaudeCredentialScope) -> Vec<(String, String)> {
-    let service = "Claude Code-credentials".to_owned();
+    let suffix = resolved_oauth_settings().3;
+    let service = format!("Claude Code{suffix}-credentials");
     let services = match scope {
         ClaudeCredentialScope::Standard => {
             if let Some(config_dir) = env_text("CLAUDE_CONFIG_DIR") {
@@ -489,7 +552,8 @@ fn keychain_candidates(scope: &ClaudeCredentialScope) -> Vec<(String, String)> {
 }
 
 pub(super) fn scoped_keychain_service_name(config_dir_literal: &str) -> String {
-    let service = "Claude Code-credentials";
+    let suffix = resolved_oauth_settings().3;
+    let service = format!("Claude Code{suffix}-credentials");
     let normalized = config_dir_literal.replace('\\', "/");
     let hash = sha256_hex(normalized.as_bytes());
     format!("{service}-{}", &hash[..8])
@@ -530,7 +594,7 @@ mod tests {
     use crate::providers::claude::ClaudeError;
 
     #[test]
-    fn custom_oauth_settings_cannot_redirect_official_requests_or_credentials() {
+    fn account_settings_do_not_change_oauth_endpoints_or_credentials() {
         let directory = tempfile::tempdir().unwrap();
         for account in ["work", "personal"] {
             let path = directory.path().join(account);
@@ -549,7 +613,7 @@ mod tests {
                 keychain_literal: path.to_string_lossy().into_owned(),
                 path,
             };
-            let config = super::oauth_config();
+            let config = super::oauth_config_from(|_| None).unwrap();
             assert_eq!(
                 config.usage_url,
                 "https://api.anthropic.com/api/oauth/usage"
@@ -559,9 +623,6 @@ mod tests {
                 "https://platform.claude.com/v1/oauth/token"
             );
             assert_eq!(config.client_id, super::DEFAULT_CLIENT_ID);
-            assert!(super::keychain_candidates(&scope)
-                .iter()
-                .all(|(service, _)| service.starts_with("Claude Code-credentials-")));
             fs::write(
                 super::credential_path(&scope),
                 br#"{"claudeAiOauth":{"accessToken":"stored-token"}}"#,
@@ -572,6 +633,73 @@ mod tests {
                 Some("stored-token")
             );
         }
+    }
+
+    #[test]
+    fn oauth_environment_selects_endpoints_client_and_keychain_namespace() {
+        let resolve = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect();
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            }
+        };
+        let custom = resolve(&[
+            ("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://oauth.example/"),
+            ("CLAUDE_CODE_OAUTH_CLIENT_ID", "custom-client"),
+        ]);
+        let config = super::oauth_config_from(&custom).unwrap();
+        assert_eq!(config.usage_url, "https://oauth.example/api/oauth/usage");
+        assert_eq!(config.refresh_url, "https://oauth.example/v1/oauth/token");
+        assert_eq!(config.client_id, "custom-client");
+        assert_eq!(
+            super::resolved_oauth_settings_from(&custom).3,
+            "-custom-oauth"
+        );
+
+        let staging = resolve(&[("USER_TYPE", "ant"), ("USE_STAGING_OAUTH", "1")]);
+        let config = super::oauth_config_from(&staging).unwrap();
+        assert_eq!(
+            config.usage_url,
+            "https://api-staging.anthropic.com/api/oauth/usage"
+        );
+        assert_eq!(
+            config.refresh_url,
+            "https://platform.staging.ant.dev/v1/oauth/token"
+        );
+        assert_eq!(config.client_id, super::NON_PROD_CLIENT_ID);
+        assert_eq!(
+            super::resolved_oauth_settings_from(&staging).3,
+            "-staging-oauth"
+        );
+
+        let local = resolve(&[("USER_TYPE", "ant"), ("USE_LOCAL_OAUTH", "true")]);
+        let config = super::oauth_config_from(&local).unwrap();
+        assert_eq!(config.refresh_url, "http://localhost:8000/v1/oauth/token");
+        assert_eq!(
+            super::resolved_oauth_settings_from(&local).3,
+            "-local-oauth"
+        );
+
+        for disabled in [
+            resolve(&[("USE_STAGING_OAUTH", "1")]),
+            resolve(&[("USER_TYPE", "ant"), ("USE_STAGING_OAUTH", "off")]),
+        ] {
+            let config = super::oauth_config_from(&disabled).unwrap();
+            assert_eq!(config.refresh_url, super::DEFAULT_REFRESH_URL);
+            assert_eq!(super::resolved_oauth_settings_from(&disabled).3, "");
+        }
+
+        let invalid = resolve(&[("CLAUDE_CODE_CUSTOM_OAUTH_URL", "not a url")]);
+        assert!(matches!(
+            super::oauth_config_from(&invalid),
+            Err(ClaudeError::InvalidOAuthUrl)
+        ));
     }
 
     #[test]
