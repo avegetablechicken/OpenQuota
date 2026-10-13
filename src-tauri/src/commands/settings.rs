@@ -32,13 +32,15 @@ enum SettingsSaveMode {
     ResetAll,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum TraySetting {
     MenuBarStyle(MenuBarStyle),
     WindowMode(WindowMode),
     UsageDisplay(UsageDisplay),
     UpdateFrequency(UpdateFrequency),
     LaunchAtLoginToggle,
+    #[cfg(target_os = "macos")]
+    HideMenuBarMetric(String),
 }
 
 pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
@@ -51,12 +53,23 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
         for _ in 0..3 {
             let current = settings_service.get();
             let mut next = current.clone();
-            match setting {
-                TraySetting::MenuBarStyle(value) => next.menu_bar_style = value,
-                TraySetting::WindowMode(value) => next.window_mode = value,
-                TraySetting::UsageDisplay(value) => next.usage_display = value,
-                TraySetting::UpdateFrequency(value) => next.update_frequency = value,
+            match &setting {
+                TraySetting::MenuBarStyle(value) => next.menu_bar_style = *value,
+                TraySetting::WindowMode(value) => next.window_mode = *value,
+                TraySetting::UsageDisplay(value) => next.usage_display = *value,
+                TraySetting::UpdateFrequency(value) => next.update_frequency = *value,
                 TraySetting::LaunchAtLoginToggle => next.launch_at_login = !current.launch_at_login,
+                #[cfg(target_os = "macos")]
+                TraySetting::HideMenuBarMetric(metric_id) => {
+                    if let Some(metric) = next
+                        .providers
+                        .iter_mut()
+                        .flat_map(|provider| provider.metrics.iter_mut())
+                        .find(|metric| metric.id == *metric_id)
+                    {
+                        metric.pinned = false;
+                    }
+                }
             }
             if next == current {
                 return;

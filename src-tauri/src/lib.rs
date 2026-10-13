@@ -33,6 +33,8 @@ use std::sync::Arc;
 use popup::PopupDismissGuard;
 use service::ProviderService;
 use settings::{CredentialDetectionPlan, SettingsService};
+#[cfg(target_os = "macos")]
+use tauri::menu::IsMenuItem;
 #[cfg(not(target_os = "linux"))]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{
@@ -64,6 +66,8 @@ use crate::{
 };
 
 const TRAY_ID: &str = "openquota-tray";
+#[cfg(target_os = "macos")]
+const MENU_BAR_METRIC_PREFIX: &str = "menu-bar-metric:";
 
 fn build_tray_menu(
     app: &AppHandle,
@@ -189,23 +193,56 @@ fn build_tray_menu(
             true,
             &[&openquota_icon, &text_icon, &bars_icon],
         )?;
+        // Only metrics currently drawn in the menu bar are listed; hiding one unpins it, so it
+        // stays out of this menu until it is starred again.
+        let menu_bar_metrics = app
+            .try_state::<tray_presentation::MenuBarItems>()
+            .map(|items| items.get())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| {
+                CheckMenuItem::with_id(
+                    app,
+                    format!("{MENU_BAR_METRIC_PREFIX}{}", item.metric_id),
+                    item.label,
+                    true,
+                    true,
+                    None::<&str>,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let menu_bar_items = if menu_bar_metrics.is_empty() {
+            None
+        } else {
+            Some(Submenu::with_id_and_items(
+                app,
+                "menu-bar-items",
+                "Show in Menu Bar",
+                true,
+                &menu_bar_metrics
+                    .iter()
+                    .map(|item| item as &dyn IsMenuItem<tauri::Wry>)
+                    .collect::<Vec<_>>(),
+            )?)
+        };
         let settings_item =
             MenuItem::with_id(app, "settings", "More Settings…", true, Some("CmdOrCtrl+,"))?;
         let second_separator = PredefinedMenuItem::separator(app)?;
         let quit = MenuItem::with_id(app, "quit", "Quit OpenQuota", true, Some("CmdOrCtrl+Q"))?;
-        Ok(Menu::with_items(
-            app,
-            &[
-                &icon_style,
-                &tray_mode,
-                &show_usage_as,
-                &update_frequency,
-                &settings_item,
-                &second_separator,
-                &launch_at_login,
-                &quit,
-            ],
-        )?)
+        let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&icon_style];
+        if let Some(menu_bar_items) = &menu_bar_items {
+            items.push(menu_bar_items);
+        }
+        items.extend([
+            &tray_mode as &dyn IsMenuItem<tauri::Wry>,
+            &show_usage_as,
+            &update_frequency,
+            &settings_item,
+            &second_separator,
+            &launch_at_login,
+            &quit,
+        ]);
+        Ok(Menu::with_items(app, &items)?)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -308,6 +345,13 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
                 show_main_window(&window);
             }
         }
+        #[cfg(target_os = "macos")]
+        id if id.starts_with(MENU_BAR_METRIC_PREFIX) => commands::settings::apply_tray_setting(
+            app,
+            commands::settings::TraySetting::HideMenuBarMetric(
+                id[MENU_BAR_METRIC_PREFIX.len()..].to_owned(),
+            ),
+        ),
         "customize" => open_screen(app, "customize"),
         "settings" => open_screen(app, "settings"),
         "quit" => {
@@ -573,6 +617,8 @@ pub fn run() {
                 desktop_integration.tray_available()
             );
             app.manage(desktop_integration.clone());
+            #[cfg(target_os = "macos")]
+            app.manage(tray_presentation::MenuBarItems::default());
 
             let app_data_dir = app.path().app_data_dir()?;
             let database_path = app_data_dir.join("openquota.db");

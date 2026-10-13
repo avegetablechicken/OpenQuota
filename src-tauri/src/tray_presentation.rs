@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use tauri::Manager;
 use tauri::{image::Image, AppHandle};
 
 #[cfg(not(target_os = "macos"))]
@@ -5,7 +7,8 @@ use crate::tray_icon;
 use crate::{
     models::{
         AppSettings, MetricDefinition, MetricSource, MetricValue, MetricValueKind,
-        ProviderSnapshot, QuotaFormat, UsageDisplay, UsagePeriod, UsagePeriodSelection,
+        ProviderDefinition, ProviderSnapshot, QuotaFormat, UsageDisplay, UsagePeriod,
+        UsagePeriodSelection,
     },
     providers::ProviderRegistry,
     service::UsageViewState,
@@ -15,6 +18,8 @@ const TRAY_ID: &str = "openquota-tray";
 
 #[derive(Debug, Clone, PartialEq)]
 struct TrayMetric {
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    metric_id: String,
     value: String,
     detail: String,
     gauge: Option<TrayGauge>,
@@ -48,6 +53,41 @@ enum MacMenuBarIcon {
 #[derive(Debug, Clone, PartialEq)]
 struct MacMenuBarPresentation {
     icon: MacMenuBarIcon,
+}
+
+/// A metric currently drawn in the macOS menu bar, offered in the tray menu so it can be hidden.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MenuBarItem {
+    pub(crate) metric_id: String,
+    pub(crate) label: String,
+}
+
+/// The menu bar items behind the current tray menu, so the menu is rebuilt only when they change.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(crate) struct MenuBarItems(std::sync::Mutex<Vec<MenuBarItem>>);
+
+#[cfg(target_os = "macos")]
+impl MenuBarItems {
+    pub(crate) fn get(&self) -> Vec<MenuBarItem> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn replace(&self, items: Vec<MenuBarItem>) -> bool {
+        let mut current = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current == items {
+            return false;
+        }
+        *current = items;
+        true
+    }
 }
 
 pub fn update(
@@ -91,10 +131,19 @@ pub fn update(
     }
 
     #[cfg(target_os = "macos")]
-    apply_mac_menu_bar_presentation(
-        &tray,
-        mac_menu_bar_presentation(&groups, settings.menu_bar_style),
-    );
+    {
+        apply_mac_menu_bar_presentation(
+            &tray,
+            mac_menu_bar_presentation(&groups, settings.menu_bar_style),
+        );
+        let items = menu_bar_items(&groups, settings, registry);
+        if app
+            .try_state::<MenuBarItems>()
+            .is_some_and(|state| state.replace(items))
+        {
+            crate::update_tray_menu(app, settings);
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -171,19 +220,64 @@ fn apply_mac_menu_bar_presentation(
     }
 }
 
+/// The metrics each group actually draws in the menu bar for the given style.
 #[cfg(any(target_os = "macos", test))]
-fn bar_groups(groups: &[TrayGroup]) -> Vec<crate::menu_bar::BarGroup> {
+fn displayed_metrics(
+    groups: &[TrayGroup],
+    style: crate::models::MenuBarStyle,
+) -> Vec<(&TrayGroup, Vec<&TrayMetric>)> {
+    match style {
+        crate::models::MenuBarStyle::Icon => Vec::new(),
+        crate::models::MenuBarStyle::Text => text_metrics(groups),
+        crate::models::MenuBarStyle::Bars => bar_metrics(groups),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn menu_bar_items(
+    groups: &[TrayGroup],
+    settings: &AppSettings,
+    registry: &ProviderRegistry,
+) -> Vec<MenuBarItem> {
+    let mut items = Vec::<MenuBarItem>::new();
+    for (group, metrics) in displayed_metrics(groups, settings.menu_bar_style) {
+        for metric in metrics {
+            // Multi-account providers draw one group per account but share a single pin.
+            if items.iter().any(|item| item.metric_id == metric.metric_id) {
+                continue;
+            }
+            let (Some(provider), Some(definition)) = (
+                registry.definition(&group.provider_id),
+                registry.metric(&metric.metric_id),
+            ) else {
+                continue;
+            };
+            items.push(MenuBarItem {
+                metric_id: metric.metric_id.clone(),
+                label: format!(
+                    "{} · {}",
+                    provider_name(registry, settings, provider),
+                    definition.label
+                ),
+            });
+        }
+    }
+    items
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn bar_metrics(groups: &[TrayGroup]) -> Vec<(&TrayGroup, Vec<&TrayMetric>)> {
     let mut provider_ids = Vec::new();
     groups
         .iter()
         .filter_map(|group| {
-            let fractions = group
+            let metrics = group
                 .metrics
                 .iter()
-                .filter_map(|metric| metric.gauge.map(|gauge| gauge.display_fraction))
+                .filter(|metric| metric.gauge.is_some())
                 .take(crate::settings::MAX_PINS_PER_PROVIDER)
                 .collect::<Vec<_>>();
-            if fractions.is_empty() {
+            if metrics.is_empty() {
                 return None;
             }
             if !provider_ids.contains(&group.provider_id.as_str()) {
@@ -192,11 +286,22 @@ fn bar_groups(groups: &[TrayGroup]) -> Vec<crate::menu_bar::BarGroup> {
                 }
                 provider_ids.push(group.provider_id.as_str());
             }
-            Some(crate::menu_bar::BarGroup {
-                provider_id: group.provider_id.clone(),
-                upstream_provider_id: group.upstream_provider_id.clone(),
-                fractions,
-            })
+            Some((group, metrics))
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn bar_groups(groups: &[TrayGroup]) -> Vec<crate::menu_bar::BarGroup> {
+    bar_metrics(groups)
+        .into_iter()
+        .map(|(group, metrics)| crate::menu_bar::BarGroup {
+            provider_id: group.provider_id.clone(),
+            upstream_provider_id: group.upstream_provider_id.clone(),
+            fractions: metrics
+                .iter()
+                .filter_map(|metric| metric.gauge.map(|gauge| gauge.display_fraction))
+                .collect(),
         })
         .collect()
 }
@@ -210,21 +315,43 @@ fn primary_gauge(groups: &[TrayGroup]) -> Option<TrayGauge> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn text_groups(groups: &[TrayGroup]) -> Vec<crate::menu_bar::TextGroup> {
+fn text_metrics(groups: &[TrayGroup]) -> Vec<(&TrayGroup, Vec<&TrayMetric>)> {
     groups
         .iter()
-        .map(|group| crate::menu_bar::TextGroup {
+        .map(|group| {
+            (
+                group,
+                group
+                    .metrics
+                    .iter()
+                    .take(crate::settings::MAX_PINS_PER_PROVIDER)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .filter(|(_, metrics)| !metrics.is_empty())
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn text_groups(groups: &[TrayGroup]) -> Vec<crate::menu_bar::TextGroup> {
+    text_metrics(groups)
+        .into_iter()
+        .map(|(group, metrics)| crate::menu_bar::TextGroup {
             provider_id: group.provider_id.clone(),
             upstream_provider_id: group.upstream_provider_id.clone(),
-            values: group
-                .metrics
-                .iter()
-                .take(crate::settings::MAX_PINS_PER_PROVIDER)
-                .map(|metric| metric.value.clone())
-                .collect(),
+            values: metrics.iter().map(|metric| metric.value.clone()).collect(),
         })
-        .filter(|group| !group.values.is_empty())
         .collect()
+}
+
+fn provider_name(
+    registry: &ProviderRegistry,
+    settings: &AppSettings,
+    definition: &ProviderDefinition,
+) -> String {
+    registry
+        .display_name(&definition.id, settings)
+        .unwrap_or_else(|| settings.provider_display_name(definition).to_owned())
 }
 
 fn resolved_groups(
@@ -242,9 +369,7 @@ fn resolved_groups(
                 .providers
                 .get(&provider.id)
                 .and_then(|state| state.snapshot.as_ref())?;
-            let provider_name = registry
-                .display_name(&definition.id, settings)
-                .unwrap_or_else(|| settings.provider_display_name(definition).to_owned());
+            let provider_name = provider_name(registry, settings, definition);
             let snapshots = match &snapshot.accounts {
                 Some(accounts) => accounts
                     .iter()
@@ -323,6 +448,7 @@ fn tray_metric(
                         };
                         let unit = quota.unit.as_deref().unwrap_or("requests");
                         return TrayMetric {
+                            metric_id: definition.id.clone(),
                             value: format!("{value:.0}"),
                             detail: format!("{} {value:.0} {unit} {word}", quota.label),
                             gauge: used_fraction.map(|used_fraction| TrayGauge {
@@ -347,6 +473,7 @@ fn tray_metric(
                     UsageDisplay::Left => "left",
                 };
                 TrayMetric {
+                    metric_id: definition.id.clone(),
                     value: format!("{percent:.0}%"),
                     detail: format!("{} {percent:.0}% {word}", quota.label),
                     gauge: Some(TrayGauge {
@@ -359,16 +486,13 @@ fn tray_metric(
     };
     match &definition.source {
         MetricSource::Quota { source_id, .. } => quota(source_id),
-        MetricSource::QuotaOrValue { source_id, .. } => {
-            quota(source_id).or_else(|| value_metric(snapshot, source_id, tray.suffix.as_deref()))
-        }
+        MetricSource::QuotaOrValue { source_id, .. } => quota(source_id)
+            .or_else(|| value_metric(definition, snapshot, source_id, tray.suffix.as_deref())),
         MetricSource::Value { source_id } => {
-            value_metric(snapshot, source_id, tray.suffix.as_deref())
+            value_metric(definition, snapshot, source_id, tray.suffix.as_deref())
         }
-        MetricSource::Status { source_id } => status_metric(snapshot, source_id),
-        MetricSource::Usage { period } => {
-            usage_metric(&definition.label, usage_period(snapshot, *period))
-        }
+        MetricSource::Status { source_id } => status_metric(definition, snapshot, source_id),
+        MetricSource::Usage { period } => usage_metric(definition, usage_period(snapshot, *period)),
         MetricSource::Trend => None,
     }
 }
@@ -386,12 +510,17 @@ fn usage_period(snapshot: &ProviderSnapshot, period: UsagePeriodSelection) -> Op
     }
 }
 
-fn status_metric(snapshot: &ProviderSnapshot, source_id: &str) -> Option<TrayMetric> {
+fn status_metric(
+    definition: &MetricDefinition,
+    snapshot: &ProviderSnapshot,
+    source_id: &str,
+) -> Option<TrayMetric> {
     let metric = snapshot
         .status_metrics
         .iter()
         .find(|metric| metric.id == source_id)?;
     Some(TrayMetric {
+        metric_id: definition.id.clone(),
         value: metric.text.clone(),
         detail: format!("{} {}", metric.label, metric.text),
         gauge: None,
@@ -399,6 +528,7 @@ fn status_metric(snapshot: &ProviderSnapshot, source_id: &str) -> Option<TrayMet
 }
 
 fn value_metric(
+    definition: &MetricDefinition,
     snapshot: &ProviderSnapshot,
     source_id: &str,
     tray_suffix: Option<&str>,
@@ -423,6 +553,7 @@ fn value_metric(
         .map(|suffix| format!("{value} {suffix}"))
         .unwrap_or(value);
     Some(TrayMetric {
+        metric_id: definition.id.clone(),
         value,
         detail: format!("{} {detail}", metric.label),
         gauge: None,
@@ -453,14 +584,15 @@ fn format_detail_value(value: &MetricValue) -> String {
         .unwrap_or(number)
 }
 
-fn usage_metric(label: &str, period: Option<&UsagePeriod>) -> Option<TrayMetric> {
+fn usage_metric(definition: &MetricDefinition, period: Option<&UsagePeriod>) -> Option<TrayMetric> {
     let period = period?;
     let value = period
         .estimated_cost_usd
         .map(|value| format!("${value:.2}"))
         .unwrap_or_else(|| format_tokens(period.tokens));
-    let detail = format!("{label} {value}");
+    let detail = format!("{} {value}", definition.label);
     Some(TrayMetric {
+        metric_id: definition.id.clone(),
         value,
         detail,
         gauge: None,
@@ -500,8 +632,9 @@ mod tests {
     };
 
     use super::{
-        bar_groups, format_tokens, mac_menu_bar_presentation, primary_gauge, resolved_groups,
-        text_groups, MacMenuBarIcon, MacMenuBarPresentation, TrayGauge, TrayGroup, TrayMetric,
+        bar_groups, displayed_metrics, format_tokens, mac_menu_bar_presentation, menu_bar_items,
+        primary_gauge, resolved_groups, text_groups, MacMenuBarIcon, MacMenuBarPresentation,
+        MenuBarItem, TrayGauge, TrayGroup, TrayMetric,
     };
     use crate::service::UsageViewState;
 
@@ -538,6 +671,7 @@ mod tests {
     #[test]
     fn text_groups_keep_provider_identity_and_values_without_choosing_a_primary_metric() {
         let metric = |value: &str| TrayMetric {
+            metric_id: String::new(),
             value: value.into(),
             detail: value.into(),
             gauge: None,
@@ -589,6 +723,7 @@ mod tests {
             provider_id: "codex".into(),
             upstream_provider_id: None,
             metrics: vec![TrayMetric {
+                metric_id: String::new(),
                 value: "75%".into(),
                 detail: String::new(),
                 gauge: Some(TrayGauge {
@@ -626,6 +761,7 @@ mod tests {
             provider_id: "codex".into(),
             upstream_provider_id: None,
             metrics: vec![TrayMetric {
+                metric_id: String::new(),
                 value: "75%".into(),
                 detail: String::new(),
                 gauge: Some(TrayGauge {
@@ -654,6 +790,7 @@ mod tests {
             provider_id: "codex".into(),
             upstream_provider_id: None,
             metrics: vec![TrayMetric {
+                metric_id: String::new(),
                 value: "$4".into(),
                 detail: String::new(),
                 gauge: None,
@@ -680,6 +817,7 @@ mod tests {
     #[test]
     fn bars_keep_pinned_quota_metrics_grouped_by_provider() {
         let metric = |value: f64| TrayMetric {
+            metric_id: String::new(),
             value: format!("{value:.0}%"),
             detail: String::new(),
             gauge: Some(TrayGauge {
@@ -694,6 +832,7 @@ mod tests {
                 metrics: vec![
                     metric(10.0),
                     TrayMetric {
+                        metric_id: String::new(),
                         value: "$4".into(),
                         detail: String::new(),
                         gauge: None,
@@ -736,6 +875,7 @@ mod tests {
             provider_id: id.into(),
             upstream_provider_id: None,
             metrics: vec![TrayMetric {
+                metric_id: String::new(),
                 value: "50%".into(),
                 detail: String::new(),
                 gauge: Some(TrayGauge {
@@ -752,6 +892,137 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["sub2api", "sub2api", "sub2api", "sub2api", "sub2api", "codex", "claude", "cursor"]
         );
+    }
+
+    #[test]
+    fn displayed_metrics_follow_what_each_style_draws() {
+        let metric = |id: &str, gauge: bool| TrayMetric {
+            metric_id: id.into(),
+            value: String::new(),
+            detail: String::new(),
+            gauge: gauge.then_some(TrayGauge {
+                display_fraction: 0.5,
+                remaining_fraction: 0.5,
+            }),
+        };
+        let groups = vec![TrayGroup {
+            provider_id: "codex".into(),
+            upstream_provider_id: None,
+            metrics: vec![
+                metric("codex.credits", false),
+                metric("codex.session", true),
+            ],
+        }];
+        let ids = |style| {
+            displayed_metrics(&groups, style)
+                .into_iter()
+                .flat_map(|(_, metrics)| metrics)
+                .map(|metric| metric.metric_id.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(ids(crate::models::MenuBarStyle::Icon).is_empty());
+        assert_eq!(
+            ids(crate::models::MenuBarStyle::Text),
+            ["codex.credits", "codex.session"]
+        );
+        assert_eq!(ids(crate::models::MenuBarStyle::Bars), ["codex.session"]);
+    }
+
+    #[test]
+    fn menu_bar_items_list_each_displayed_pin_once_and_drop_unpinned_metrics() {
+        let quota = |id: &str, label: &str| QuotaWindow {
+            id: id.into(),
+            label: label.into(),
+            used_percent: 25.0,
+            resets_at: None,
+            period_seconds: 18_000,
+            format: crate::models::QuotaFormat::Percent,
+            used_value: None,
+            limit_value: None,
+            unit: None,
+            estimated: false,
+            source_note: None,
+        };
+        let snapshot = ProviderSnapshot {
+            accounts: None,
+            provider_id: "codex".into(),
+            plan: None,
+            quotas: vec![quota("session", "Session"), quota("weekly", "Weekly")],
+            value_metrics: Vec::new(),
+            status_metrics: Vec::new(),
+            notices: Vec::new(),
+            usage_histories: Default::default(),
+            warnings: Vec::new(),
+            refreshed_at: Utc::now(),
+        };
+        let mut multi_account = snapshot.clone();
+        multi_account.accounts = Some(
+            (0..3)
+                .map(|index| crate::models::AccountSnapshot {
+                    id: index.to_string(),
+                    name: format!("Account {index}"),
+                    snapshot: snapshot.clone(),
+                })
+                .collect(),
+        );
+        let catalog = ProviderRegistry::from_definitions(vec![codex::definition()]).unwrap();
+        let mut settings = default_settings(&catalog, &HashSet::from(["codex".to_owned()]));
+        settings
+            .provider_names
+            .insert("codex".into(), "Work Codex".into());
+        let item = |metric_id: &str, label: &str| MenuBarItem {
+            metric_id: metric_id.into(),
+            label: label.into(),
+        };
+
+        for snapshot in [snapshot, multi_account] {
+            let state = UsageViewState {
+                providers: [(
+                    "codex".into(),
+                    ProviderViewState {
+                        snapshot: Some(snapshot),
+                        source: SnapshotSource::Live,
+                        ..ProviderViewState::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                last_full_refresh_at: None,
+                refresh_interval_seconds: crate::policy::REFRESH_INTERVAL.as_secs(),
+            };
+
+            settings.menu_bar_style = crate::models::MenuBarStyle::Icon;
+            let groups = resolved_groups(&state, &settings, &catalog);
+            assert!(menu_bar_items(&groups, &settings, &catalog).is_empty());
+
+            for style in [
+                crate::models::MenuBarStyle::Text,
+                crate::models::MenuBarStyle::Bars,
+            ] {
+                settings.menu_bar_style = style;
+                assert_eq!(
+                    menu_bar_items(&groups, &settings, &catalog),
+                    vec![
+                        item("codex.session", "Work Codex · Session"),
+                        item("codex.weekly", "Work Codex · Weekly"),
+                    ]
+                );
+            }
+
+            let mut hidden = settings.clone();
+            hidden.providers[0]
+                .metrics
+                .iter_mut()
+                .find(|metric| metric.id == "codex.session")
+                .unwrap()
+                .pinned = false;
+            let groups = resolved_groups(&state, &hidden, &catalog);
+            assert_eq!(
+                menu_bar_items(&groups, &hidden, &catalog),
+                vec![item("codex.weekly", "Work Codex · Weekly")]
+            );
+        }
     }
 
     #[test]
@@ -1058,11 +1329,13 @@ mod tests {
             upstream_provider_id: None,
             metrics: vec![
                 TrayMetric {
+                    metric_id: String::new(),
                     value: "10".into(),
                     detail: "Credits 10".into(),
                     gauge: None,
                 },
                 TrayMetric {
+                    metric_id: String::new(),
                     value: "40%".into(),
                     detail: "Session 40% left".into(),
                     gauge: Some(TrayGauge {
@@ -1071,6 +1344,7 @@ mod tests {
                     }),
                 },
                 TrayMetric {
+                    metric_id: String::new(),
                     value: "80%".into(),
                     detail: "Weekly 80% left".into(),
                     gauge: Some(TrayGauge {
