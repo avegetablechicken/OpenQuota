@@ -190,6 +190,25 @@
     await tick();
     document.querySelector<HTMLButtonElement>('.screen-header button[aria-label="Back"]')?.focus();
   }
+  async function openScreen(target: string) {
+    if (target === 'settings') {
+      navigate('settings');
+      return;
+    }
+    navigate('customize');
+    if (target !== 'customize-providers') return;
+    // The tray menu's "Add…" lands on the provider list, where stars are added per provider.
+    await tick();
+    const content = document.querySelector<HTMLElement>('.content');
+    const group = content?.querySelector<HTMLElement>('#customize-group-providers');
+    if (!content || !group) return;
+    const top =
+      group.getBoundingClientRect().top -
+      content.getBoundingClientRect().top +
+      content.scrollTop -
+      parseFloat(getComputedStyle(content).paddingTop);
+    content.scrollTo?.({ top: Math.max(0, top), behavior: reducedMotion ? 'auto' : 'smooth' });
+  }
   function back() {
     if (screen.startsWith('provider:')) navigate('customize');
     else if (screen !== 'dashboard') navigate('dashboard');
@@ -799,9 +818,7 @@
         settingsController.acceptExternalState(state);
       }),
     );
-    listeners.add(
-      onOpenScreen((target) => navigate(target === 'settings' ? 'settings' : 'customize')),
-    );
+    listeners.add(onOpenScreen((target) => void openScreen(target)));
     listeners.add(
       onMainWindowHidden(() => {
         resetTransientUi();

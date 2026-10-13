@@ -214,15 +214,19 @@ fn build_tray_menu(
         let menu_bar_items = if menu_bar_metrics.is_empty() {
             None
         } else {
+            let separator = PredefinedMenuItem::separator(app)?;
+            let add = MenuItem::with_id(app, "menu-bar-add", "Add…", true, None::<&str>)?;
+            let mut items = menu_bar_metrics
+                .iter()
+                .map(|item| item as &dyn IsMenuItem<tauri::Wry>)
+                .collect::<Vec<_>>();
+            items.extend([&separator as &dyn IsMenuItem<tauri::Wry>, &add]);
             Some(Submenu::with_id_and_items(
                 app,
                 "menu-bar-items",
                 "Show in Menu Bar",
                 true,
-                &menu_bar_metrics
-                    .iter()
-                    .map(|item| item as &dyn IsMenuItem<tauri::Wry>)
-                    .collect::<Vec<_>>(),
+                &items,
             )?)
         };
         let settings_item =
@@ -353,6 +357,8 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
             ),
         ),
         "customize" => open_screen(app, "customize"),
+        #[cfg(target_os = "macos")]
+        "menu-bar-add" => open_screen(app, "customize-providers"),
         "settings" => open_screen(app, "settings"),
         "quit" => {
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
