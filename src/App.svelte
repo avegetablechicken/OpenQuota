@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { menuBackdrop } from './lib/menuBackdrop';
   import { onMount, tick } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
@@ -1059,6 +1060,7 @@
               >
               <div
                 class="options-menu__panel"
+                use:menuBackdrop
                 role="menu"
                 aria-label="Options menu"
                 tabindex="-1"
@@ -1094,7 +1096,7 @@
                       ><Icon name="chevron-left" size={12} /></span
                     ><span>Share Screenshot</span></summary
                   >
-                  <div>
+                  <div use:menuBackdrop>
                     {#if shareMenuOpen}
                       {#each settingsState.settings.providers.filter((provider) => provider.enabled && catalog.provider(provider.id)) as provider (provider.id)}
                         <button type="button" onclick={() => shareProvider(provider.id)}
@@ -1650,28 +1652,6 @@
       backdrop-filter: var(--menu-backdrop);
       transform-origin: bottom right;
       animation: menu-in 180ms ease-out both;
-    }
-
-    /* A filter on the parent menu would become the share submenu's backdrop root.
-       Paint/filter a separate layer so both menus can sample the application. */
-    :root.frosted .options-menu > div {
-      background: transparent;
-      -webkit-backdrop-filter: none;
-      backdrop-filter: none;
-      /* Do not retain an opacity animation's backdrop root after opening. */
-      animation-fill-mode: backwards;
-    }
-
-    :root.frosted .options-menu > div::before {
-      position: absolute;
-      z-index: -1;
-      inset: 0;
-      border-radius: inherit;
-      background: var(--menu-surface);
-      -webkit-backdrop-filter: var(--menu-backdrop);
-      backdrop-filter: var(--menu-backdrop);
-      pointer-events: none;
-      content: '';
     }
 
     .options-menu button {

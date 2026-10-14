@@ -234,3 +234,7 @@ export async function onPanelBackdrop(handler: PayloadHandler<PanelBackdrop>) {
   }
   return stop;
 }
+
+export function captureMenuBackdrop() {
+  return invoke<string>('capture_menu_backdrop');
+}

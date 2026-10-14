@@ -3042,6 +3042,7 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "walkdir",
+ "webkit2gtk",
  "webview2-com",
  "windows",
  "windows-sys 0.61.2",

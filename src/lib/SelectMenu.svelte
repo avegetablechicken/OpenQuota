@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { menuBackdrop } from './menuBackdrop';
   import { onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import type { TransitionConfig } from 'svelte/transition';
@@ -194,6 +195,7 @@
       style={`--select-menu-max-height: ${maxListHeight}px; --select-menu-trigger-width: ${triggerWidth}px; top: ${listTop}px; left: ${listLeft}px`}
       bind:this={listbox}
       use:portal
+      use:menuBackdrop
       in:menuReveal
       out:menuDismiss
     >

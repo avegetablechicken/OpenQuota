@@ -149,6 +149,56 @@ pub fn replay(w: &WebviewWindow) {
     }
 }
 
+/// Captures the composited WebView (with the requesting menu hidden), then
+/// applies the same software blur used for the desktop material.
+pub async fn menu_snapshot(window: WebviewWindow) -> Result<String, String> {
+    use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let width = (size.width as f64 / scale / DOWNSCALE).round().max(1.0) as i32;
+    let height = (size.height as f64 / scale / DOWNSCALE).round().max(1.0) as i32;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .with_webview(move |webview| {
+            webview.inner().snapshot(
+                SnapshotRegion::Visible,
+                SnapshotOptions::NONE,
+                None::<&gio::Cancellable>,
+                move |result| {
+                    let image = result
+                        .ok()
+                        .and_then(|surface| gdk::cairo::ImageSurface::try_from(surface).ok())
+                        .and_then(|surface| {
+                            gdk::pixbuf_get_from_surface(
+                                &surface,
+                                0,
+                                0,
+                                surface.width(),
+                                surface.height(),
+                            )
+                        })
+                        .and_then(|pixbuf| pixbuf.scale_simple(width, height, InterpType::Bilinear))
+                        .and_then(|pixbuf| {
+                            frost((pixels(&pixbuf), width as usize, height as usize))
+                        })
+                        .map(|png| {
+                            format!(
+                                "data:image/png;base64,{}",
+                                base64::engine::general_purpose::STANDARD.encode(png)
+                            )
+                        })
+                        .ok_or_else(|| "Menu background could not be captured.".to_owned());
+                    let _ = sender.send(image);
+                },
+            );
+        })
+        .map_err(|e| e.to_string())?;
+    tokio::time::timeout(std::time::Duration::from_secs(3), receiver)
+        .await
+        .map_err(|_| "Menu background capture timed out.".to_owned())?
+        .map_err(|e| e.to_string())?
+}
+
 /// Keeps the backdrop aligned with the panel moved to physical `(x, y)`.
 pub fn follow(w: &WebviewWindow, x: f64, y: f64) {
     let area = CACHE.lock().unwrap().area;
@@ -379,6 +429,29 @@ mod tests {
         let mid = (w / 2) * 3;
         assert!(out[mid] > 0.0 && out[mid] < 255.0);
         assert_eq!(out[(w - 1) * 3], 255.0);
+    }
+
+    #[test]
+    fn frost_encodes_a_png_without_sharp_text_sized_stripes() {
+        use gdk::gdk_pixbuf::PixbufLoader;
+        let (w, h) = (80, 24);
+        let stripes = (0..w * h)
+            .flat_map(|i| [if i % w % 2 == 0 { 0.0 } else { 255.0 }; 3])
+            .collect();
+        let png = frost((stripes, w, h)).unwrap();
+        let loader = PixbufLoader::with_type("png").unwrap();
+        loader.write(&png).unwrap();
+        loader.close().unwrap();
+        let image = loader.pixbuf().unwrap();
+        assert_eq!((image.width(), image.height()), (w as i32, h as i32));
+        let blurred = pixels(&image);
+        for x in 24..56 {
+            let value = blurred[(12 * w + x) * 3];
+            assert!(
+                (value - 127.5).abs() < 2.0,
+                "Unblurred stripe at {x}: {value}"
+            );
+        }
     }
 
     #[test]

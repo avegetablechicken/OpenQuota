@@ -65,6 +65,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gdk = "0.18"
+webkit2gtk = "2"
 secret-service = { version = "5.1", default-features = false, features = ["rt-async-io-crypto-rust"] }
 zbus = "5.13"
 
