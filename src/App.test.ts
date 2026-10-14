@@ -1801,36 +1801,6 @@ describe('OpenQuota dashboard', () => {
     expect(menu).not.toHaveAttribute('open');
   });
 
-  it('opens the provider list from the tray menu and scrolls it into view', async () => {
-    let emitOpenScreen: ((target: string) => void) | undefined;
-    mocks.listen.mockImplementation(
-      (eventName: string, handler: (event: { payload: unknown }) => void) => {
-        if (eventName === 'open-screen') {
-          emitOpenScreen = (target) => handler({ payload: target });
-        }
-        return Promise.resolve(vi.fn());
-      },
-    );
-    const originalScrollTo = HTMLElement.prototype.scrollTo;
-    const scrollTo = vi.fn();
-    HTMLElement.prototype.scrollTo = scrollTo;
-    try {
-      render(App);
-      await screen.findByText('Plus');
-      await waitFor(() => expect(emitOpenScreen).toBeTypeOf('function'));
-
-      emitOpenScreen!('customize-providers');
-
-      expect(await screen.findByRole('region', { name: 'Customize' })).toBeInTheDocument();
-      await waitFor(() =>
-        expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 0 })),
-      );
-      expect(scrollTo.mock.contexts.at(-1)).toHaveClass('content');
-    } finally {
-      HTMLElement.prototype.scrollTo = originalScrollTo;
-    }
-  });
-
   it('resets native Options and Share details when the popup is hidden', async () => {
     let emitMainWindowHidden: (() => void) | undefined;
     mocks.listen.mockImplementation(

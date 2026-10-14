@@ -40,7 +40,10 @@ pub(crate) enum TraySetting {
     UpdateFrequency(UpdateFrequency),
     LaunchAtLoginToggle,
     #[cfg(target_os = "macos")]
-    HideMenuBarMetric(String),
+    MenuBarMetricPinned {
+        metric_id: String,
+        pinned: bool,
+    },
 }
 
 pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
@@ -60,14 +63,28 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
                 TraySetting::UpdateFrequency(value) => next.update_frequency = *value,
                 TraySetting::LaunchAtLoginToggle => next.launch_at_login = !current.launch_at_login,
                 #[cfg(target_os = "macos")]
-                TraySetting::HideMenuBarMetric(metric_id) => {
-                    if let Some(metric) = next
-                        .providers
-                        .iter_mut()
-                        .flat_map(|provider| provider.metrics.iter_mut())
-                        .find(|metric| metric.id == *metric_id)
-                    {
-                        metric.pinned = false;
+                TraySetting::MenuBarMetricPinned { metric_id, pinned } => {
+                    if let Some(provider) = next.providers.iter_mut().find(|provider| {
+                        provider
+                            .metrics
+                            .iter()
+                            .any(|metric| metric.id == *metric_id)
+                    }) {
+                        let pins = provider
+                            .metrics
+                            .iter()
+                            .filter(|metric| metric.pinned)
+                            .count();
+                        // The menu disables extra stars, but a stale menu must not exceed the cap.
+                        if !*pinned || pins < crate::settings::MAX_PINS_PER_PROVIDER {
+                            if let Some(metric) = provider
+                                .metrics
+                                .iter_mut()
+                                .find(|metric| metric.id == *metric_id)
+                            {
+                                metric.pinned = *pinned;
+                            }
+                        }
                     }
                 }
             }

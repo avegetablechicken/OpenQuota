@@ -67,7 +67,107 @@ use crate::{
 
 const TRAY_ID: &str = "openquota-tray";
 #[cfg(target_os = "macos")]
-const MENU_BAR_METRIC_PREFIX: &str = "menu-bar-metric:";
+const MENU_BAR_HIDE_PREFIX: &str = "menu-bar-hide:";
+#[cfg(target_os = "macos")]
+const MENU_BAR_PIN_PREFIX: &str = "menu-bar-pin:";
+#[cfg(target_os = "macos")]
+const MENU_BAR_UNPIN_PREFIX: &str = "menu-bar-unpin:";
+
+/// Maps a tray menu event to the metric whose menu bar pin it sets, and the pin's new state.
+#[cfg(target_os = "macos")]
+fn menu_bar_pin_change(id: &str) -> Option<(&str, bool)> {
+    id.strip_prefix(MENU_BAR_HIDE_PREFIX)
+        .or_else(|| id.strip_prefix(MENU_BAR_UNPIN_PREFIX))
+        .map(|metric_id| (metric_id, false))
+        .or_else(|| {
+            id.strip_prefix(MENU_BAR_PIN_PREFIX)
+                .map(|metric_id| (metric_id, true))
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn build_menu_bar_submenu(
+    app: &AppHandle,
+    menu: tray_presentation::MenuBarMenu,
+) -> Result<Option<Submenu<tauri::Wry>>, Box<dyn std::error::Error>> {
+    // Only shown while the menu bar draws usage; hiding a metric unpins it, so it leaves this list
+    // until it is starred again from Add or the Customize page.
+    if menu.shown.is_empty() {
+        return Ok(None);
+    }
+    let shown = menu
+        .shown
+        .into_iter()
+        .map(|item| {
+            CheckMenuItem::with_id(
+                app,
+                format!("{MENU_BAR_HIDE_PREFIX}{}", item.metric_id),
+                item.label,
+                true,
+                true,
+                None::<&str>,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let providers = menu
+        .providers
+        .into_iter()
+        .map(|provider| {
+            let options = provider
+                .options
+                .into_iter()
+                .map(|option| {
+                    let prefix = if option.pinned {
+                        MENU_BAR_UNPIN_PREFIX
+                    } else {
+                        MENU_BAR_PIN_PREFIX
+                    };
+                    CheckMenuItem::with_id(
+                        app,
+                        format!("{prefix}{}", option.metric_id),
+                        option.label,
+                        option.available,
+                        option.pinned,
+                        None::<&str>,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Submenu::with_id_and_items(
+                app,
+                format!("menu-bar-add:{}", provider.id),
+                provider.name,
+                true,
+                &options
+                    .iter()
+                    .map(|option| option as &dyn IsMenuItem<tauri::Wry>)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let add = Submenu::with_id_and_items(
+        app,
+        "menu-bar-add",
+        "Add",
+        !providers.is_empty(),
+        &providers
+            .iter()
+            .map(|provider| provider as &dyn IsMenuItem<tauri::Wry>)
+            .collect::<Vec<_>>(),
+    )?;
+    let mut items = shown
+        .iter()
+        .map(|item| item as &dyn IsMenuItem<tauri::Wry>)
+        .collect::<Vec<_>>();
+    items.extend([&separator as &dyn IsMenuItem<tauri::Wry>, &add]);
+    Ok(Some(Submenu::with_id_and_items(
+        app,
+        "menu-bar-items",
+        "Show in Menu Bar",
+        true,
+        &items,
+    )?))
+}
 
 fn build_tray_menu(
     app: &AppHandle,
@@ -193,42 +293,12 @@ fn build_tray_menu(
             true,
             &[&openquota_icon, &text_icon, &bars_icon],
         )?;
-        // Only metrics currently drawn in the menu bar are listed; hiding one unpins it, so it
-        // stays out of this menu until it is starred again.
-        let menu_bar_metrics = app
-            .try_state::<tray_presentation::MenuBarItems>()
-            .map(|items| items.get())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|item| {
-                CheckMenuItem::with_id(
-                    app,
-                    format!("{MENU_BAR_METRIC_PREFIX}{}", item.metric_id),
-                    item.label,
-                    true,
-                    true,
-                    None::<&str>,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let menu_bar_items = if menu_bar_metrics.is_empty() {
-            None
-        } else {
-            let separator = PredefinedMenuItem::separator(app)?;
-            let add = MenuItem::with_id(app, "menu-bar-add", "Add…", true, None::<&str>)?;
-            let mut items = menu_bar_metrics
-                .iter()
-                .map(|item| item as &dyn IsMenuItem<tauri::Wry>)
-                .collect::<Vec<_>>();
-            items.extend([&separator as &dyn IsMenuItem<tauri::Wry>, &add]);
-            Some(Submenu::with_id_and_items(
-                app,
-                "menu-bar-items",
-                "Show in Menu Bar",
-                true,
-                &items,
-            )?)
-        };
+        let menu_bar_items = build_menu_bar_submenu(
+            app,
+            app.try_state::<tray_presentation::MenuBarMenuState>()
+                .map(|state| state.get())
+                .unwrap_or_default(),
+        )?;
         let settings_item =
             MenuItem::with_id(app, "settings", "More Settings…", true, Some("CmdOrCtrl+,"))?;
         let second_separator = PredefinedMenuItem::separator(app)?;
@@ -298,75 +368,78 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let tray = TrayIconBuilder::with_id(TRAY_ID).icon(icon).menu(&menu);
     #[cfg(not(target_os = "linux"))]
     let tray = tray.tooltip("OpenQuota").show_menu_on_left_click(false);
-    let tray = tray.on_menu_event(|app, event| match event.id.as_ref() {
-        "icon-style-openquota" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Icon),
-        ),
-        "icon-style-text" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Text),
-        ),
-        "icon-style-bars" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Bars),
-        ),
-        "tray-mode-popup" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::WindowMode(WindowMode::Popup),
-        ),
-        "tray-mode-floating" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::WindowMode(WindowMode::Floating),
-        ),
-        "usage-display-left" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::UsageDisplay(UsageDisplay::Left),
-        ),
-        "usage-display-used" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::UsageDisplay(UsageDisplay::Used),
-        ),
-        "update-frequency-one-minute" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::OneMinute),
-        ),
-        "update-frequency-five-minutes" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::FiveMinutes),
-        ),
-        "update-frequency-adaptive" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::Adaptive),
-        ),
-        "launch-at-login" => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::LaunchAtLoginToggle,
-        ),
-        "open" => {
-            app.state::<PopupDismissGuard>().cancel_pending();
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-                show_main_window(&window);
-            }
-        }
+    let tray = tray.on_menu_event(|app, event| {
         #[cfg(target_os = "macos")]
-        id if id.starts_with(MENU_BAR_METRIC_PREFIX) => commands::settings::apply_tray_setting(
-            app,
-            commands::settings::TraySetting::HideMenuBarMetric(
-                id[MENU_BAR_METRIC_PREFIX.len()..].to_owned(),
+        if let Some((metric_id, pinned)) = menu_bar_pin_change(event.id.as_ref()) {
+            return commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::MenuBarMetricPinned {
+                    metric_id: metric_id.to_owned(),
+                    pinned,
+                },
+            );
+        }
+        match event.id.as_ref() {
+            "icon-style-openquota" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Icon),
             ),
-        ),
-        "customize" => open_screen(app, "customize"),
-        #[cfg(target_os = "macos")]
-        "menu-bar-add" => open_screen(app, "customize-providers"),
-        "settings" => open_screen(app, "settings"),
-        "quit" => {
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-                window::finish_native_panel_resize(&window);
+            "icon-style-text" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Text),
+            ),
+            "icon-style-bars" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Bars),
+            ),
+            "tray-mode-popup" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::WindowMode(WindowMode::Popup),
+            ),
+            "tray-mode-floating" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::WindowMode(WindowMode::Floating),
+            ),
+            "usage-display-left" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::UsageDisplay(UsageDisplay::Left),
+            ),
+            "usage-display-used" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::UsageDisplay(UsageDisplay::Used),
+            ),
+            "update-frequency-one-minute" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::OneMinute),
+            ),
+            "update-frequency-five-minutes" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::FiveMinutes),
+            ),
+            "update-frequency-adaptive" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::UpdateFrequency(UpdateFrequency::Adaptive),
+            ),
+            "launch-at-login" => commands::settings::apply_tray_setting(
+                app,
+                commands::settings::TraySetting::LaunchAtLoginToggle,
+            ),
+            "open" => {
+                app.state::<PopupDismissGuard>().cancel_pending();
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                    show_main_window(&window);
+                }
             }
-            app.exit(0);
+            "customize" => open_screen(app, "customize"),
+            "settings" => open_screen(app, "settings"),
+            "quit" => {
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                    window::finish_native_panel_resize(&window);
+                }
+                app.exit(0);
+            }
+            _ => {}
         }
-        _ => {}
     });
     #[cfg(not(target_os = "linux"))]
     let tray = tray.on_tray_icon_event(|tray, event| {
@@ -624,7 +697,7 @@ pub fn run() {
             );
             app.manage(desktop_integration.clone());
             #[cfg(target_os = "macos")]
-            app.manage(tray_presentation::MenuBarItems::default());
+            app.manage(tray_presentation::MenuBarMenuState::default());
 
             let app_data_dir = app.path().app_data_dir()?;
             let database_path = app_data_dir.join("openquota.db");

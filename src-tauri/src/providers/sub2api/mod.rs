@@ -157,6 +157,27 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
     }
 }
 
+/// Whether a connection's metric can report data for its upstream, matching the Customize page.
+#[cfg(any(target_os = "macos", test))]
+pub fn metric_supported(
+    provider_id: &str,
+    metric_id: &str,
+    upstream_provider_id: Option<&str>,
+) -> bool {
+    let Some(suffix) = metric_id
+        .strip_prefix(provider_id)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return true;
+    };
+    match suffix {
+        "extra" => false,
+        "spark" | "sparkWeekly" | "rateLimitResets" => upstream_provider_id != Some("claude"),
+        "sonnet" | "fable" => upstream_provider_id != Some("codex"),
+        _ => true,
+    }
+}
+
 pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<MetricLayout> {
     let metric = |suffix: &str, enabled: bool, section: MetricSection, pinned: bool| MetricLayout {
         id: format!("{provider_id}.{suffix}"),
@@ -1480,6 +1501,45 @@ mod tests {
             }
         });
         (format!("http://{address}"), receiver, worker)
+    }
+
+    #[test]
+    fn metric_support_follows_the_configured_upstream() {
+        use super::metric_supported;
+
+        assert!(!metric_supported("sub2api@2", "sub2api@2.extra", None));
+        assert!(metric_supported("sub2api@2", "sub2api@2.spark", None));
+        assert!(metric_supported(
+            "sub2api@2",
+            "sub2api@2.spark",
+            Some("codex")
+        ));
+        assert!(!metric_supported(
+            "sub2api@2",
+            "sub2api@2.spark",
+            Some("claude")
+        ));
+        assert!(!metric_supported(
+            "sub2api@2",
+            "sub2api@2.rateLimitResets",
+            Some("claude")
+        ));
+        assert!(metric_supported(
+            "sub2api@2",
+            "sub2api@2.fable",
+            Some("claude")
+        ));
+        assert!(!metric_supported(
+            "sub2api@2",
+            "sub2api@2.fable",
+            Some("codex")
+        ));
+        assert!(metric_supported(
+            "sub2api@2",
+            "sub2api@2.session",
+            Some("codex")
+        ));
+        assert!(metric_supported("sub2api", "sub2api@2.extra", None));
     }
 
     #[test]

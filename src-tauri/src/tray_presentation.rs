@@ -63,29 +63,56 @@ pub(crate) struct MenuBarItem {
     pub(crate) label: String,
 }
 
-/// The menu bar items behind the current tray menu, so the menu is rebuilt only when they change.
+/// A metric an enabled provider can show in the menu bar, offered in the tray menu's Add submenu.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MenuBarOption {
+    pub(crate) metric_id: String,
+    pub(crate) label: String,
+    pub(crate) pinned: bool,
+    /// False once the provider already has its maximum number of pins.
+    pub(crate) available: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MenuBarProvider {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) options: Vec<MenuBarOption>,
+}
+
+/// The menu bar entries of the tray menu: what is drawn now, and what each enabled provider offers.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MenuBarMenu {
+    pub(crate) shown: Vec<MenuBarItem>,
+    pub(crate) providers: Vec<MenuBarProvider>,
+}
+
+/// The menu bar entries behind the current tray menu, so the menu is rebuilt only when they change.
 #[cfg(target_os = "macos")]
 #[derive(Default)]
-pub(crate) struct MenuBarItems(std::sync::Mutex<Vec<MenuBarItem>>);
+pub(crate) struct MenuBarMenuState(std::sync::Mutex<MenuBarMenu>);
 
 #[cfg(target_os = "macos")]
-impl MenuBarItems {
-    pub(crate) fn get(&self) -> Vec<MenuBarItem> {
+impl MenuBarMenuState {
+    pub(crate) fn get(&self) -> MenuBarMenu {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
-    fn replace(&self, items: Vec<MenuBarItem>) -> bool {
+    fn replace(&self, menu: MenuBarMenu) -> bool {
         let mut current = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *current == items {
+        if *current == menu {
             return false;
         }
-        *current = items;
+        *current = menu;
         true
     }
 }
@@ -136,10 +163,10 @@ pub fn update(
             &tray,
             mac_menu_bar_presentation(&groups, settings.menu_bar_style),
         );
-        let items = menu_bar_items(&groups, settings, registry);
+        let menu = menu_bar_menu(&groups, settings, registry);
         if app
-            .try_state::<MenuBarItems>()
-            .is_some_and(|state| state.replace(items))
+            .try_state::<MenuBarMenuState>()
+            .is_some_and(|state| state.replace(menu))
         {
             crate::update_tray_menu(app, settings);
         }
@@ -231,6 +258,66 @@ fn displayed_metrics(
         crate::models::MenuBarStyle::Text => text_metrics(groups),
         crate::models::MenuBarStyle::Bars => bar_metrics(groups),
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn menu_bar_menu(
+    groups: &[TrayGroup],
+    settings: &AppSettings,
+    registry: &ProviderRegistry,
+) -> MenuBarMenu {
+    MenuBarMenu {
+        shown: menu_bar_items(groups, settings, registry),
+        providers: menu_bar_providers(settings, registry),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn menu_bar_providers(settings: &AppSettings, registry: &ProviderRegistry) -> Vec<MenuBarProvider> {
+    settings
+        .providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .filter_map(|provider| {
+            let definition = registry.definition(&provider.id)?;
+            let connection_configured = registry
+                .catalog()
+                .connection_config_provider_ids
+                .contains(&provider.id);
+            let upstream_provider_id = connection_configured
+                .then(|| registry.upstream_provider_id(&provider.id))
+                .flatten();
+            let pins = provider
+                .metrics
+                .iter()
+                .filter(|metric| metric.pinned)
+                .count();
+            let options = provider
+                .metrics
+                .iter()
+                .filter_map(|metric| {
+                    let metric_definition = registry.metric(&metric.id)?;
+                    let supported = !connection_configured
+                        || crate::providers::sub2api::metric_supported(
+                            &provider.id,
+                            &metric.id,
+                            upstream_provider_id,
+                        );
+                    (metric_definition.pinnable && supported).then(|| MenuBarOption {
+                        metric_id: metric.id.clone(),
+                        label: metric_definition.label.clone(),
+                        pinned: metric.pinned,
+                        available: metric.pinned || pins < crate::settings::MAX_PINS_PER_PROVIDER,
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!options.is_empty()).then(|| MenuBarProvider {
+                id: provider.id.clone(),
+                name: provider_name(registry, settings, definition),
+                options,
+            })
+        })
+        .collect()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -633,8 +720,8 @@ mod tests {
 
     use super::{
         bar_groups, displayed_metrics, format_tokens, mac_menu_bar_presentation, menu_bar_items,
-        primary_gauge, resolved_groups, text_groups, MacMenuBarIcon, MacMenuBarPresentation,
-        MenuBarItem, TrayGauge, TrayGroup, TrayMetric,
+        menu_bar_providers, primary_gauge, resolved_groups, text_groups, MacMenuBarIcon,
+        MacMenuBarPresentation, MenuBarItem, TrayGauge, TrayGroup, TrayMetric,
     };
     use crate::service::UsageViewState;
 
@@ -1023,6 +1110,55 @@ mod tests {
                 vec![item("codex.weekly", "Work Codex · Weekly")]
             );
         }
+    }
+
+    #[test]
+    fn add_menu_offers_pinnable_metrics_of_enabled_providers_within_the_pin_cap() {
+        let catalog =
+            ProviderRegistry::from_definitions(vec![codex::definition(), cursor::definition()])
+                .unwrap();
+        let mut settings = default_settings(&catalog, &HashSet::from(["codex".to_owned()]));
+        settings
+            .provider_names
+            .insert("codex".into(), "Work Codex".into());
+        let pinnable = codex::definition()
+            .metrics
+            .into_iter()
+            .filter(|metric| metric.pinnable)
+            .map(|metric| metric.id)
+            .collect::<Vec<_>>();
+
+        let providers = menu_bar_providers(&settings, &catalog);
+        assert_eq!(providers.len(), 1, "disabled providers are not offered");
+        assert_eq!(providers[0].id, "codex");
+        assert_eq!(providers[0].name, "Work Codex");
+        assert_eq!(
+            providers[0]
+                .options
+                .iter()
+                .map(|option| option.metric_id.clone())
+                .collect::<Vec<_>>(),
+            pinnable
+        );
+        let session = &providers[0].options[0];
+        assert_eq!(session.metric_id, "codex.session");
+        assert_eq!(session.label, "Session");
+        assert!(session.pinned && session.available);
+        assert!(providers[0]
+            .options
+            .iter()
+            .filter(|option| !option.pinned)
+            .all(|option| !option.available));
+
+        settings.providers[0]
+            .metrics
+            .iter_mut()
+            .find(|metric| metric.id == "codex.session")
+            .unwrap()
+            .pinned = false;
+        let providers = menu_bar_providers(&settings, &catalog);
+        assert!(providers[0].options.iter().all(|option| option.available));
+        assert!(!providers[0].options[0].pinned);
     }
 
     #[test]
