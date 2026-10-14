@@ -92,6 +92,7 @@ struct Cache {
     /// Set while the backdrop shows the wallpaper rendered from this source.
     wallpaper: Option<Option<Source>>,
     image: Option<Vec<u8>>,
+    position: (f64, f64),
 }
 
 static COMPOSITED: AtomicBool = AtomicBool::new(false);
@@ -110,6 +111,7 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     },
     wallpaper: None,
     image: None,
+    position: (0.0, 0.0),
 });
 
 /// Renders the backdrop for a panel about to appear at physical `(x, y)` on
@@ -144,6 +146,7 @@ pub fn capture(w: &WebviewWindow, monitor: &Monitor, x: f64, y: f64, width: f64)
     if let Some(image) = &image {
         cache.image = Some(image.clone());
     }
+    cache.position = (x, y);
     emit(w, &cache.area, x, y, image);
 }
 
@@ -151,23 +154,22 @@ pub fn capture(w: &WebviewWindow, monitor: &Monitor, x: f64, y: f64, width: f64)
 pub fn replay(w: &WebviewWindow) {
     let cache = CACHE.lock().unwrap();
     if cache.area.scale > 0.0 {
-        if let Ok(position) = w.outer_position() {
-            emit(
-                w,
-                &cache.area,
-                position.x as f64,
-                position.y as f64,
-                cache.image.clone(),
-            );
-        }
+        emit(
+            w,
+            &cache.area,
+            cache.position.0,
+            cache.position.1,
+            cache.image.clone(),
+        );
     }
 }
 
 /// Keeps the backdrop aligned with the panel moved to physical `(x, y)`.
 pub fn follow(w: &WebviewWindow, x: f64, y: f64) {
-    let area = CACHE.lock().unwrap().area;
-    if area.scale > 0.0 {
-        emit(w, &area, x, y, None);
+    let mut cache = CACHE.lock().unwrap();
+    if cache.area.scale > 0.0 {
+        cache.position = (x, y);
+        emit(w, &cache.area, x, y, None);
     }
 }
 

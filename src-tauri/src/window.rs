@@ -13,6 +13,7 @@ use tauri::{
     webview::Color, AppHandle, Emitter, LogicalSize, Manager, Theme, WebviewWindow, Window,
     WindowEvent,
 };
+#[cfg(not(target_os = "linux"))]
 use tauri_plugin_positioner::{Position, WindowExt};
 
 use crate::{
@@ -287,66 +288,135 @@ pub fn activate_existing_instance(app: &AppHandle) {
         return;
     }
 
-    crate::webview_memory::set_inactive(&window, false);
-    let _ = window.unminimize();
-    prepare_panel_backdrop(&window);
-    let _ = window.show();
-    let _ = window.set_focus();
-}
-
-fn position_popup(window: &WebviewWindow) {
-    if cfg!(target_os = "linux") {
-        let _ = window.center();
-    } else {
-        let _ = window
-            .as_ref()
-            .window()
-            .move_window_constrained(Position::TrayCenter);
+    #[cfg(target_os = "linux")]
+    let _ = show_linux_panel(&window, true);
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::webview_memory::set_inactive(&window, false);
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
     }
 }
 
-fn prepare_panel_backdrop(window: &WebviewWindow) {
-    #[cfg(target_os = "linux")]
-    if let (Ok(Some(monitor)), Ok(position), Ok(size)) = (
-        window.current_monitor(),
-        window.outer_position(),
-        window.outer_size(),
-    ) {
-        if window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false) {
-            crate::backdrop::follow(window, position.x as f64, position.y as f64);
+#[cfg(not(target_os = "linux"))]
+fn position_popup(window: &WebviewWindow) {
+    let _ = window
+        .as_ref()
+        .window()
+        .move_window_constrained(Position::TrayCenter);
+}
+
+#[cfg(target_os = "linux")]
+fn linux_panel_layout(
+    work: &tauri::PhysicalRect<i32, u32>,
+    scale: f64,
+    previous: tauri::PhysicalPosition<i32>,
+    preferred_height: f64,
+    center: bool,
+) -> (tauri::PhysicalPosition<i32>, LogicalSize<f64>) {
+    let maximum = (f64::from(work.size.height) * PANEL_SCREEN_FRACTION / scale)
+        .floor()
+        .max(1.0);
+    let minimum = f64::from(PANEL_MIN_HEIGHT).min(maximum);
+    let size = LogicalSize::new(PANEL_WIDTH, preferred_height.clamp(minimum, maximum));
+    let physical = size.to_physical::<u32>(scale);
+    let position = |start: i32, available: u32, extent: u32, previous: i32| {
+        let room = i64::from(available.saturating_sub(extent));
+        let start = i64::from(start);
+        let value = if center {
+            start + room / 2
+        } else {
+            i64::from(previous).clamp(start, start + room)
+        };
+        value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    (
+        tauri::PhysicalPosition::new(
+            position(work.position.x, work.size.width, physical.width, previous.x),
+            position(
+                work.position.y,
+                work.size.height,
+                physical.height,
+                previous.y,
+            ),
+        ),
+        size,
+    )
+}
+
+/// GTK moves/resizes are queued. Before the first configure event Tao's outer
+/// size is not initialized to the window size. Plan once from the known panel
+/// width and logical height, and use that same rectangle for placement/capture.
+#[cfg(target_os = "linux")]
+pub(crate) fn show_linux_panel(window: &WebviewWindow, center: bool) -> tauri::Result<()> {
+    crate::webview_memory::set_inactive(window, false);
+    let monitor = window.current_monitor()?.or(window.primary_monitor()?);
+    if let Some(monitor) = monitor {
+        let scale = monitor.scale_factor();
+        let height = window
+            .app_handle()
+            .try_state::<Arc<PanelResizeSession>>()
+            .and_then(|session| session.saved_height())
+            .map(f64::from)
+            .unwrap_or(f64::from(window.inner_size()?.height) / window.scale_factor()?);
+        let (position, size) = linux_panel_layout(
+            monitor.work_area(),
+            scale,
+            window.outer_position()?,
+            height,
+            center,
+        );
+        let maximum = (f64::from(monitor.work_area().size.height) * PANEL_SCREEN_FRACTION / scale)
+            .floor()
+            .max(1.0);
+        window.set_max_size(Some(LogicalSize::new(PANEL_WIDTH, maximum)))?;
+        window.set_min_size(Some(LogicalSize::new(
+            PANEL_WIDTH,
+            f64::from(PANEL_MIN_HEIGHT).min(maximum),
+        )))?;
+        window.set_size(size)?;
+        window.set_position(position)?;
+        if window.is_visible()? && !window.is_minimized()? {
+            crate::backdrop::follow(window, f64::from(position.x), f64::from(position.y));
         } else {
             crate::backdrop::capture(
                 window,
                 &monitor,
-                position.x as f64,
-                position.y as f64,
-                size.width as f64,
+                f64::from(position.x),
+                f64::from(position.y),
+                PANEL_WIDTH * scale,
             );
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = window;
+    window.unminimize()?;
+    window.show()?;
+    window.set_focus()
 }
 
 pub fn show_main_window(window: &WebviewWindow) {
     finish_native_panel_resize(window);
-    crate::webview_memory::set_inactive(window, false);
-    if window
+    let floating = window
         .app_handle()
         .state::<DesktopIntegration>()
-        .is_floating()
-    {
-        let _ = window.unminimize();
-        let _ = restore_manual_panel_height(window);
-    } else {
-        // Restore the height first: macOS applies moves asynchronously, so restoring afterwards
-        // would read the pre-move position and queue it after the tray anchor.
-        let _ = restore_manual_panel_height(window);
-        position_popup(window);
+        .is_floating();
+    #[cfg(target_os = "linux")]
+    if let Err(error) = show_linux_panel(window, !floating) {
+        crate::app_warn!("window", "panel could not be shown: {error}");
     }
-    prepare_panel_backdrop(window);
-    let _ = window.show();
-    let _ = window.set_focus();
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::webview_memory::set_inactive(window, false);
+        if floating {
+            let _ = window.unminimize();
+            let _ = restore_manual_panel_height(window);
+        } else {
+            let _ = restore_manual_panel_height(window);
+            position_popup(window);
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 fn set_window_chrome(window: &WebviewWindow, floating: bool) -> tauri::Result<()> {
@@ -381,6 +451,10 @@ pub fn apply_window_mode(
         .app_handle()
         .state::<PopupDismissGuard>()
         .cancel_pending();
+    #[cfg(target_os = "linux")]
+    let result = show_linux_panel(window, !floating || center_floating)
+        .map_err(|_| "OpenQuota window could not be shown.".to_owned());
+    #[cfg(not(target_os = "linux"))]
     let result = {
         crate::webview_memory::set_inactive(window, false);
         let _ = window.unminimize();
@@ -392,7 +466,6 @@ pub fn apply_window_mode(
         } else {
             position_popup(window);
         }
-        prepare_panel_backdrop(window);
         window
             .show()
             .and_then(|_| window.set_focus())
@@ -578,6 +651,7 @@ fn configure_panel_size_constraints(window: &WebviewWindow) -> Result<u32, Strin
     Ok(maximum)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn restore_manual_panel_height(window: &WebviewWindow) -> Result<(), String> {
     let maximum = panel_maximum_height(window)?;
     let minimum = PANEL_MIN_HEIGHT.min(maximum);
@@ -875,6 +949,58 @@ mod tests {
     use crate::models::ThemePreference;
     use crate::storage::Storage;
     use tauri::Theme;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_first_show_and_reopens_share_the_same_capture_rectangle() {
+        let work = tauri::PhysicalRect {
+            position: tauri::PhysicalPosition::new(0, 48),
+            size: tauri::PhysicalSize::new(3840, 2112),
+        };
+        // Before GTK's first configure, outer geometry can contain zeros or the
+        // previous origin. None of those values may determine the capture width.
+        for previous in [(0, 0), (1920, 264), (1600, 264)] {
+            let (position, size) = super::linux_panel_layout(
+                &work,
+                2.0,
+                tauri::PhysicalPosition::new(previous.0, previous.1),
+                800.0,
+                true,
+            );
+            assert_eq!(position, tauri::PhysicalPosition::new(1600, 304));
+            assert_eq!(
+                size.to_physical::<u32>(2.0),
+                tauri::PhysicalSize::new(640, 1600)
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_layout_clamps_saved_height_and_keeps_floating_position() {
+        let work = tauri::PhysicalRect {
+            position: tauri::PhysicalPosition::new(-1920, 40),
+            size: tauri::PhysicalSize::new(1920, 1040),
+        };
+        let (position, size) = super::linux_panel_layout(
+            &work,
+            1.0,
+            tauri::PhysicalPosition::new(-1800, 100),
+            2000.0,
+            false,
+        );
+        assert_eq!(position, tauri::PhysicalPosition::new(-1800, 100));
+        assert_eq!(size.height, 884.0);
+        let (position, size) = super::linux_panel_layout(
+            &work,
+            1.0,
+            tauri::PhysicalPosition::new(0, 2000),
+            1.0,
+            false,
+        );
+        assert_eq!(position, tauri::PhysicalPosition::new(-320, 840));
+        assert_eq!(size.height, 240.0);
+    }
 
     #[test]
     fn a_real_resize_owns_the_height_until_automatic_mode_is_restored() {

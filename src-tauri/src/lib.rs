@@ -472,8 +472,16 @@ fn show_standalone_window_fallback(window: &tauri::WebviewWindow) {
     let _ = window.set_resizable(false);
     let _ = window.set_skip_taskbar(false);
     let _ = window.set_always_on_top(false);
-    let _ = window.center();
-    show_main_window(window);
+    #[cfg(target_os = "linux")]
+    {
+        window::finish_native_panel_resize(window);
+        let _ = window::show_linux_panel(window, true);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window.center();
+        show_main_window(window);
+    }
 }
 
 #[cfg(target_os = "linux")]
