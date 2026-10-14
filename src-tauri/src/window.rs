@@ -315,8 +315,10 @@ pub fn show_main_window(window: &WebviewWindow) {
         let _ = window.unminimize();
         let _ = restore_manual_panel_height(window);
     } else {
-        position_popup(window);
+        // Restore the height first: macOS applies moves asynchronously, so restoring afterwards
+        // would read the pre-move position and queue it after the tray anchor.
         let _ = restore_manual_panel_height(window);
+        position_popup(window);
     }
     let _ = window.show();
     let _ = window.set_focus();
@@ -357,6 +359,7 @@ pub fn apply_window_mode(
     let result = {
         crate::webview_memory::set_inactive(window, false);
         let _ = window.unminimize();
+        let _ = restore_manual_panel_height(window);
         if floating {
             if center_floating {
                 let _ = window.center();
@@ -364,7 +367,6 @@ pub fn apply_window_mode(
         } else {
             position_popup(window);
         }
-        let _ = restore_manual_panel_height(window);
         window
             .show()
             .and_then(|_| window.set_focus())
