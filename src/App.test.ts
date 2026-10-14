@@ -51,6 +51,7 @@ function mockInvoke(
   catalog: ProviderCatalog = providerCatalog,
 ) {
   mocks.invoke.mockImplementation((command: string, args?: InvokeArgs) => {
+    if (command === 'replay_panel_backdrop') return Promise.resolve();
     if (command === 'get_bootstrap_state') {
       return Promise.all([
         implementation('get_usage_state', args),
@@ -1133,6 +1134,41 @@ describe('OpenQuota dashboard', () => {
       }),
     );
     expect(mocks.invoke).toHaveBeenCalledWith('open_log_folder');
+  });
+
+  it('aligns the frosted backdrop and preserves its image on move events', async () => {
+    render(App);
+    await screen.findByText('Plus');
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('replay_panel_backdrop'));
+    const registration = mocks.listen.mock.calls.find(([name]) => name === 'panel-backdrop');
+    expect(registration).toBeDefined();
+    const receive = registration![1];
+    const root = document.documentElement;
+    const payload = {
+      x: 80,
+      y: 100,
+      width: 480,
+      height: 1080,
+      image: 'data:image/png;base64,AAAA',
+    };
+    try {
+      receive({ payload });
+      expect(root.classList.contains('frosted')).toBe(true);
+      expect(root.style.getPropertyValue('--backdrop-position')).toBe('-80px -100px');
+      expect(root.style.getPropertyValue('--backdrop-size')).toBe('480px 1080px');
+      const image = root.style.getPropertyValue('--backdrop-image');
+      receive({ payload: { ...payload, x: 90, image: null } });
+      expect(root.style.getPropertyValue('--backdrop-position')).toBe('-90px -100px');
+      expect(root.style.getPropertyValue('--backdrop-image')).toBe(image);
+      receive({ payload: { ...payload, image: '' } });
+      expect(root.classList.contains('frosted')).toBe(false);
+      expect(root.style.getPropertyValue('--backdrop-image')).toBe('none');
+    } finally {
+      root.classList.remove('frosted');
+      for (const name of ['--backdrop-image', '--backdrop-position', '--backdrop-size']) {
+        root.style.removeProperty(name);
+      }
+    }
   });
 
   it('shows log action failures inside the Advanced card', async () => {

@@ -207,3 +207,23 @@
     --meter-critical: -apple-system-red;
   }
 }
+
+/* Copool's Linux material, honoring OpenQuota's explicit theme override. */
+:root.frosted {
+  --glass-tint: rgba(236, 236, 236, 0.62);
+  --glass-rim: rgba(255, 255, 255, 0.45);
+  --surface: transparent;
+  --card: var(--card-material);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root.frosted:not([data-theme='light']) {
+    --glass-tint: rgba(36, 36, 38, 0.64);
+    --glass-rim: rgba(255, 255, 255, 0.16);
+  }
+}
+
+:root.frosted[data-theme='dark'] {
+  --glass-tint: rgba(36, 36, 38, 0.64);
+  --glass-rim: rgba(255, 255, 255, 0.16);
+}

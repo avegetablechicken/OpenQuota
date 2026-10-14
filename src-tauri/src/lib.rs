@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+mod backdrop;
 mod child_process;
 mod codex_environment;
 mod commands;
@@ -863,6 +865,7 @@ pub fn run() {
             commands::window::dismiss_main_window,
             commands::window::get_panel_resize_edge,
             commands::window::get_panel_height_mode,
+            commands::window::replay_panel_backdrop,
             commands::window::fit_panel_to_content,
             commands::window::set_panel_height_automatic,
             commands::window::set_panel_height_manual,

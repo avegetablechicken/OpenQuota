@@ -11,6 +11,7 @@
     lockPanelResizeAxis,
     onOpenScreen,
     onMainWindowHidden,
+    onPanelBackdrop,
     onSettingsState,
     onUpdateProgress,
     onUsageState,
@@ -793,6 +794,21 @@
     const listeners = createListenerRegistry(() => {
       settingsError ??= 'OpenQuota event bridge is unavailable.';
     });
+    if (desktopPlatform() === 'linux') {
+      listeners.add(
+        onPanelBackdrop((payload) => {
+          const root = document.documentElement;
+          root.style.setProperty('--backdrop-size', `${payload.width}px ${payload.height}px`);
+          root.style.setProperty('--backdrop-position', `${-payload.x}px ${-payload.y}px`);
+          if (payload.image === null) return;
+          root.style.setProperty(
+            '--backdrop-image',
+            payload.image ? `url("${payload.image}")` : 'none',
+          );
+          root.classList.toggle('frosted', Boolean(payload.image));
+        }),
+      );
+    }
     listeners.add(onUsageState((state) => (viewState = state)));
     listeners.add(
       onSettingsState((state) => {
@@ -1208,6 +1224,15 @@
       background: var(--surface);
       isolation: isolate;
       user-select: none;
+    }
+
+    /* Copool's blurred desktop snapshot and material tint. */
+    :root.frosted .popover {
+      background:
+        linear-gradient(var(--glass-tint), var(--glass-tint)),
+        var(--backdrop-image) var(--backdrop-position) / var(--backdrop-size) no-repeat,
+        var(--tray);
+      box-shadow: inset 0 0 0 0.5px var(--glass-rim);
     }
 
     .floating-chrome {

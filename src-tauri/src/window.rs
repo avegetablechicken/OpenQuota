@@ -289,6 +289,7 @@ pub fn activate_existing_instance(app: &AppHandle) {
 
     crate::webview_memory::set_inactive(&window, false);
     let _ = window.unminimize();
+    prepare_panel_backdrop(&window);
     let _ = window.show();
     let _ = window.set_focus();
 }
@@ -302,6 +303,29 @@ fn position_popup(window: &WebviewWindow) {
             .window()
             .move_window_constrained(Position::TrayCenter);
     }
+}
+
+fn prepare_panel_backdrop(window: &WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    if let (Ok(Some(monitor)), Ok(position), Ok(size)) = (
+        window.current_monitor(),
+        window.outer_position(),
+        window.outer_size(),
+    ) {
+        if window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false) {
+            crate::backdrop::follow(window, position.x as f64, position.y as f64);
+        } else {
+            crate::backdrop::capture(
+                window,
+                &monitor,
+                position.x as f64,
+                position.y as f64,
+                size.width as f64,
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = window;
 }
 
 pub fn show_main_window(window: &WebviewWindow) {
@@ -320,6 +344,7 @@ pub fn show_main_window(window: &WebviewWindow) {
         let _ = restore_manual_panel_height(window);
         position_popup(window);
     }
+    prepare_panel_backdrop(window);
     let _ = window.show();
     let _ = window.set_focus();
 }
@@ -367,6 +392,7 @@ pub fn apply_window_mode(
         } else {
             position_popup(window);
         }
+        prepare_panel_backdrop(window);
         window
             .show()
             .and_then(|_| window.set_focus())
@@ -779,6 +805,12 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
     }
 
     match event {
+        #[cfg(target_os = "linux")]
+        WindowEvent::Moved(position) => {
+            if let Some(webview) = window.app_handle().get_webview_window(MAIN_WINDOW) {
+                crate::backdrop::follow(&webview, position.x as f64, position.y as f64);
+            }
+        }
         WindowEvent::Resized(size) => {
             if let Some(session) = window.app_handle().try_state::<Arc<PanelResizeSession>>() {
                 let scale = window.scale_factor().unwrap_or(1.0);

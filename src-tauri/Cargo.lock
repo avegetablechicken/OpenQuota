@@ -3007,6 +3007,7 @@ dependencies = [
  "dirs 6.0.0",
  "dotenvy",
  "fontdue",
+ "gdk",
  "ipnet",
  "native-tls",
  "notify-rust",

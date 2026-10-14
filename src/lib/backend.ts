@@ -215,3 +215,22 @@ export function onUpdateProgress(handler: PayloadHandler<UpdateProgress>) {
 export function probeProviderProxy(providerId: string, proxy: string) {
   return invoke<ProxyExitLocation>('probe_provider_proxy', { providerId, proxy });
 }
+
+export interface PanelBackdrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  image: string | null;
+}
+
+export async function onPanelBackdrop(handler: PayloadHandler<PanelBackdrop>) {
+  const stop = await onEvent('panel-backdrop', handler);
+  try {
+    await invoke('replay_panel_backdrop');
+  } catch (error) {
+    stop();
+    throw error;
+  }
+  return stop;
+}

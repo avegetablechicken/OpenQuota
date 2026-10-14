@@ -64,6 +64,7 @@ windows = "0.61"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+gdk = "0.18"
 secret-service = { version = "5.1", default-features = false, features = ["rt-async-io-crypto-rust"] }
 zbus = "5.13"
 

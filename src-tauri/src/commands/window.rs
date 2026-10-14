@@ -81,3 +81,13 @@ pub fn quit_app(app: AppHandle) {
     }
     app.exit(0);
 }
+
+#[tauri::command]
+pub fn replay_panel_backdrop(app: AppHandle) {
+    #[cfg(target_os = "linux")]
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        crate::backdrop::replay(&window);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
+}
