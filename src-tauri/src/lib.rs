@@ -1,4 +1,6 @@
 #[cfg(target_os = "linux")]
+mod appearance;
+#[cfg(target_os = "linux")]
 mod backdrop;
 mod child_process;
 mod codex_environment;
@@ -665,6 +667,8 @@ pub(crate) fn autostart_is_enabled(app: &AppHandle) -> Result<bool, ()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
+    appearance::enable_compositing();
+    #[cfg(target_os = "linux")]
     desktop_integration::initialize_x11_threads();
 
     let builder = tauri::Builder::default();
@@ -685,6 +689,8 @@ pub fn run() {
         .manage(PopupDismissGuard::default())
         .manage(updates::UpdateCoordinator::default())
         .setup(|app| {
+            #[cfg(target_os = "linux")]
+            appearance::configure(app)?;
             logging::init(logging::default_log_path(), models::LogLevel::Info);
 
             #[cfg(target_os = "macos")]
@@ -866,7 +872,6 @@ pub fn run() {
             commands::window::get_panel_resize_edge,
             commands::window::get_panel_height_mode,
             commands::window::replay_panel_backdrop,
-            commands::window::capture_menu_backdrop,
             commands::window::fit_panel_to_content,
             commands::window::set_panel_height_automatic,
             commands::window::set_panel_height_manual,

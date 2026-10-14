@@ -1150,21 +1150,24 @@ describe('OpenQuota dashboard', () => {
       width: 480,
       height: 1080,
       image: 'data:image/png;base64,AAAA',
+      composited: true,
     };
     try {
       receive({ payload });
       expect(root.classList.contains('frosted')).toBe(true);
+      expect(root.classList.contains('composited')).toBe(true);
       expect(root.style.getPropertyValue('--backdrop-position')).toBe('-80px -100px');
       expect(root.style.getPropertyValue('--backdrop-size')).toBe('480px 1080px');
       const image = root.style.getPropertyValue('--backdrop-image');
-      receive({ payload: { ...payload, x: 90, image: null } });
+      receive({ payload: { ...payload, x: 90, image: null, composited: false } });
+      expect(root.classList.contains('composited')).toBe(false);
       expect(root.style.getPropertyValue('--backdrop-position')).toBe('-90px -100px');
       expect(root.style.getPropertyValue('--backdrop-image')).toBe(image);
       receive({ payload: { ...payload, image: '' } });
       expect(root.classList.contains('frosted')).toBe(false);
       expect(root.style.getPropertyValue('--backdrop-image')).toBe('none');
     } finally {
-      root.classList.remove('frosted');
+      root.classList.remove('frosted', 'composited');
       for (const name of ['--backdrop-image', '--backdrop-position', '--backdrop-size']) {
         root.style.removeProperty(name);
       }

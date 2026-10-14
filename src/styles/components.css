@@ -422,23 +422,3 @@
     }
   }
 }
-
-/* Software-frosted WebView snapshots include the application itself. These
-   unlayered rules override component material rules, including nested menus. */
-:root .menu-software-backdrop {
-  background: var(--tray);
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-}
-
-:root .menu-software-backdrop.menu-snapshot-pending {
-  opacity: 0 !important;
-}
-
-:root .menu-software-backdrop.menu-snapshot-ready {
-  background:
-    linear-gradient(to bottom, var(--menu-sheen, transparent), transparent 45%),
-    linear-gradient(var(--menu-tint, transparent), var(--menu-tint, transparent)),
-    var(--menu-snapshot-image) var(--menu-snapshot-position) / var(--menu-snapshot-size) no-repeat,
-    var(--tray);
-}

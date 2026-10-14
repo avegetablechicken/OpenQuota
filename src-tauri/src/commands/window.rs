@@ -91,14 +91,3 @@ pub fn replay_panel_backdrop(app: AppHandle) {
     #[cfg(not(target_os = "linux"))]
     let _ = app;
 }
-
-#[tauri::command]
-pub async fn capture_menu_backdrop(window: tauri::WebviewWindow) -> Result<String, String> {
-    #[cfg(target_os = "linux")]
-    return crate::backdrop::menu_snapshot(window).await;
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = window;
-        Err("Software menu backgrounds are only used on Linux.".into())
-    }
-}

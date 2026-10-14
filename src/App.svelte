@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { menuBackdrop } from './lib/menuBackdrop';
   import { onMount, tick } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
@@ -799,6 +798,7 @@
       listeners.add(
         onPanelBackdrop((payload) => {
           const root = document.documentElement;
+          root.classList.toggle('composited', payload.composited);
           root.style.setProperty('--backdrop-size', `${payload.width}px ${payload.height}px`);
           root.style.setProperty('--backdrop-position', `${-payload.x}px ${-payload.y}px`);
           if (payload.image === null) return;
@@ -1060,7 +1060,6 @@
               >
               <div
                 class="options-menu__panel"
-                use:menuBackdrop
                 role="menu"
                 aria-label="Options menu"
                 tabindex="-1"
@@ -1096,7 +1095,7 @@
                       ><Icon name="chevron-left" size={12} /></span
                     ><span>Share Screenshot</span></summary
                   >
-                  <div use:menuBackdrop>
+                  <div>
                     {#if shareMenuOpen}
                       {#each settingsState.settings.providers.filter((provider) => provider.enabled && catalog.provider(provider.id)) as provider (provider.id)}
                         <button type="button" onclick={() => shareProvider(provider.id)}
@@ -1652,6 +1651,27 @@
       backdrop-filter: var(--menu-backdrop);
       transform-origin: bottom right;
       animation: menu-in 180ms ease-out both;
+    }
+
+    /* Unlike Copool's top-level menus, Share is nested here. Keep the parent
+       filter on its paint layer so the submenu can also sample the page. */
+    :root[data-platform='linux'].composited .options-menu > div {
+      background: transparent;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      animation-fill-mode: backwards;
+    }
+
+    :root[data-platform='linux'].composited .options-menu > div::before {
+      position: absolute;
+      z-index: -1;
+      inset: 0;
+      border-radius: inherit;
+      background: var(--menu-surface);
+      -webkit-backdrop-filter: var(--menu-backdrop);
+      backdrop-filter: var(--menu-backdrop);
+      pointer-events: none;
+      content: '';
     }
 
     .options-menu button {

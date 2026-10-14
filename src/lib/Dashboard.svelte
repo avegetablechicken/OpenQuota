@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { menuBackdrop } from './menuBackdrop';
   import { onDestroy, tick } from 'svelte';
   import { flip } from 'svelte/animate';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
@@ -869,7 +868,6 @@
   {#if menuProvider}
     <div
       class="context-menu"
-      use:menuBackdrop
       style={`left:${providerMenu.x}px;top:${providerMenu.y}px`}
       role="menu"
       tabindex="-1"
@@ -918,7 +916,6 @@
   {#if metricProvider && menuMetric}
     <div
       class="context-menu"
-      use:menuBackdrop
       style={`left:${metricMenu.x}px;top:${metricMenu.y}px`}
       role="menu"
       tabindex="-1"

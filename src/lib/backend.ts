@@ -217,6 +217,7 @@ export function probeProviderProxy(providerId: string, proxy: string) {
 }
 
 export interface PanelBackdrop {
+  composited: boolean;
   x: number;
   y: number;
   width: number;
@@ -233,8 +234,4 @@ export async function onPanelBackdrop(handler: PayloadHandler<PanelBackdrop>) {
     throw error;
   }
   return stop;
-}
-
-export function captureMenuBackdrop() {
-  return invoke<string>('capture_menu_backdrop');
 }

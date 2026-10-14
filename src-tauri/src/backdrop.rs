@@ -13,7 +13,13 @@ use gdk::{
     prelude::*,
 };
 use serde::Serialize;
-use std::{sync::Mutex, time::SystemTime};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+    time::SystemTime,
+};
 use tauri::{Emitter, Monitor, WebviewWindow};
 
 /// The backdrop has this fraction of the logical resolution; the blur hides
@@ -76,6 +82,8 @@ struct Payload {
     width: f64,
     height: f64,
     image: Option<String>,
+    /// WebKit composites the page, so `backdrop-filter` blurs within it.
+    composited: bool,
 }
 
 struct Cache {
@@ -84,6 +92,12 @@ struct Cache {
     /// Set while the backdrop shows the wallpaper rendered from this source.
     wallpaper: Option<Option<Source>>,
     image: Option<Vec<u8>>,
+}
+
+static COMPOSITED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_composited(composited: bool) {
+    COMPOSITED.store(composited, Ordering::Relaxed);
 }
 
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
@@ -149,56 +163,6 @@ pub fn replay(w: &WebviewWindow) {
     }
 }
 
-/// Captures the composited WebView (with the requesting menu hidden), then
-/// applies the same software blur used for the desktop material.
-pub async fn menu_snapshot(window: WebviewWindow) -> Result<String, String> {
-    use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
-    let size = window.inner_size().map_err(|e| e.to_string())?;
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    let width = (size.width as f64 / scale / DOWNSCALE).round().max(1.0) as i32;
-    let height = (size.height as f64 / scale / DOWNSCALE).round().max(1.0) as i32;
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    window
-        .with_webview(move |webview| {
-            webview.inner().snapshot(
-                SnapshotRegion::Visible,
-                SnapshotOptions::NONE,
-                None::<&gio::Cancellable>,
-                move |result| {
-                    let image = result
-                        .ok()
-                        .and_then(|surface| gdk::cairo::ImageSurface::try_from(surface).ok())
-                        .and_then(|surface| {
-                            gdk::pixbuf_get_from_surface(
-                                &surface,
-                                0,
-                                0,
-                                surface.width(),
-                                surface.height(),
-                            )
-                        })
-                        .and_then(|pixbuf| pixbuf.scale_simple(width, height, InterpType::Bilinear))
-                        .and_then(|pixbuf| {
-                            frost((pixels(&pixbuf), width as usize, height as usize))
-                        })
-                        .map(|png| {
-                            format!(
-                                "data:image/png;base64,{}",
-                                base64::engine::general_purpose::STANDARD.encode(png)
-                            )
-                        })
-                        .ok_or_else(|| "Menu background could not be captured.".to_owned());
-                    let _ = sender.send(image);
-                },
-            );
-        })
-        .map_err(|e| e.to_string())?;
-    tokio::time::timeout(std::time::Duration::from_secs(3), receiver)
-        .await
-        .map_err(|_| "Menu background capture timed out.".to_owned())?
-        .map_err(|e| e.to_string())?
-}
-
 /// Keeps the backdrop aligned with the panel moved to physical `(x, y)`.
 pub fn follow(w: &WebviewWindow, x: f64, y: f64) {
     let area = CACHE.lock().unwrap().area;
@@ -223,6 +187,7 @@ fn emit(w: &WebviewWindow, area: &Area, x: f64, y: f64, png: Option<Vec<u8>>) {
             width: area.w / area.scale,
             height: area.h / area.scale,
             image,
+            composited: COMPOSITED.load(Ordering::Relaxed),
         },
     );
 }
