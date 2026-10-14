@@ -1652,6 +1652,28 @@
       animation: menu-in 180ms ease-out both;
     }
 
+    /* A filter on the parent menu would become the share submenu's backdrop root.
+       Paint/filter a separate layer so both menus can sample the application. */
+    :root.frosted .options-menu > div {
+      background: transparent;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      /* Do not retain an opacity animation's backdrop root after opening. */
+      animation-fill-mode: backwards;
+    }
+
+    :root.frosted .options-menu > div::before {
+      position: absolute;
+      z-index: -1;
+      inset: 0;
+      border-radius: inherit;
+      background: var(--menu-surface);
+      -webkit-backdrop-filter: var(--menu-backdrop);
+      backdrop-filter: var(--menu-backdrop);
+      pointer-events: none;
+      content: '';
+    }
+
     .options-menu button {
       font-size: 11px;
     }

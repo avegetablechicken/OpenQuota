@@ -212,14 +212,11 @@
 :root.frosted {
   --glass-tint: rgba(236, 236, 236, 0.62);
   --glass-rim: rgba(255, 255, 255, 0.45);
-  /* Copool's menus reuse the blurred screen, fixed to the window, with a denser tint. */
+  /* Blur the composited application beneath menus, including its desktop material. */
   --menu-sheen: rgba(255, 255, 255, 0.5);
   --menu-tint: rgba(246, 246, 246, 0.78);
-  --menu-surface:
-    linear-gradient(to bottom, var(--menu-sheen), transparent 45%),
-    linear-gradient(var(--menu-tint), var(--menu-tint)),
-    var(--backdrop-image) var(--backdrop-position) / var(--backdrop-size) no-repeat fixed,
-    var(--tray);
+  --menu-surface: linear-gradient(to bottom, var(--menu-sheen), transparent 45%), var(--menu-tint);
+  --menu-backdrop: blur(22px) saturate(2.2) brightness(1.06);
   --surface: transparent;
   --card: var(--card-material);
 }
@@ -230,6 +227,7 @@
     --glass-rim: rgba(255, 255, 255, 0.16);
     --menu-sheen: rgba(255, 255, 255, 0.1);
     --menu-tint: rgba(44, 44, 48, 0.8);
+    --menu-backdrop: blur(22px) saturate(2) brightness(0.85);
   }
 }
 
@@ -238,4 +236,5 @@
   --glass-rim: rgba(255, 255, 255, 0.16);
   --menu-sheen: rgba(255, 255, 255, 0.1);
   --menu-tint: rgba(44, 44, 48, 0.8);
+  --menu-backdrop: blur(22px) saturate(2) brightness(0.85);
 }
