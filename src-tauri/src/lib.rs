@@ -25,6 +25,8 @@ mod settings;
 mod storage;
 #[cfg(any(not(target_os = "macos"), test))]
 mod tray_icon;
+#[cfg(all(target_os = "macos", tray_icon_attached_menu))]
+mod tray_menu;
 mod tray_presentation;
 mod updates;
 mod webview_memory;
@@ -358,6 +360,8 @@ pub(crate) fn update_tray_menu(app: &AppHandle, settings: &AppSettings) {
             if tray.set_menu(Some(menu)).is_err() {
                 app_warn!("tray", "tray menu update failed");
             }
+            #[cfg(all(target_os = "macos", tray_icon_attached_menu))]
+            tray_menu::detach(&tray);
         }
         Err(error) => app_warn!("tray", "tray menu could not be rebuilt: {error}"),
     }
@@ -460,8 +464,21 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         ) {
             toggle_main_window(tray.app_handle());
         }
+        #[cfg(all(target_os = "macos", tray_icon_attached_menu))]
+        if matches!(
+            event,
+            TrayIconEvent::Click {
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Down,
+                ..
+            }
+        ) {
+            tray_menu::show(tray);
+        }
     });
-    tray.build(app)?;
+    let _tray = tray.build(app)?;
+    #[cfg(all(target_os = "macos", tray_icon_attached_menu))]
+    tray_menu::detach(&_tray);
     Ok(())
 }
 
