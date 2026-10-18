@@ -24,7 +24,11 @@ Codex.
 ## Sign-in and local data
 
 Sign in to OpenCode Go or use OpenCode locally first. OpenQuota reads OpenCode's local authentication
-file and databases from its data directory. `OPENCODE_DATA_DIR` and `XDG_DATA_HOME` are respected
+data and databases from its data directory. OpenQuota checks `opencode --version`: major versions
+2 and above read only the `credential` table in `opencode.db`; versions below 2 (including 0.x)
+read only `auth.json`. Missing or unreadable database credentials never fall back to the old file.
+If the installed version cannot be determined, credential loading reports an error.
+`OPENCODE_DATA_DIR` and `XDG_DATA_HOME` are respected
 when present.
 
 ## Troubleshooting
