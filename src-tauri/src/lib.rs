@@ -56,11 +56,12 @@ use crate::{
     pacing::NotificationEvaluator,
     pricing::PricingStore,
     providers::{
-        antigravity::AntigravityProvider, claude, codex::reset_claim::CodexResetClaimService,
-        codex::CodexProvider, copilot::CopilotProvider, cursor::CursorProvider,
-        detect_local_credentials, devin::DevinProvider, grok::GrokProvider, kimi::KimiProvider,
-        minimax::MiniMaxProvider, opencode::OpenCodeProvider, openrouter::OpenRouterProvider,
-        sub2api::Sub2ApiProviders, zai::ZaiProvider, ProviderRegistry, UsageProvider,
+        antigravity::AntigravityProvider, claude::ClaudeProvider,
+        codex::reset_claim::CodexResetClaimService, codex::CodexProvider, copilot::CopilotProvider,
+        cursor::CursorProvider, detect_local_credentials, devin::DevinProvider, grok::GrokProvider,
+        kimi::KimiProvider, minimax::MiniMaxProvider, opencode::OpenCodeProvider,
+        openrouter::OpenRouterProvider, sub2api::Sub2ApiProviders, zai::ZaiProvider,
+        ProviderRegistry, UsageProvider,
     },
     storage::Storage,
     window::{
@@ -727,8 +728,9 @@ pub fn run() {
                 app_data_dir.join("sub2api-connections"),
                 storage.clone(),
             ));
-            let mut providers = claude::runtimes(storage.clone(), pricing.clone())?;
-            providers.extend(vec![
+            let mut providers = vec![
+                Arc::new(ClaudeProvider::new(storage.clone(), pricing.clone())?)
+                    as Arc<dyn UsageProvider>,
                 Arc::new(CodexProvider::new(storage.clone(), pricing.clone())?)
                     as Arc<dyn UsageProvider>,
                 Arc::new(CursorProvider::new(pricing.clone())?) as Arc<dyn UsageProvider>,
@@ -748,7 +750,7 @@ pub fn run() {
                     as Arc<dyn UsageProvider>,
                 Arc::new(MiniMaxProvider::new(storage.clone(), pricing.clone())?)
                     as Arc<dyn UsageProvider>,
-            ]);
+            ];
             providers.extend(sub2api.runtimes());
             let registry = Arc::new(ProviderRegistry::new(providers)?);
             let (settings_service, credential_detection_plan) =

@@ -61,28 +61,6 @@ pub fn value(name: &str) -> Option<String> {
     })
 }
 
-/// Extra Claude accounts should not be assembled from incomplete GUI-launch environment facts.
-/// Unit tests that do not initialize the application environment retain the direct-env behavior.
-pub fn claude_identity_facts_reliable() -> bool {
-    identity_facts_reliable(
-        cfg!(target_os = "windows"),
-        process_value("CLAUDE_CONFIG_DIR").is_some(),
-        ENVIRONMENT
-            .get()
-            .map(|environment| environment.launch_snapshot.is_some()),
-    )
-}
-
-fn identity_facts_reliable(
-    windows: bool,
-    process_override_present: bool,
-    initialized_snapshot: Option<bool>,
-) -> bool {
-    windows
-        || process_override_present
-        || initialized_snapshot.is_none_or(|snapshot_present| snapshot_present)
-}
-
 #[cfg(unix)]
 pub fn refresh_for_next_launch(storage: Arc<Storage>) {
     tauri::async_runtime::spawn_blocking(move || {
@@ -170,16 +148,7 @@ fn parse_environment(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{identity_facts_reliable, parse_environment};
-
-    #[test]
-    fn claude_discovery_waits_only_for_a_cold_unix_shell_snapshot() {
-        assert!(identity_facts_reliable(true, false, Some(false)));
-        assert!(identity_facts_reliable(false, true, Some(false)));
-        assert!(identity_facts_reliable(false, false, None));
-        assert!(identity_facts_reliable(false, false, Some(true)));
-        assert!(!identity_facts_reliable(false, false, Some(false)));
-    }
+    use super::parse_environment;
 
     #[test]
     fn parses_only_environment_between_shell_markers() {

@@ -61,6 +61,8 @@ pub struct ClaudeCredentialGeneration {
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub(super) enum ClaudeCredentialScope {
     Standard,
+    /// Lets tests point the provider at an isolated Claude configuration directory.
+    #[cfg(test)]
     ConfigDir {
         path: PathBuf,
         keychain_literal: String,
@@ -369,6 +371,7 @@ fn load_candidates_with_environment(
         }
     }
 
+    #[cfg(test)]
     if !matches!(scope, ClaudeCredentialScope::Standard) {
         return stored;
     }
@@ -503,16 +506,10 @@ fn parse_credentials(bytes: &[u8]) -> Option<ClaudeCredentialsFile> {
     })
 }
 
-pub(super) fn credentials_have_access_token(bytes: &[u8]) -> bool {
-    parse_credentials(bytes)
-        .and_then(|document| document.claude_ai_oauth)
-        .and_then(|oauth| oauth.access_token)
-        .is_some_and(|token| !token.trim().is_empty())
-}
-
 fn credential_path(scope: &ClaudeCredentialScope) -> PathBuf {
     match scope {
         ClaudeCredentialScope::Standard => claude_home(),
+        #[cfg(test)]
         ClaudeCredentialScope::ConfigDir { path, .. } => path.clone(),
     }
     .join(".credentials.json")
@@ -535,6 +532,7 @@ fn keychain_candidates(scope: &ClaudeCredentialScope) -> Vec<(String, String)> {
                 vec![service]
             }
         }
+        #[cfg(test)]
         ClaudeCredentialScope::ConfigDir {
             keychain_literal, ..
         } => vec![scoped_keychain_service_name(keychain_literal)],

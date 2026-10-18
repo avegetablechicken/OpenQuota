@@ -19,14 +19,11 @@ Sign in with Claude Code by running `claude`. OpenQuota reuses the credentials m
 CLI, including `CLAUDE_CONFIG_DIR` when it is set. Refreshed CLI credentials are saved back to the
 same source when possible.
 
-## Multiple accounts
+## Switching accounts
 
-OpenQuota discovers separate Claude Code logins that use custom `CLAUDE_CONFIG_DIR` homes and shows
-each account as its own card with independent limits, plan, and local usage history. Logins belonging
-to the same Claude account are combined automatically.
-
-Account cards can be renamed from Customize or from the dashboard. If a login is removed, its card
-is hidden and returns with its previous customization when the login is detected again.
+OpenQuota shows one Claude card for the login in the active Claude Code configuration directory.
+Signing in to a different account there updates the same card without restarting OpenQuota: its
+layout and proxy stay in place, while the card name and cached usage follow the active account.
 
 Live subscription limits currently require a Claude Code login. On macOS, OpenQuota can recognize
 that Claude Desktop is installed, but it does not reuse Desktop's encrypted session. Run `claude`
@@ -41,15 +38,15 @@ records are not uploaded by OpenQuota.
 
 Claude requests read proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`,
 including lowercase aliases) from the account's `settings.json` `env` object before checking the
-process environment. The default account uses `$CLAUDE_CONFIG_DIR/settings.json`, or
-`~/.claude/settings.json`; discovered accounts use their own configuration directory.
+process environment. The settings file is `$CLAUDE_CONFIG_DIR/settings.json`, or
+`~/.claude/settings.json`.
 Explicit proxy or direct-routing preferences in OpenQuota still take precedence.
 Explicit proxies bypass loopback destinations (`localhost`, `127.0.0.0/8`, and `::1`).
 
 Subscription queries and token refreshes follow Claude Code's OAuth environment variables:
 `CLAUDE_CODE_CUSTOM_OAUTH_URL`, `CLAUDE_CODE_OAUTH_CLIENT_ID`, and the `USER_TYPE=ant` local or
 staging switches (`USE_LOCAL_OAUTH`, `CLAUDE_LOCAL_OAUTH_API_BASE`, `USE_STAGING_OAUTH`). On macOS,
-the matching Claude Code keychain namespace is used, including per-directory accounts. These
+the matching Claude Code keychain namespace is used, including for `CLAUDE_CONFIG_DIR`. These
 variables come from the process environment; on macOS and Linux, all except
 `CLAUDE_CODE_OAUTH_CLIENT_ID` also fall back to the login-shell snapshot saved by a previous
 launch. They are not read from `settings.json`.

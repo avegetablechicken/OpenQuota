@@ -7,10 +7,7 @@ mod mapper;
 
 pub(crate) use mapper::map_sub2api_usage;
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Utc};
 use reqwest::StatusCode;
@@ -26,15 +23,11 @@ use crate::{
 };
 
 pub(crate) fn definition() -> ProviderDefinition {
-    definition_for("claude", "Claude", true)
-}
-
-fn definition_for(id: &str, display_name: &str, fallback_enabled: bool) -> ProviderDefinition {
-    let mut definition = ProviderDefinition {
+    ProviderDefinition {
         id: "claude".into(),
-        display_name: display_name.into(),
+        display_name: "Claude".into(),
         short_name: "Cl".into(),
-        fallback_enabled,
+        fallback_enabled: true,
         local_usage_source_note: Some("From your Claude usage history (estimated)".into()),
         links: vec![
             ProviderLink::new("Status", "https://status.anthropic.com/"),
@@ -113,17 +106,7 @@ fn definition_for(id: &str, display_name: &str, fallback_enabled: bool) -> Provi
                 "M",
             ),
         ],
-    };
-    if id != "claude" {
-        definition.id = id.into();
-        for metric in &mut definition.metrics {
-            if let Some(suffix) = metric.id.strip_prefix("claude.") {
-                metric.id = format!("{id}.{suffix}");
-            }
-            metric.default_pinned = false;
-        }
     }
-    definition
 }
 
 use self::{
@@ -132,7 +115,7 @@ use self::{
         ClaudeCredentialScope,
     },
     client::ClaudeClient,
-    local_usage::{scan_local_usage, SharedUsageSources},
+    local_usage::scan_local_usage,
     mapper::map_usage,
 };
 use crate::providers::log_usage::scan_or_cached_usage;
@@ -155,7 +138,7 @@ pub enum ClaudeError {
     AuthWrite,
     #[error("Claude login changed during refresh. Refresh again.")]
     CredentialsChanged,
-    #[error("The Claude account changed while OpenQuota was running. Restart OpenQuota to reconnect it safely.")]
+    #[error("The Claude account changed while usage was refreshing. Refresh again.")]
     AccountChanged,
     #[error("Claude usage request failed (HTTP {0}).")]
     RequestFailed(u16),
@@ -170,13 +153,8 @@ pub enum ClaudeError {
 }
 
 pub struct ClaudeProvider {
-    definition: ProviderDefinition,
     credential_scope: ClaudeCredentialScope,
     account_identity: Option<String>,
-    log_roots: Vec<PathBuf>,
-    include_standard_logs: bool,
-    include_pi: bool,
-    include_opencode: bool,
     storage: Arc<Storage>,
     pricing: Arc<PricingStore>,
     client: ClaudeClient,
@@ -185,115 +163,25 @@ pub struct ClaudeProvider {
     rate_limited_until: Mutex<Option<chrono::DateTime<Utc>>>,
 }
 
-struct ClaudeRuntimeConfig {
-    definition: ProviderDefinition,
-    credential_scope: ClaudeCredentialScope,
-    account_identity: Option<String>,
-    log_roots: Vec<PathBuf>,
-    include_standard_logs: bool,
-    include_pi: bool,
-    include_opencode: bool,
-}
-
-pub(crate) fn runtimes(
-    storage: Arc<Storage>,
-    pricing: Arc<PricingStore>,
-) -> Result<Vec<Arc<dyn crate::providers::UsageProvider>>, ClaudeError> {
-    let discovery = accounts::discover(&storage)?;
-    let client = ClaudeClient::new()?;
-    Ok(runtime_configs(discovery)
-        .into_iter()
-        .map(|config| {
-            let client = client.for_provider(
-                &config.definition.id,
-                config::settings_path_for_scope(&config.credential_scope),
-            );
-            Arc::new(ClaudeProvider::new_scoped(
-                config,
-                storage.clone(),
-                pricing.clone(),
-                client.clone(),
-            )) as Arc<dyn crate::providers::UsageProvider>
-        })
-        .collect())
-}
-
-fn runtime_configs(discovery: accounts::ClaudeAccountDiscovery) -> Vec<ClaudeRuntimeConfig> {
-    let mut configs = Vec::new();
-    // A bare-ID account that moved to a config dir is still the `claude` card, so it replaces the
-    // empty default-login placeholder instead of colliding with a second runtime of the same ID.
-    let has_bare_scoped_account = discovery
-        .accounts
-        .iter()
-        .any(|account| account.id == "claude");
-    if let Some(account) = discovery.default_account {
-        configs.push(ClaudeRuntimeConfig {
-            definition: definition_for(&account.id, &account.display_name, true),
-            credential_scope: ClaudeCredentialScope::Standard,
-            account_identity: Some(account.identity),
-            log_roots: account.log_roots,
-            include_standard_logs: true,
-            include_pi: true,
-            include_opencode: true,
-        });
-    } else if !has_bare_scoped_account {
-        configs.push(ClaudeRuntimeConfig {
-            definition: definition(),
-            credential_scope: ClaudeCredentialScope::Standard,
-            account_identity: None,
-            log_roots: Vec::new(),
-            include_standard_logs: true,
-            include_pi: true,
-            include_opencode: true,
-        });
-    }
-    for account in discovery.accounts {
-        configs.push(ClaudeRuntimeConfig {
-            definition: definition_for(&account.id, &account.display_name, false),
-            credential_scope: account.credential_scope,
-            account_identity: Some(account.identity),
-            log_roots: account.log_roots,
-            include_standard_logs: false,
-            include_pi: false,
-            include_opencode: false,
-        });
-    }
-    configs
-}
-
 impl ClaudeProvider {
-    #[cfg(test)]
     pub fn new(storage: Arc<Storage>, pricing: Arc<PricingStore>) -> Result<Self, ClaudeError> {
-        Ok(Self::new_scoped(
-            ClaudeRuntimeConfig {
-                definition: definition(),
-                credential_scope: ClaudeCredentialScope::Standard,
-                account_identity: None,
-                log_roots: Vec::new(),
-                include_standard_logs: true,
-                include_pi: true,
-                include_opencode: true,
-            },
-            storage,
-            pricing,
-            ClaudeClient::new()?,
-        ))
+        let client = ClaudeClient::new()?.for_provider("claude", config::settings_path());
+        let provider = Self::with_scope(ClaudeCredentialScope::Standard, storage, pricing, client);
+        if let Some(identity) = provider.account_identity.as_deref() {
+            crate::providers::remember_default_account(&provider.storage, "claude", identity)?;
+        }
+        Ok(provider)
     }
 
-    fn new_scoped(
-        config: ClaudeRuntimeConfig,
+    fn with_scope(
+        credential_scope: ClaudeCredentialScope,
         storage: Arc<Storage>,
         pricing: Arc<PricingStore>,
         client: ClaudeClient,
     ) -> Self {
         Self {
-            definition: config.definition,
-            credential_scope: config.credential_scope,
-            account_identity: config.account_identity,
-            log_roots: config.log_roots,
-            include_standard_logs: config.include_standard_logs,
-            include_pi: config.include_pi,
-            include_opencode: config.include_opencode,
+            account_identity: accounts::identity_for_scope(&credential_scope),
+            credential_scope,
             storage,
             pricing,
             client,
@@ -304,10 +192,10 @@ impl ClaudeProvider {
     }
 
     fn provider_id(&self) -> &str {
-        &self.definition.id
+        "claude"
     }
 
-    fn refresh_inner(&self) -> Result<ProviderSnapshot, ClaudeError> {
+    fn refresh_inner(&self) -> Result<(ProviderSnapshot, Option<String>), ClaudeError> {
         let config = oauth_config()?;
         self.refresh_inner_with_config(&config)
     }
@@ -315,10 +203,11 @@ impl ClaudeProvider {
     fn refresh_inner_with_config(
         &self,
         config: &auth::ClaudeOAuthConfig,
-    ) -> Result<ProviderSnapshot, ClaudeError> {
+    ) -> Result<(ProviderSnapshot, Option<String>), ClaudeError> {
         let mut credential_reloads_remaining = 1;
         loop {
-            match self.refresh_inner_once(config) {
+            let identity = accounts::identity_for_scope(&self.credential_scope);
+            match self.refresh_inner_once(config, identity.as_deref()) {
                 Err(ClaudeError::CredentialsChanged) if credential_reloads_remaining > 0 => {
                     credential_reloads_remaining -= 1;
                     crate::app_info!(
@@ -327,8 +216,12 @@ impl ClaudeProvider {
                     );
                 }
                 Ok(snapshot) => {
-                    self.ensure_account_identity_current()?;
-                    return Ok(snapshot);
+                    // A login switched mid-refresh must not publish one account's usage under
+                    // the identity of another.
+                    if accounts::identity_for_scope(&self.credential_scope) != identity {
+                        return Err(ClaudeError::AccountChanged);
+                    }
+                    return Ok((snapshot, identity));
                 }
                 Err(error) => return Err(error),
             }
@@ -338,8 +231,8 @@ impl ClaudeProvider {
     fn refresh_inner_once(
         &self,
         config: &auth::ClaudeOAuthConfig,
+        identity: Option<&str>,
     ) -> Result<ProviderSnapshot, ClaudeError> {
-        self.ensure_account_identity_current()?;
         let candidates = load_candidates(&self.credential_scope);
         if candidates.is_empty() {
             crate::app_info!("auth:claude", "no reusable CLI credentials found");
@@ -369,6 +262,7 @@ impl ClaudeProvider {
                 now,
                 &pricing,
                 &mut credential_generation,
+                identity,
             ) {
                 Ok(snapshot) => return Ok(snapshot),
                 Err(error @ (ClaudeError::SessionExpired | ClaudeError::TokenExpired)) => {
@@ -380,15 +274,6 @@ impl ClaudeProvider {
         Err(last_auth_error.unwrap_or(ClaudeError::NotLoggedIn))
     }
 
-    fn ensure_account_identity_current(&self) -> Result<(), ClaudeError> {
-        let Some(expected) = self.account_identity.as_deref() else {
-            return Ok(());
-        };
-        (accounts::identity_for_scope(&self.credential_scope).as_deref() == Some(expected))
-            .then_some(())
-            .ok_or(ClaudeError::AccountChanged)
-    }
-
     fn refresh_candidate(
         &self,
         credential: &mut ClaudeCredential,
@@ -396,27 +281,17 @@ impl ClaudeProvider {
         now: chrono::DateTime<Utc>,
         pricing: &ModelPricing,
         credential_generation: &mut ClaudeCredentialGeneration,
+        identity: Option<&str>,
     ) -> Result<ProviderSnapshot, ClaudeError> {
         let mut warnings = Vec::new();
         let usage = scan_or_cached_usage(
             &self.storage,
             self.provider_id(),
-            crate::providers::UsageProvider::cache_identity(self),
+            identity
+                .map(crate::providers::CacheIdentity::Resolved)
+                .unwrap_or(crate::providers::CacheIdentity::Unresolved),
             "Claude",
-            || {
-                scan_local_usage(
-                    &self.storage,
-                    now,
-                    pricing,
-                    self.provider_id(),
-                    &self.log_roots,
-                    self.include_standard_logs,
-                    SharedUsageSources {
-                        include_pi: self.include_pi,
-                        include_opencode: self.include_opencode,
-                    },
-                )
-            },
+            || scan_local_usage(&self.storage, now, pricing),
             &mut warnings,
         );
 
@@ -702,9 +577,29 @@ fn plan_name(credential: &ClaudeCredential) -> Option<String> {
     })
 }
 
+fn provider_error(error: ClaudeError) -> crate::providers::ProviderError {
+    use crate::models::ProviderErrorKind as Kind;
+
+    let kind = match error {
+        ClaudeError::NotLoggedIn
+        | ClaudeError::DesktopAppOnly
+        | ClaudeError::SessionExpired
+        | ClaudeError::TokenExpired
+        | ClaudeError::CredentialsChanged
+        | ClaudeError::AccountChanged => Kind::Authentication,
+        ClaudeError::InvalidOAuthUrl | ClaudeError::InvalidResponse => Kind::InvalidResponse,
+        ClaudeError::AuthWrite => Kind::CredentialStorage,
+        ClaudeError::RequestFailed(429) => Kind::RateLimited,
+        ClaudeError::RequestFailed(_) | ClaudeError::ConnectionFailed => Kind::Network,
+        ClaudeError::LocalUsage => Kind::LocalData,
+        ClaudeError::AccountStore(_) => Kind::Internal,
+    };
+    crate::providers::ProviderError::from_display(kind, error)
+}
+
 impl crate::providers::UsageProvider for ClaudeProvider {
     fn definition(&self) -> ProviderDefinition {
-        self.definition.clone()
+        definition()
     }
 
     fn has_local_credentials(&self) -> bool {
@@ -727,26 +622,23 @@ impl crate::providers::UsageProvider for ClaudeProvider {
     }
 
     fn refresh(&self) -> Result<ProviderSnapshot, crate::providers::ProviderError> {
-        self.refresh_inner().map_err(|error| {
-            use crate::models::ProviderErrorKind as Kind;
+        self.refresh_inner()
+            .map(|(snapshot, _)| snapshot)
+            .map_err(provider_error)
+    }
 
-            let kind = match error {
-                ClaudeError::NotLoggedIn
-                | ClaudeError::DesktopAppOnly
-                | ClaudeError::SessionExpired
-                | ClaudeError::TokenExpired
-                | ClaudeError::CredentialsChanged
-                | ClaudeError::AccountChanged => Kind::Authentication,
-                ClaudeError::InvalidOAuthUrl | ClaudeError::InvalidResponse => {
-                    Kind::InvalidResponse
-                }
-                ClaudeError::AuthWrite => Kind::CredentialStorage,
-                ClaudeError::RequestFailed(429) => Kind::RateLimited,
-                ClaudeError::RequestFailed(_) | ClaudeError::ConnectionFailed => Kind::Network,
-                ClaudeError::LocalUsage => Kind::LocalData,
-                ClaudeError::AccountStore(_) => Kind::Internal,
-            };
-            crate::providers::ProviderError::from_display(kind, error)
+    fn refresh_for_service(
+        &self,
+    ) -> Result<crate::providers::ProviderRefresh, crate::providers::ProviderError> {
+        let (snapshot, identity) = self.refresh_inner().map_err(provider_error)?;
+        Ok(crate::providers::ProviderRefresh {
+            snapshot,
+            cache_identity: identity.clone(),
+            account: identity.map(|identity| crate::providers::AccountRefresh {
+                family: "claude",
+                provider_id: "claude",
+                identity,
+            }),
         })
     }
 }
@@ -772,11 +664,9 @@ mod tests {
     };
 
     use super::{
-        accounts::{self, ClaudeAccount, ClaudeAccountDiscovery},
         auth::{ClaudeCredentialScope, ClaudeOAuthConfig},
         client::ClaudeClient,
-        definition, definition_for, rate_limit_notice, runtime_configs, ClaudeError,
-        ClaudeProvider, ClaudeRuntimeConfig,
+        rate_limit_notice, ClaudeError, ClaudeProvider,
     };
 
     fn credential_json(access: &str, refresh: &str, plan: &str) -> String {
@@ -798,91 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn account_definition_has_isolated_provider_and_metric_ids() {
-        let definition = definition_for("claude@1234abcd", "Claude — Work", false);
-
-        assert_eq!(definition.id, "claude@1234abcd");
-        assert_eq!(definition.display_name, "Claude — Work");
-        assert!(!definition.fallback_enabled);
-        assert!(definition
-            .metrics
-            .iter()
-            .all(|metric| metric.id.starts_with("claude@1234abcd.")));
-        assert!(definition
-            .metrics
-            .iter()
-            .all(|metric| !metric.default_pinned));
-    }
-
-    #[test]
-    fn bare_account_in_a_config_dir_replaces_the_empty_default_placeholder() {
-        let configs = runtime_configs(ClaudeAccountDiscovery {
-            default_account: None,
-            accounts: vec![ClaudeAccount {
-                id: "claude".into(),
-                display_name: "Claude".into(),
-                label: Some("Personal".into()),
-                identity: "identity-a".into(),
-                credential_scope: ClaudeCredentialScope::ConfigDir {
-                    path: "account-a".into(),
-                    keychain_literal: "account-a".into(),
-                },
-                log_roots: vec!["account-a".into()],
-            }],
-        });
-
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].definition.id, "claude");
-        assert!(matches!(
-            &configs[0].credential_scope,
-            ClaudeCredentialScope::ConfigDir { .. }
-        ));
-        assert!(!configs[0].include_standard_logs);
-        assert!(!configs[0].include_pi);
-    }
-
-    #[test]
-    fn swapped_accounts_keep_their_ids_while_sources_change() {
-        let configs = runtime_configs(ClaudeAccountDiscovery {
-            default_account: Some(ClaudeAccount {
-                id: "claude@1234abcd".into(),
-                display_name: "Claude — Work".into(),
-                label: Some("Work".into()),
-                identity: "identity-b".into(),
-                credential_scope: ClaudeCredentialScope::Standard,
-                log_roots: Vec::new(),
-            }),
-            accounts: vec![ClaudeAccount {
-                id: "claude".into(),
-                display_name: "Claude".into(),
-                label: Some("Personal".into()),
-                identity: "identity-a".into(),
-                credential_scope: ClaudeCredentialScope::ConfigDir {
-                    path: "account-a".into(),
-                    keychain_literal: "account-a".into(),
-                },
-                log_roots: vec!["account-a".into()],
-            }],
-        });
-
-        assert_eq!(
-            configs
-                .iter()
-                .map(|config| config.definition.id.as_str())
-                .collect::<Vec<_>>(),
-            ["claude@1234abcd", "claude"]
-        );
-        assert!(matches!(
-            &configs[0].credential_scope,
-            ClaudeCredentialScope::Standard
-        ));
-        assert!(matches!(
-            &configs[1].credential_scope,
-            ClaudeCredentialScope::ConfigDir { .. }
-        ));
-    }
-
-    #[test]
     fn rate_limit_notice_distinguishes_empty_and_stale_live_usage() {
         let empty = rate_limit_notice(301, false);
         assert_eq!(empty.title, "Live usage paused");
@@ -901,7 +706,12 @@ mod tests {
         let directory = tempdir().unwrap();
         let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
         let pricing = Arc::new(PricingStore::new(directory.path().join("pricing")).unwrap());
-        let provider = ClaudeProvider::new(storage, pricing).unwrap();
+        let provider = ClaudeProvider::with_scope(
+            ClaudeCredentialScope::Standard,
+            storage,
+            pricing,
+            ClaudeClient::new().unwrap(),
+        );
         let snapshot = ProviderSnapshot {
             accounts: None,
             provider_id: "claude".into(),
@@ -928,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn login_changed_during_usage_request_is_not_published_under_the_old_card() {
+    fn login_changed_during_usage_request_is_not_published_under_the_old_identity() {
         let directory = tempdir().unwrap();
         let account_root = directory.path().join("account");
         fs::create_dir_all(&account_root).unwrap();
@@ -972,16 +782,8 @@ mod tests {
             path: account_root.clone(),
             keychain_literal: account_root.to_string_lossy().into_owned(),
         };
-        let provider = Arc::new(ClaudeProvider::new_scoped(
-            ClaudeRuntimeConfig {
-                definition: definition(),
-                account_identity: accounts::identity_for_scope(&credential_scope),
-                credential_scope,
-                log_roots: vec![account_root],
-                include_standard_logs: false,
-                include_pi: false,
-                include_opencode: false,
-            },
+        let provider = Arc::new(ClaudeProvider::with_scope(
+            credential_scope,
             storage,
             pricing,
             ClaudeClient::new().unwrap(),

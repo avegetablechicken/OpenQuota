@@ -206,10 +206,11 @@ impl ProviderClient {
                 tls_client_builder(),
                 crate::codex_environment::proxy_value,
             )
-        } else if let Some(path) = self.claude_settings.as_ref().filter(|_| {
-            proxy.is_none()
-                && (self.provider_id == "claude" || self.provider_id.starts_with("claude@"))
-        }) {
+        } else if let Some(path) = self
+            .claude_settings
+            .as_ref()
+            .filter(|_| proxy.is_none() && self.provider_id == "claude")
+        {
             platform::configure_environment(tls_client_builder(), |names| {
                 crate::providers::claude::config::proxy_value(path, names)
             })
@@ -1665,9 +1666,7 @@ mod provider_proxy_tests {
         std::fs::write(&settings, serde_json::json!({"env": {
             "HTTP_PROXY": claude_proxy, "http_proxy": claude_proxy, "NO_PROXY": "", "no_proxy": ""
         }}).to_string()).unwrap();
-        let scoped = claude
-            .for_provider("claude@work")
-            .with_claude_settings(settings);
+        let scoped = claude.for_provider("claude").with_claude_settings(settings);
         assert_eq!(
             scoped
                 .current_with_proxy(None)

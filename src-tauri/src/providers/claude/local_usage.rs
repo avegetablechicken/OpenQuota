@@ -45,12 +45,6 @@ pub struct ClaudeTokenEvent {
 
 const LOG_CACHE_SCHEMA_VERSION: u8 = 3;
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct SharedUsageSources {
-    pub include_pi: bool,
-    pub include_opencode: bool,
-}
-
 impl ClaudeTokenEvent {
     fn total_tokens(&self) -> u64 {
         self.input + self.cache_write_5m + self.cache_write_1h + self.cache_read + self.output
@@ -61,10 +55,6 @@ pub fn scan_local_usage(
     storage: &Storage,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
-    provider_id: &str,
-    configured_roots: &[PathBuf],
-    include_standard_roots: bool,
-    shared_sources: SharedUsageSources,
 ) -> Result<UsageHistory, ClaudeError> {
     let since_date = now
         .with_timezone(&Local)
@@ -72,13 +62,13 @@ pub fn scan_local_usage(
         .checked_sub_days(Days::new(30))
         .unwrap_or(NaiveDate::MIN);
     let mut events = Vec::new();
-    let paths = discover_files(configured_roots, include_standard_roots);
+    let paths = discover_files();
     let mut seen_paths = HashSet::with_capacity(paths.len());
     for path in paths {
         seen_paths.insert(path.clone());
         let Some(parsed) = load_or_parse_log(
             storage,
-            provider_id,
+            "claude",
             &path,
             LOG_CACHE_SCHEMA_VERSION,
             parse_jsonl,
@@ -94,25 +84,21 @@ pub fn scan_local_usage(
         );
     }
     storage
-        .prune_log_events(provider_id, &seen_paths)
+        .prune_log_events("claude", &seen_paths)
         .map_err(|_| ClaudeError::LocalUsage)?;
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(deduplicate(events), now, pricing, &mut accumulator);
-    let includes_pi = if shared_sources.include_pi {
-        match pi_usage::scan_into(storage, now, pricing, provider_id, &mut accumulator) {
-            Ok(includes_pi) => includes_pi,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:pi",
-                    "pi/oh-my-pi usage history could not be folded into Claude"
-                );
-                pi_usage::PiUsageSources::default()
-            }
+    let includes_pi = match pi_usage::scan_into(storage, now, pricing, "claude", &mut accumulator) {
+        Ok(includes_pi) => includes_pi,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:pi",
+                "pi/oh-my-pi usage history could not be folded into Claude"
+            );
+            pi_usage::PiUsageSources::default()
         }
-    } else {
-        pi_usage::PiUsageSources::default()
     };
-    let includes_opencode = if shared_sources.include_opencode {
+    let includes_opencode =
         match opencode::scan_routed_usage_into(now, pricing, "claude", &mut accumulator) {
             Ok(includes_opencode) => includes_opencode,
             Err(_) => {
@@ -122,28 +108,21 @@ pub fn scan_local_usage(
                 );
                 false
             }
+        };
+    let includes_zcode = match ZCodeUsageScanner::new().scan_into(
+        now,
+        pricing,
+        ZCodeProvider::Claude,
+        &mut accumulator,
+    ) {
+        Ok(includes_zcode) => includes_zcode,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:zcode",
+                "ZCode usage history could not be folded into Claude"
+            );
+            false
         }
-    } else {
-        false
-    };
-    let includes_zcode = if provider_id == "claude" {
-        match ZCodeUsageScanner::new().scan_into(
-            now,
-            pricing,
-            ZCodeProvider::Claude,
-            &mut accumulator,
-        ) {
-            Ok(includes_zcode) => includes_zcode,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:zcode",
-                    "ZCode usage history could not be folded into Claude"
-                );
-                false
-            }
-        }
-    } else {
-        false
     };
     let source_note = pi_usage::usage_source_note(
         "Claude usage history",
@@ -154,19 +133,11 @@ pub fn scan_local_usage(
     Ok(accumulator.build(now, &source_note))
 }
 
-fn discover_files(configured_roots: &[PathBuf], include_standard_roots: bool) -> Vec<PathBuf> {
+fn discover_files() -> Vec<PathBuf> {
     let home = home_directory();
-    let mut roots = if include_standard_roots {
-        let config = env_text("CLAUDE_CONFIG_DIR");
-        let xdg = env_text("XDG_CONFIG_HOME");
-        claude_roots(config.as_deref(), xdg.as_deref(), &home)
-    } else {
-        Vec::new()
-    };
-    roots.extend(configured_roots.iter().cloned());
-    roots.sort();
-    roots.dedup();
-    discover_files_in_roots(&roots)
+    let config = env_text("CLAUDE_CONFIG_DIR");
+    let xdg = env_text("XDG_CONFIG_HOME");
+    discover_files_in_roots(&claude_roots(config.as_deref(), xdg.as_deref(), &home))
 }
 
 fn discover_files_in_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
@@ -594,8 +565,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        aggregate, claude_roots, deduplicate, discover_files, discover_files_in_roots,
-        has_unsupported_null_field, is_semver_prefix, parse_jsonl, parse_line, ClaudeTokenEvent,
+        aggregate, claude_roots, deduplicate, discover_files_in_roots, has_unsupported_null_field,
+        is_semver_prefix, parse_jsonl, parse_line, ClaudeTokenEvent,
     };
     use crate::pricing::{test_bundled_pricing, TokenBreakdown};
 
@@ -799,24 +770,6 @@ mod tests {
         assert_eq!(
             discover_files_in_roots(&[root]),
             vec![fs::canonicalize(log).unwrap()]
-        );
-    }
-
-    #[test]
-    fn account_scan_is_limited_to_its_configured_roots() {
-        let directory = tempdir().unwrap();
-        let account_root = directory.path().join("account");
-        let other_root = directory.path().join("other");
-        let account_log = account_root.join("projects/project/account.jsonl");
-        let other_log = other_root.join("projects/project/other.jsonl");
-        fs::create_dir_all(account_log.parent().unwrap()).unwrap();
-        fs::create_dir_all(other_log.parent().unwrap()).unwrap();
-        fs::write(&account_log, "{}").unwrap();
-        fs::write(&other_log, "{}").unwrap();
-
-        assert_eq!(
-            discover_files(&[account_root], false),
-            vec![fs::canonicalize(account_log).unwrap()]
         );
     }
 

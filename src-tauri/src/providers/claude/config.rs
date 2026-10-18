@@ -102,13 +102,6 @@ pub(crate) fn settings_path() -> PathBuf {
         .join("settings.json")
 }
 
-pub(super) fn settings_path_for_scope(scope: &super::auth::ClaudeCredentialScope) -> PathBuf {
-    match scope {
-        super::auth::ClaudeCredentialScope::Standard => settings_path(),
-        super::auth::ClaudeCredentialScope::ConfigDir { path, .. } => path.join("settings.json"),
-    }
-}
-
 /// Resolve only proxy fields from this account, without exporting process variables.
 pub(crate) fn proxy_value(path: &Path, names: &[&str]) -> Option<String> {
     let text = fs::read_to_string(path).ok();

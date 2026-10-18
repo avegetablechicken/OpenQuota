@@ -63,8 +63,7 @@ impl SettingsService {
         let mut settings = storage
             .load_settings()?
             .unwrap_or_else(|| default_settings(&registry, detected));
-        let persisted_accounts = persisted_account_provider_ids(&storage)?;
-        normalize_with_persisted_accounts(&registry, &mut settings, detected, &persisted_accounts);
+        normalize(&registry, &mut settings, detected);
         storage.save_settings(&settings)?;
         let service = Self {
             storage,
@@ -117,8 +116,7 @@ impl SettingsService {
             .map(|provider| provider.id.clone())
             .collect();
 
-        let persisted_accounts = persisted_account_provider_ids(&storage)?;
-        normalize_with_persisted_accounts(&registry, &mut settings, &detected, &persisted_accounts);
+        normalize(&registry, &mut settings, &detected);
         storage.save_settings(&settings)?;
         let provider_ids = registry
             .catalog()
@@ -185,13 +183,15 @@ impl SettingsService {
     }
 
     fn activate_launch_accounts(&self) -> Result<(), StorageError> {
-        let identity = self
-            .registry
-            .cache_identity("codex")
-            .resolved_value()
-            .map(str::to_owned);
-        if let Some(identity) = identity {
-            self.activate_account("codex", "codex", &identity)?;
+        for provider_id in ["claude", "codex"] {
+            let identity = self
+                .registry
+                .cache_identity(provider_id)
+                .resolved_value()
+                .map(str::to_owned);
+            if let Some(identity) = identity {
+                self.activate_account(provider_id, provider_id, &identity)?;
+            }
         }
         Ok(())
     }
@@ -376,9 +376,7 @@ impl SettingsService {
             .filter(|provider| provider.detected)
             .map(|provider| provider.id.clone())
             .collect::<HashSet<_>>();
-        let persisted_accounts = persisted_account_provider_ids(&self.storage)
-            .map_err(|_| "OpenQuota account settings could not be loaded.".to_owned())?;
-        normalize_with_persisted_accounts(&self.registry, settings, &detected, &persisted_accounts);
+        normalize(&self.registry, settings, &detected);
         if expected_account_revision != Some(self.account_revision.load(Ordering::SeqCst)) {
             let active_provider_ids = self
                 .active_account_identities
@@ -478,14 +476,7 @@ impl SettingsService {
                 }
             }
         }
-        let persisted_accounts = persisted_account_provider_ids(&self.storage)
-            .map_err(|_| "OpenQuota account settings could not be loaded.".to_owned())?;
-        normalize_with_persisted_accounts(
-            &self.registry,
-            &mut next,
-            &detected,
-            &persisted_accounts,
-        );
+        normalize(&self.registry, &mut next, &detected);
 
         if plan.replace_fallback {
             if credential_revision_matches
@@ -748,20 +739,10 @@ pub fn default_settings(registry: &ProviderRegistry, detected: &HashSet<String>)
     settings
 }
 
-#[cfg(test)]
 pub fn normalize(
     registry: &ProviderRegistry,
     settings: &mut AppSettings,
     detected: &HashSet<String>,
-) {
-    normalize_with_persisted_accounts(registry, settings, detected, &HashSet::new());
-}
-
-fn normalize_with_persisted_accounts(
-    registry: &ProviderRegistry,
-    settings: &mut AppSettings,
-    detected: &HashSet<String>,
-    persisted_accounts: &HashSet<String>,
 ) {
     let catalog = registry.catalog();
     let migrating_to_multi_provider = settings.schema_version < 3;
@@ -777,9 +758,7 @@ fn normalize_with_persisted_accounts(
         .map(|shortcut| shortcut.trim().to_owned())
         .filter(|shortcut| !shortcut.is_empty());
     settings.provider_names.retain(|provider_id, name| {
-        if !registry.supports_account_names(provider_id)
-            && !persisted_accounts.contains(provider_id)
-        {
+        if !registry.supports_account_names(provider_id) {
             return false;
         }
         *name = name.trim().chars().take(48).collect();
@@ -797,10 +776,6 @@ fn normalize_with_persisted_accounts(
     let mut normalized = Vec::new();
     for mut provider in settings.providers.clone() {
         let Some(definition) = registry.definition(&provider.id) else {
-            if persisted_accounts.contains(&provider.id) {
-                provider.detected = false;
-                normalized.push(provider);
-            }
             continue;
         };
         if normalized
@@ -836,18 +811,7 @@ fn normalize_with_persisted_accounts(
         let mut provider = default_provider(definition, is_detected);
         provider.enabled = !was_known && is_detected;
         settings.known_provider_ids.push(definition.id.clone());
-        if crate::providers::is_claude_account_provider_id(&provider.id) {
-            let family = crate::providers::provider_family(&provider.id);
-            let index = normalized
-                .iter()
-                .rposition(|known: &ProviderLayout| {
-                    crate::providers::provider_family(&known.id) == family
-                })
-                .map_or(normalized.len(), |index| index + 1);
-            normalized.insert(index, provider);
-        } else {
-            normalized.push(provider);
-        }
+        normalized.push(provider);
     }
     if migrating_to_multi_provider {
         normalized.sort_by_key(|provider| {
@@ -861,13 +825,6 @@ fn normalize_with_persisted_accounts(
     settings.providers = normalized;
     settings.known_provider_ids.sort();
     settings.known_provider_ids.dedup();
-}
-
-fn persisted_account_provider_ids(storage: &Storage) -> Result<HashSet<String>, StorageError> {
-    Ok(storage
-        .load_observed_account_provider_ids()?
-        .into_iter()
-        .collect())
 }
 
 fn account_record(
@@ -1026,10 +983,7 @@ mod tests {
         storage::Storage,
     };
 
-    use super::{
-        default_settings, normalize, normalize_with_persisted_accounts, SettingsService,
-        MAX_PINS_PER_PROVIDER,
-    };
+    use super::{default_settings, normalize, SettingsService, MAX_PINS_PER_PROVIDER};
 
     struct CatalogProvider(ProviderDefinition);
 
@@ -1877,192 +1831,45 @@ mod tests {
     }
 
     #[test]
-    fn new_claude_account_is_inserted_after_its_provider_family() {
-        let base = catalog();
-        let mut settings = default_settings(&base, &HashSet::from(["claude".to_owned()]));
-
-        normalize(
-            &catalog_with_claude_account(),
-            &mut settings,
-            &HashSet::from(["claude".to_owned(), "claude@1234abcd".to_owned()]),
-        );
-
-        assert_eq!(
-            settings
-                .providers
-                .iter()
-                .take(3)
-                .map(|provider| provider.id.as_str())
-                .collect::<Vec<_>>(),
-            ["claude", "claude@1234abcd", "codex"]
-        );
-        assert!(settings
-            .providers
-            .iter()
-            .find(|provider| provider.id == "claude@1234abcd")
-            .is_some_and(|provider| provider.enabled && provider.detected));
-    }
-
-    #[test]
-    fn unavailable_claude_account_keeps_its_customization_until_it_returns() {
-        let account_catalog = catalog_with_claude_account();
-        let detected = HashSet::from(["claude@1234abcd".to_owned()]);
-        let mut settings = default_settings(&account_catalog, &detected);
-        let account = settings
-            .providers
-            .iter_mut()
-            .find(|provider| provider.id == "claude@1234abcd")
-            .unwrap();
-        account.enabled = false;
-        account.expanded = true;
-        account.metrics.reverse();
-        let expected_metrics = account.metrics.clone();
-
-        let persisted = HashSet::from(["claude@1234abcd".to_owned()]);
-        normalize_with_persisted_accounts(&catalog(), &mut settings, &HashSet::new(), &persisted);
-        let unavailable = settings
-            .providers
-            .iter()
-            .find(|provider| provider.id == "claude@1234abcd")
-            .unwrap();
-        assert!(!unavailable.detected);
-        assert!(!unavailable.enabled);
-        assert!(unavailable.expanded);
-        assert_eq!(unavailable.metrics, expected_metrics);
-
-        normalize(&account_catalog, &mut settings, &detected);
-        let restored = settings
-            .providers
-            .iter()
-            .find(|provider| provider.id == "claude@1234abcd")
-            .unwrap();
-        assert!(restored.detected);
-        assert!(!restored.enabled);
-        assert!(restored.expanded);
-        assert_eq!(restored.metrics, expected_metrics);
-    }
-
-    #[test]
-    fn account_shaped_layout_without_a_persisted_record_is_removed() {
-        let account_catalog = catalog_with_claude_account();
-        let mut settings = default_settings(
-            &account_catalog,
-            &HashSet::from(["claude@1234abcd".to_owned()]),
-        );
-
-        normalize_with_persisted_accounts(
-            &catalog(),
-            &mut settings,
-            &HashSet::new(),
-            &HashSet::new(),
-        );
-
-        assert!(!settings
-            .providers
-            .iter()
-            .any(|provider| provider.id == "claude@1234abcd"));
-    }
-
-    #[test]
-    fn swapped_default_keeps_the_absent_bare_accounts_customization() {
-        let base = catalog();
-        let mut settings = default_settings(&base, &HashSet::from(["claude".to_owned()]));
-        let original = settings
+    fn legacy_claude_account_cards_fold_back_into_the_claude_card() {
+        let legacy = catalog_with_claude_account();
+        let detected = HashSet::from(["claude".to_owned(), "claude@1234abcd".to_owned()]);
+        let mut settings = default_settings(&legacy, &detected);
+        let claude = settings
             .providers
             .iter_mut()
             .find(|provider| provider.id == "claude")
             .unwrap();
-        original.expanded = true;
-        original.metrics.reverse();
-        let expected_metrics = original.metrics.clone();
-        settings
-            .provider_names
-            .insert("claude".into(), "Personal".into());
-
-        let mut current_default = claude_account_definition();
-        current_default.fallback_enabled = true;
-        let swapped_catalog = Arc::new(
-            ProviderRegistry::new(
-                [
-                    current_default,
-                    codex::definition(),
-                    cursor::definition(),
-                    antigravity::definition(),
-                    openrouter::definition(),
-                ]
-                .into_iter()
-                .map(|definition| Arc::new(CatalogProvider(definition)) as Arc<dyn UsageProvider>)
-                .collect(),
-            )
-            .unwrap(),
-        );
-        let persisted = HashSet::from(["claude".to_owned(), "claude@1234abcd".to_owned()]);
-        normalize_with_persisted_accounts(
-            &swapped_catalog,
-            &mut settings,
-            &HashSet::from(["claude@1234abcd".to_owned()]),
-            &persisted,
-        );
-
-        let unavailable = settings
-            .providers
-            .iter()
-            .find(|provider| provider.id == "claude")
-            .unwrap();
-        assert!(!unavailable.detected);
-        assert!(unavailable.expanded);
-        assert_eq!(unavailable.metrics, expected_metrics);
-        assert_eq!(
-            settings.provider_names.get("claude").map(String::as_str),
-            Some("Personal")
-        );
-        assert!(settings
-            .providers
-            .iter()
-            .find(|provider| provider.id == "claude@1234abcd")
-            .is_some_and(|provider| provider.detected));
-    }
-
-    #[test]
-    fn normalization_keeps_only_valid_account_card_names() {
-        let registry = catalog_with_claude_account();
-        let mut settings = default_settings(
-            &registry,
-            &HashSet::from(["claude".to_owned(), "claude@1234abcd".to_owned()]),
-        );
+        claude.expanded = true;
+        claude.metrics.reverse();
+        let expected_metrics = claude.metrics.clone();
         settings
             .provider_names
             .insert("claude".into(), "  Personal  ".into());
         settings
             .provider_names
-            .insert("claude@1234abcd".into(), "  Work  ".into());
+            .insert("claude@1234abcd".into(), "Work".into());
         settings
             .provider_names
             .insert("codex".into(), "  Work Codex  ".into());
-        settings
-            .provider_names
-            .insert("claude@invalid".into(), "Invalid".into());
-        settings
-            .provider_names
-            .insert("claude@deadbeef".into(), "Never observed".into());
 
-        normalize(
-            &registry,
-            &mut settings,
-            &HashSet::from(["claude".to_owned(), "claude@1234abcd".to_owned()]),
-        );
+        normalize(&catalog(), &mut settings, &detected);
 
-        assert_eq!(settings.provider_names.len(), 3);
+        assert!(!settings
+            .providers
+            .iter()
+            .any(|provider| provider.id.starts_with("claude@")));
+        let claude = settings
+            .providers
+            .iter()
+            .find(|provider| provider.id == "claude")
+            .unwrap();
+        assert!(claude.expanded);
+        assert_eq!(claude.metrics, expected_metrics);
+        assert_eq!(settings.provider_names.len(), 2);
         assert_eq!(
             settings.provider_names.get("claude").map(String::as_str),
             Some("Personal")
-        );
-        assert_eq!(
-            settings
-                .provider_names
-                .get("claude@1234abcd")
-                .map(String::as_str),
-            Some("Work")
         );
         assert_eq!(
             settings.provider_names.get("codex").map(String::as_str),
