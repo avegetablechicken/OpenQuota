@@ -631,7 +631,7 @@
           aria-describedby="reorder-instructions"
           aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"><Icon name="grip-dots" size={13} /></span
         >
-        <h1>{displayName}</h1>
+        <h1 title={displayName}>{displayName}</h1>
         {#if rows.length === 1 && rows[0].snapshot.plan}<span class="plan"
             >{rows[0].snapshot.plan}</span
           >{/if}
@@ -980,10 +980,14 @@
     }
 
     .provider-header h1 {
+      min-width: 0;
       margin: 0;
+      overflow: hidden;
       font-size: 14px;
       font-weight: 650;
       letter-spacing: -0.01em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .upstream-account + .upstream-account {
