@@ -401,14 +401,18 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
                 app,
                 commands::settings::TraySetting::MenuBarStyle(MenuBarStyle::Bars),
             ),
-            "tray-mode-popup" => commands::settings::apply_tray_setting(
-                app,
-                commands::settings::TraySetting::WindowMode(WindowMode::Popup),
-            ),
-            "tray-mode-floating" => commands::settings::apply_tray_setting(
-                app,
-                commands::settings::TraySetting::WindowMode(WindowMode::Floating),
-            ),
+            "tray-mode-popup" => after_tray_menu_closes(app, |app| {
+                commands::settings::apply_tray_setting(
+                    app,
+                    commands::settings::TraySetting::WindowMode(WindowMode::Popup),
+                )
+            }),
+            "tray-mode-floating" => after_tray_menu_closes(app, |app| {
+                commands::settings::apply_tray_setting(
+                    app,
+                    commands::settings::TraySetting::WindowMode(WindowMode::Floating),
+                )
+            }),
             "usage-display-left" => commands::settings::apply_tray_setting(
                 app,
                 commands::settings::TraySetting::UsageDisplay(UsageDisplay::Left),
@@ -433,14 +437,14 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
                 app,
                 commands::settings::TraySetting::LaunchAtLoginToggle,
             ),
-            "open" => {
+            "open" => after_tray_menu_closes(app, |app| {
                 app.state::<PopupDismissGuard>().cancel_pending();
                 if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                     show_main_window(&window);
                 }
-            }
-            "customize" => open_screen(app, "customize"),
-            "settings" => open_screen(app, "settings"),
+            }),
+            "customize" => after_tray_menu_closes(app, |app| open_screen(app, "customize")),
+            "settings" => after_tray_menu_closes(app, |app| open_screen(app, "settings")),
             "quit" => {
                 if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                     window::finish_native_panel_resize(&window);
@@ -480,6 +484,26 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(target_os = "macos", tray_icon_attached_menu))]
     tray_menu::detach(&_tray);
     Ok(())
+}
+
+/// GNOME fades the tray menu out (150 ms) after activation; waiting keeps it
+/// out of the panel's captured backdrop.
+#[cfg(target_os = "linux")]
+const TRAY_MENU_FADE_OUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Runs a tray menu action that shows the panel once the menu has closed.
+fn after_tray_menu_closes(app: &AppHandle, action: impl FnOnce(&AppHandle) + Send + 'static) {
+    #[cfg(target_os = "linux")]
+    {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(TRAY_MENU_FADE_OUT).await;
+            let app = handle.clone();
+            let _ = handle.run_on_main_thread(move || action(&app));
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    action(app);
 }
 
 fn show_standalone_window_fallback(window: &tauri::WebviewWindow) {
