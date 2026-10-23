@@ -28,6 +28,10 @@ pub const MAIN_WINDOW: &str = "main";
 pub const PANEL_WIDTH: f64 = 320.0;
 pub const PANEL_MIN_HEIGHT: u32 = 240;
 const PANEL_SCREEN_FRACTION: f64 = 0.85;
+#[cfg(target_os = "linux")]
+const PANEL_TRAY_MARGIN: f64 = 6.0;
+#[cfg(target_os = "linux")]
+const PANEL_TRAY_POINTER_BAND: f64 = 0.4;
 const PANEL_RESIZE_SAVE_DELAY: Duration = Duration::from_millis(120);
 const LIGHT_PANEL_SURFACE: Color = Color(0xec, 0xec, 0xec, 0xff);
 const DARK_PANEL_SURFACE: Color = Color(0x2a, 0x2a, 0x2c, 0xff);
@@ -289,7 +293,7 @@ pub fn activate_existing_instance(app: &AppHandle) {
     }
 
     #[cfg(target_os = "linux")]
-    let _ = show_linux_panel(&window, true);
+    let _ = show_linux_panel(&window, LinuxPanelPlacement::Center);
     #[cfg(not(target_os = "linux"))]
     {
         crate::webview_memory::set_inactive(&window, false);
@@ -307,13 +311,52 @@ fn position_popup(window: &WebviewWindow) {
         .move_window_constrained(Position::TrayCenter);
 }
 
+/// Where a Linux panel is placed when it is shown.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinuxPanelPlacement {
+    /// Below (or above) the tray icon, falling back to the top-right corner.
+    Tray,
+    Center,
+    /// Keep the previous position, clamped to the work area.
+    Keep,
+}
+
+/// Linux trays (AppIndicator/StatusNotifier) do not report the icon's
+/// geometry, so the tray-menu pointer is the best hint for where the icon is.
+/// A pointer far from the panel edges did not come from the tray menu.
+#[cfg(target_os = "linux")]
+fn tray_anchor(
+    work: &tauri::PhysicalRect<i32, u32>,
+    pointer: Option<tauri::PhysicalPosition<i32>>,
+) -> Option<(i64, bool)> {
+    let pointer = pointer?;
+    let left = i64::from(work.position.x);
+    let top = i64::from(work.position.y);
+    let right = left + i64::from(work.size.width);
+    let bottom = top + i64::from(work.size.height);
+    let (x, y) = (i64::from(pointer.x), i64::from(pointer.y));
+    if x < left || x >= right {
+        return None;
+    }
+    let band = (f64::from(work.size.height) * PANEL_TRAY_POINTER_BAND) as i64;
+    if (top - band..top + band).contains(&y) {
+        Some((x, false))
+    } else if (bottom - band..bottom + band).contains(&y) {
+        Some((x, true))
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_panel_layout(
     work: &tauri::PhysicalRect<i32, u32>,
     scale: f64,
     previous: tauri::PhysicalPosition<i32>,
+    pointer: Option<tauri::PhysicalPosition<i32>>,
     preferred_height: f64,
-    center: bool,
+    placement: LinuxPanelPlacement,
 ) -> (tauri::PhysicalPosition<i32>, LogicalSize<f64>) {
     let maximum = (f64::from(work.size.height) * PANEL_SCREEN_FRACTION / scale)
         .floor()
@@ -321,35 +364,46 @@ fn linux_panel_layout(
     let minimum = f64::from(PANEL_MIN_HEIGHT).min(maximum);
     let size = LogicalSize::new(PANEL_WIDTH, preferred_height.clamp(minimum, maximum));
     let physical = size.to_physical::<u32>(scale);
-    let position = |start: i32, available: u32, extent: u32, previous: i32| {
-        let room = i64::from(available.saturating_sub(extent));
+    let margin = (PANEL_TRAY_MARGIN * scale).round() as i64;
+    let to_i32 = |value: i64| value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    let axis = |start: i32, available: u32, extent: u32| {
         let start = i64::from(start);
-        let value = if center {
-            start + room / 2
-        } else {
-            i64::from(previous).clamp(start, start + room)
-        };
-        value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        (start, start + i64::from(available.saturating_sub(extent)))
     };
-    (
-        tauri::PhysicalPosition::new(
-            position(work.position.x, work.size.width, physical.width, previous.x),
-            position(
-                work.position.y,
-                work.size.height,
-                physical.height,
-                previous.y,
-            ),
+    let (x_start, x_end) = axis(work.position.x, work.size.width, physical.width);
+    let (y_start, y_end) = axis(work.position.y, work.size.height, physical.height);
+    let inset = |start: i64, end: i64| (start + margin).min(end).max(start);
+    let (x, y) = match placement {
+        LinuxPanelPlacement::Center => ((x_start + x_end) / 2, (y_start + y_end) / 2),
+        LinuxPanelPlacement::Keep => (
+            i64::from(previous.x).clamp(x_start, x_end),
+            i64::from(previous.y).clamp(y_start, y_end),
         ),
-        size,
-    )
+        LinuxPanelPlacement::Tray => {
+            let x_min = inset(x_start, x_end);
+            let x_max = (x_end - margin).max(x_min);
+            let y_top = inset(y_start, y_end);
+            let y_bottom = (y_end - margin).max(y_top);
+            match tray_anchor(work, pointer) {
+                Some((x, bottom)) => (
+                    (x - i64::from(physical.width) / 2).clamp(x_min, x_max),
+                    if bottom { y_bottom } else { y_top },
+                ),
+                None => (x_max, y_top),
+            }
+        }
+    };
+    (tauri::PhysicalPosition::new(to_i32(x), to_i32(y)), size)
 }
 
 /// GTK moves/resizes are queued. Before the first configure event Tao's outer
 /// size is not initialized to the window size. Plan once from the known panel
 /// width and logical height, and use that same rectangle for placement/capture.
 #[cfg(target_os = "linux")]
-pub(crate) fn show_linux_panel(window: &WebviewWindow, center: bool) -> tauri::Result<()> {
+pub(crate) fn show_linux_panel(
+    window: &WebviewWindow,
+    placement: LinuxPanelPlacement,
+) -> tauri::Result<()> {
     crate::webview_memory::set_inactive(window, false);
     let monitor = window.current_monitor()?.or(window.primary_monitor()?);
     if let Some(monitor) = monitor {
@@ -360,12 +414,17 @@ pub(crate) fn show_linux_panel(window: &WebviewWindow, center: bool) -> tauri::R
             .and_then(|session| session.saved_height())
             .map(f64::from)
             .unwrap_or(f64::from(window.inner_size()?.height) / window.scale_factor()?);
+        let pointer = window
+            .cursor_position()
+            .ok()
+            .map(|pointer| tauri::PhysicalPosition::new(pointer.x as i32, pointer.y as i32));
         let (position, size) = linux_panel_layout(
             monitor.work_area(),
             scale,
             window.outer_position()?,
+            pointer,
             height,
-            center,
+            placement,
         );
         let maximum = (f64::from(monitor.work_area().size.height) * PANEL_SCREEN_FRACTION / scale)
             .floor()
@@ -401,7 +460,13 @@ pub fn show_main_window(window: &WebviewWindow) {
         .state::<DesktopIntegration>()
         .is_floating();
     #[cfg(target_os = "linux")]
-    if let Err(error) = show_linux_panel(window, !floating) {
+    let placement = if floating {
+        LinuxPanelPlacement::Keep
+    } else {
+        LinuxPanelPlacement::Tray
+    };
+    #[cfg(target_os = "linux")]
+    if let Err(error) = show_linux_panel(window, placement) {
         crate::app_warn!("window", "panel could not be shown: {error}");
     }
     #[cfg(not(target_os = "linux"))]
@@ -452,8 +517,17 @@ pub fn apply_window_mode(
         .state::<PopupDismissGuard>()
         .cancel_pending();
     #[cfg(target_os = "linux")]
-    let result = show_linux_panel(window, !floating || center_floating)
-        .map_err(|_| "OpenQuota window could not be shown.".to_owned());
+    let result = show_linux_panel(
+        window,
+        if !floating {
+            LinuxPanelPlacement::Tray
+        } else if center_floating {
+            LinuxPanelPlacement::Center
+        } else {
+            LinuxPanelPlacement::Keep
+        },
+    )
+    .map_err(|_| "OpenQuota window could not be shown.".to_owned());
     #[cfg(not(target_os = "linux"))]
     let result = {
         crate::webview_memory::set_inactive(window, false);
@@ -964,10 +1038,11 @@ mod tests {
                 &work,
                 2.0,
                 tauri::PhysicalPosition::new(previous.0, previous.1),
+                None,
                 800.0,
-                true,
+                super::LinuxPanelPlacement::Tray,
             );
-            assert_eq!(position, tauri::PhysicalPosition::new(1600, 304));
+            assert_eq!(position, tauri::PhysicalPosition::new(3188, 60));
             assert_eq!(
                 size.to_physical::<u32>(2.0),
                 tauri::PhysicalSize::new(640, 1600)
@@ -986,8 +1061,9 @@ mod tests {
             &work,
             1.0,
             tauri::PhysicalPosition::new(-1800, 100),
+            None,
             2000.0,
-            false,
+            super::LinuxPanelPlacement::Keep,
         );
         assert_eq!(position, tauri::PhysicalPosition::new(-1800, 100));
         assert_eq!(size.height, 884.0);
@@ -995,11 +1071,43 @@ mod tests {
             &work,
             1.0,
             tauri::PhysicalPosition::new(0, 2000),
+            None,
             1.0,
-            false,
+            super::LinuxPanelPlacement::Keep,
         );
         assert_eq!(position, tauri::PhysicalPosition::new(-320, 840));
         assert_eq!(size.height, 240.0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tray_panel_sits_under_the_tray_menu_pointer() {
+        use super::LinuxPanelPlacement::{Center, Tray};
+        let work = tauri::PhysicalRect {
+            position: tauri::PhysicalPosition::new(0, 27),
+            size: tauri::PhysicalSize::new(1920, 1053),
+        };
+        let layout = |pointer: Option<(i32, i32)>, placement| {
+            super::linux_panel_layout(
+                &work,
+                1.0,
+                tauri::PhysicalPosition::new(0, 0),
+                pointer.map(|(x, y)| tauri::PhysicalPosition::new(x, y)),
+                600.0,
+                placement,
+            )
+            .0
+        };
+        let at = |x, y| tauri::PhysicalPosition::new(x, y);
+        // Centered under a top-bar icon, clamped to the screen's right edge.
+        assert_eq!(layout(Some((1500, 60)), Tray), at(1340, 33));
+        assert_eq!(layout(Some((1900, 60)), Tray), at(1594, 33));
+        // A bottom panel opens the popup above it.
+        assert_eq!(layout(Some((1500, 1050)), Tray), at(1340, 474));
+        // A pointer in the middle of the screen is not a tray hint.
+        assert_eq!(layout(Some((400, 540)), Tray), at(1594, 33));
+        assert_eq!(layout(None, Tray), at(1594, 33));
+        assert_eq!(layout(Some((1500, 60)), Center), at(800, 253));
     }
 
     #[test]

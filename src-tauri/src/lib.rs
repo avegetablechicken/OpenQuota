@@ -475,7 +475,7 @@ fn show_standalone_window_fallback(window: &tauri::WebviewWindow) {
     #[cfg(target_os = "linux")]
     {
         window::finish_native_panel_resize(window);
-        let _ = window::show_linux_panel(window, true);
+        let _ = window::show_linux_panel(window, window::LinuxPanelPlacement::Center);
     }
     #[cfg(not(target_os = "linux"))]
     {
