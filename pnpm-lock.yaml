@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@tauri-apps/api':
-        specifier: ^2.11.0
+        specifier: ~2.11.0
         version: 2.11.1
       svelte:
         specifier: ^5.56.10
@@ -22,7 +22,7 @@ importers:
         specifier: ^7.3.0
         version: 7.3.0(svelte@5.56.10(@typescript-eslint/types@8.67.0))(vite@8.2.2(@types/node@26.2.0))
       '@tauri-apps/cli':
-        specifier: ^2.11.4
+        specifier: ~2.11.4
         version: 2.11.4
       '@testing-library/jest-dom':
         specifier: ^7.0.1
