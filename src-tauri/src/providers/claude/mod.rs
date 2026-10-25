@@ -204,11 +204,19 @@ impl ClaudeProvider {
         &self,
         config: &auth::ClaudeOAuthConfig,
     ) -> Result<(ProviderSnapshot, Option<String>), ClaudeError> {
+        let identity = accounts::identity_for_scope(&self.credential_scope);
+        // A login switched mid-refresh must not publish one account's usage under the identity
+        // of another, nor reload credentials for the new login within this refresh.
+        let ensure_identity_unchanged = || {
+            (accounts::identity_for_scope(&self.credential_scope) == identity)
+                .then_some(())
+                .ok_or(ClaudeError::AccountChanged)
+        };
         let mut credential_reloads_remaining = 1;
         loop {
-            let identity = accounts::identity_for_scope(&self.credential_scope);
             match self.refresh_inner_once(config, identity.as_deref()) {
                 Err(ClaudeError::CredentialsChanged) if credential_reloads_remaining > 0 => {
+                    ensure_identity_unchanged()?;
                     credential_reloads_remaining -= 1;
                     crate::app_info!(
                         "auth:claude",
@@ -216,11 +224,7 @@ impl ClaudeProvider {
                     );
                 }
                 Ok(snapshot) => {
-                    // A login switched mid-refresh must not publish one account's usage under
-                    // the identity of another.
-                    if accounts::identity_for_scope(&self.credential_scope) != identity {
-                        return Err(ClaudeError::AccountChanged);
-                    }
+                    ensure_identity_unchanged()?;
                     return Ok((snapshot, identity));
                 }
                 Err(error) => return Err(error),
