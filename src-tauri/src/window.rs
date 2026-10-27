@@ -454,6 +454,12 @@ pub(crate) fn show_linux_panel(
 }
 
 pub fn show_main_window(window: &WebviewWindow) {
+    present_main_window(window, true);
+}
+
+/// Shows the window as `show_main_window`, taking focus from the active app
+/// only if `focus`.
+pub fn present_main_window(window: &WebviewWindow, focus: bool) {
     finish_native_panel_resize(window);
     let floating = window
         .app_handle()
@@ -479,9 +485,33 @@ pub fn show_main_window(window: &WebviewWindow) {
             let _ = restore_manual_panel_height(window);
             position_popup(window);
         }
-        let _ = window.show();
-        let _ = window.set_focus();
+        if focus {
+            let _ = window.show();
+            let _ = window.set_focus();
+        } else {
+            order_front(window);
+        }
     }
+    #[cfg(target_os = "linux")]
+    let _ = focus;
+}
+
+/// Shows the window without making it the key window, which would end keyboard
+/// navigation of the menu bar even while the app stays inactive.
+#[cfg(not(target_os = "linux"))]
+fn order_front(window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    if let Ok(ns_window) = window.ns_window() {
+        // SAFETY: Tauri returns the window's NSWindow, used here on the main thread.
+        let () = unsafe {
+            objc2::msg_send![
+                &*ns_window.cast::<objc2::runtime::AnyObject>(),
+                orderFrontRegardless
+            ]
+        };
+        return;
+    }
+    let _ = window.show();
 }
 
 fn set_window_chrome(window: &WebviewWindow, floating: bool) -> tauri::Result<()> {
@@ -560,6 +590,8 @@ fn hide_main_native_window(window: &Window) {
         crate::webview_memory::set_inactive(&webview, true);
     }
     let _ = window.app_handle().emit("main-window-hidden", ());
+    #[cfg(target_os = "macos")]
+    crate::status_item::end_session(window.app_handle());
 }
 
 pub fn hide_main_window(window: &WebviewWindow) {

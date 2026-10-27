@@ -22,11 +22,11 @@ mod providers;
 mod refresh_loop;
 mod service;
 mod settings;
+#[cfg(target_os = "macos")]
+mod status_item;
 mod storage;
 #[cfg(any(not(target_os = "macos"), test))]
 mod tray_icon;
-#[cfg(all(target_os = "macos", tray_icon_attached_menu))]
-mod tray_menu;
 mod tray_presentation;
 mod updates;
 mod webview_memory;
@@ -67,8 +67,8 @@ use crate::{
     },
     storage::Storage,
     window::{
-        handle_window_event, open_screen, show_main_window, toggle_main_window, PanelResizeSession,
-        MAIN_WINDOW,
+        handle_window_event, hide_main_window, open_screen, present_main_window, show_main_window,
+        toggle_main_window, PanelResizeSession, MAIN_WINDOW,
     },
 };
 
@@ -360,8 +360,8 @@ pub(crate) fn update_tray_menu(app: &AppHandle, settings: &AppSettings) {
             if tray.set_menu(Some(menu)).is_err() {
                 app_warn!("tray", "tray menu update failed");
             }
-            #[cfg(all(target_os = "macos", tray_icon_attached_menu))]
-            tray_menu::detach(&tray);
+            #[cfg(target_os = "macos")]
+            status_item::detach(app);
         }
         Err(error) => app_warn!("tray", "tray menu could not be rebuilt: {error}"),
     }
@@ -477,13 +477,67 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
                 ..
             }
         ) {
-            tray_menu::show(tray);
+            status_item::show_menu();
         }
     });
     let _tray = tray.build(app)?;
-    #[cfg(all(target_os = "macos", tray_icon_attached_menu))]
-    tray_menu::detach(&_tray);
+    #[cfg(target_os = "macos")]
+    {
+        let (press, begin, end) = (
+            app.handle().clone(),
+            app.handle().clone(),
+            app.handle().clone(),
+        );
+        status_item::install(
+            &_tray,
+            status_item::Handlers {
+                press: Box::new(move || {
+                    remember_tray_position(&press);
+                    toggle_main_window(&press);
+                }),
+                begin: Box::new(move |clicked| {
+                    let floating = begin.state::<DesktopIntegration>().is_floating();
+                    // A click toggles the floating window, which outlives the session.
+                    if floating && clicked {
+                        toggle_main_window(&begin);
+                        status_item::end_session(&begin);
+                        return;
+                    }
+                    remember_tray_position(&begin);
+                    begin.state::<PopupDismissGuard>().cancel_pending();
+                    if let Some(window) = begin.get_webview_window(MAIN_WINDOW) {
+                        present_main_window(&window, clicked);
+                    }
+                }),
+                end: Box::new(move || {
+                    if end.state::<DesktopIntegration>().is_floating() {
+                        return;
+                    }
+                    if let Some(window) = end.get_webview_window(MAIN_WINDOW) {
+                        hide_main_window(&window);
+                    }
+                }),
+            },
+        );
+    }
     Ok(())
+}
+
+/// Tells the positioner where the icon is, which it otherwise learns only from
+/// pointer events over the icon.
+#[cfg(target_os = "macos")]
+fn remember_tray_position(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    if let Ok(Some(rect)) = tray.rect() {
+        let event = TrayIconEvent::Move {
+            id: tray.id().clone(),
+            position: rect.position.to_physical(1.0),
+            rect,
+        };
+        tauri_plugin_positioner::on_tray_event(app, &event);
+    }
 }
 
 /// GNOME fades the tray menu out (150 ms) after activation; waiting keeps it
