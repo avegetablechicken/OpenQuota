@@ -52,6 +52,8 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+#[cfg(target_os = "macos")]
+use crate::window::{hide_main_window, present_main_window};
 use crate::{
     desktop_integration::DesktopIntegration,
     models::{AppSettings, MenuBarStyle, UpdateFrequency, UsageDisplay, WindowMode},
@@ -67,8 +69,8 @@ use crate::{
     },
     storage::Storage,
     window::{
-        handle_window_event, hide_main_window, open_screen, present_main_window, show_main_window,
-        toggle_main_window, PanelResizeSession, MAIN_WINDOW,
+        handle_window_event, open_screen, show_main_window, toggle_main_window, PanelResizeSession,
+        MAIN_WINDOW,
     },
 };
 
