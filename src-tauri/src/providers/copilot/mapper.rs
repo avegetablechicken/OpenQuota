@@ -218,6 +218,7 @@ fn snapshot_quota(
     };
 
     Some(QuotaWindow {
+        clock_offset_seconds: None,
         id: id.into(),
         label: label.into(),
         used_percent,
@@ -265,6 +266,7 @@ fn legacy_quota(
     let remaining = number(remaining).filter(|value| *value >= 0.0)?;
     let used = (total - remaining).max(0.0);
     Some(QuotaWindow {
+        clock_offset_seconds: None,
         id: id.into(),
         label: label.into(),
         used_percent: (used / total * 100.0).clamp(0.0, 100.0),

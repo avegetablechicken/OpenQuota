@@ -228,6 +228,7 @@ fn map_window(
         .map(|value| value.max(0.0) as u64)
         .unwrap_or(default_period);
     Some(QuotaWindow {
+        clock_offset_seconds: None,
         id: id.to_owned(),
         label: label.to_owned(),
         used_percent,

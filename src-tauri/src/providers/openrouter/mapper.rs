@@ -71,6 +71,7 @@ pub fn map_key(data: &serde_json::Map<String, Value>) -> KeyMetrics {
 
 fn dollars_quota(id: &str, label: &str, used: f64, limit: f64) -> QuotaWindow {
     QuotaWindow {
+        clock_offset_seconds: None,
         id: id.into(),
         label: label.into(),
         used_percent: if limit > 0.0 {

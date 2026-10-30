@@ -684,9 +684,11 @@ fn normalize_quota_availability(
                     if source_id == &quota.id
             )
         });
-        let has_active_reset = quota
-            .resets_at
-            .is_some_and(|reset| reset > snapshot.refreshed_at);
+        let has_active_reset = quota.resets_at.is_some_and(|reset| {
+            reset
+                > snapshot.refreshed_at
+                    + chrono::Duration::seconds(quota.clock_offset_seconds.unwrap_or(0))
+        });
         // Claude's zero usage is available only when a reset identifies an active session.
         if definition.id == "claude" && starts_on_use && quota.used_percent <= 0.0 {
             return has_active_reset;
@@ -987,6 +989,7 @@ mod tests {
             .unwrap()
             .quotas
             .push(QuotaWindow {
+                clock_offset_seconds: None,
                 id: "session".into(),
                 label: "Session".into(),
                 used_percent: 25.0,
@@ -1307,6 +1310,7 @@ mod tests {
             let registry = Arc::new(ProviderRegistry::from_definitions(vec![definition]).unwrap());
             let mut snapshot = test_snapshot(&id);
             snapshot.quotas.push(QuotaWindow {
+                clock_offset_seconds: None,
                 id: "session".into(),
                 label: "Session".into(),
                 used_percent: 0.0,
@@ -1381,6 +1385,7 @@ mod tests {
                 Arc::new(ProviderRegistry::from_definitions(vec![definition.clone()]).unwrap());
             let mut snapshot = test_snapshot("claude");
             snapshot.quotas.push(QuotaWindow {
+                clock_offset_seconds: None,
                 id: "session".into(),
                 label: "Session".into(),
                 used_percent: 0.0,
@@ -1514,6 +1519,7 @@ mod tests {
 
         let mut unknown_source = snapshot;
         unknown_source.quotas.push(crate::models::QuotaWindow {
+            clock_offset_seconds: None,
             id: "unknown".into(),
             label: "Unknown".into(),
             used_percent: 0.0,
@@ -1563,6 +1569,7 @@ mod tests {
         let registry = ProviderRegistry::from_definitions(vec![definition]).unwrap();
         let mut snapshot = test_snapshot("dynamic");
         snapshot.quotas.push(QuotaWindow {
+            clock_offset_seconds: None,
             id: "searches".into(),
             label: "Web Searches".into(),
             used_percent: 25.0,

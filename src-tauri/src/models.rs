@@ -32,6 +32,9 @@ pub struct ApiKeyMutationOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
+    /// Server UTC minus local UTC at the usage response; absent in older caches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_offset_seconds: Option<i64>,
     pub id: String,
     pub label: String,
     pub used_percent: f64,

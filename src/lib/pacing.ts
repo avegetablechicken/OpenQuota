@@ -9,7 +9,12 @@ export interface PaceProjection {
   runOutAt: number | null;
 }
 
+export function quotaNow(window: QuotaWindow, now: number): number {
+  return now + (window.clockOffsetSeconds ?? 0) * 1000;
+}
+
 export function projectPace(window: QuotaWindow, now: number): PaceProjection {
+  now = quotaNow(window, now);
   const used = clamp(window.usedPercent, 0, 100);
   if (isVisiblySpent(window, used)) {
     return { severity: 'spent', projectedUsedPercent: 100, evenPacePercent: null, runOutAt: now };

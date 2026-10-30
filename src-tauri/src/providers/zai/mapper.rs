@@ -166,6 +166,7 @@ fn percent_quota(
         TokenWindowKind::Weekly => ("weekly", "Weekly"),
     };
     Ok(QuotaWindow {
+        clock_offset_seconds: None,
         id: id.into(),
         label: label.into(),
         used_percent,
@@ -188,6 +189,7 @@ fn web_search_quota(entry: &serde_json::Map<String, Value>) -> Result<QuotaWindo
         .filter(|value| *value >= 0.0)
         .ok_or(ZaiError::InvalidResponse)?;
     Ok(QuotaWindow {
+        clock_offset_seconds: None,
         id: "webSearches".into(),
         label: "Web Searches".into(),
         used_percent: if limit > 0.0 {

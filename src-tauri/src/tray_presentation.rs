@@ -1019,6 +1019,7 @@ mod tests {
     #[test]
     fn menu_bar_items_list_each_displayed_pin_once_and_drop_unpinned_metrics() {
         let quota = |id: &str, label: &str| QuotaWindow {
+            clock_offset_seconds: None,
             id: id.into(),
             label: label.into(),
             used_percent: 25.0,
@@ -1169,6 +1170,7 @@ mod tests {
             plan: None,
             quotas: vec![
                 QuotaWindow {
+                    clock_offset_seconds: None,
                     id: "session".into(),
                     label: "Session".into(),
                     used_percent: 25.0,
@@ -1182,6 +1184,7 @@ mod tests {
                     source_note: None,
                 },
                 QuotaWindow {
+                    clock_offset_seconds: None,
                     id: "weekly".into(),
                     label: "Weekly".into(),
                     used_percent: 60.0,
@@ -1345,6 +1348,7 @@ mod tests {
             provider_id: "codex".into(),
             plan: None,
             quotas: vec![QuotaWindow {
+                clock_offset_seconds: None,
                 id: "session".into(),
                 label: "Session".into(),
                 used_percent: 25.0,
@@ -1397,6 +1401,7 @@ mod tests {
             provider_id: "cursor".into(),
             plan: None,
             quotas: vec![QuotaWindow {
+                clock_offset_seconds: None,
                 id: "requests".into(),
                 label: "Requests".into(),
                 used_percent: 25.0,

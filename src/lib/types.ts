@@ -1,4 +1,5 @@
 export interface QuotaWindow {
+  clockOffsetSeconds?: number | null;
   id: string;
   label: string;
   usedPercent: number;

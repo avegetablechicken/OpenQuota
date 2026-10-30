@@ -28,6 +28,7 @@ pub struct PaceProjection {
 }
 
 pub fn project(window: &QuotaWindow, now: DateTime<Utc>) -> PaceProjection {
+    let now = now + Duration::seconds(window.clock_offset_seconds.unwrap_or(0));
     let used = window.used_percent.clamp(0.0, 100.0);
     if is_visibly_spent(window, used) {
         return PaceProjection {
@@ -464,6 +465,7 @@ mod tests {
         let now = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
         let period = 10_000_u64;
         QuotaWindow {
+            clock_offset_seconds: None,
             id: "session".into(),
             label: "Session".into(),
             used_percent: used,
@@ -477,6 +479,23 @@ mod tests {
             unit: None,
             estimated: false,
             source_note: None,
+        }
+    }
+
+    #[test]
+    fn pacing_uses_the_server_clock_with_either_sign_of_skew() {
+        let now = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let mut quota = window(60.0, 0.5);
+        let expected = project(&quota, now);
+        for offset in [6 * 3600, -6 * 3600] {
+            quota.clock_offset_seconds = Some(offset);
+            let actual = project(&quota, now - Duration::seconds(offset));
+            assert_eq!(actual.severity, expected.severity);
+            assert_eq!(actual.run_out_at, expected.run_out_at);
+            assert_eq!(
+                actual.projected_used_percent,
+                expected.projected_used_percent
+            );
         }
     }
 
@@ -919,6 +938,7 @@ mod tests {
             provider_id: "custom".into(),
             plan: None,
             quotas: vec![QuotaWindow {
+                clock_offset_seconds: None,
                 id: "bucket".into(),
                 label: "Rolling".into(),
                 used_percent: 25.0,
@@ -1089,6 +1109,7 @@ mod tests {
             provider_id: "switching".into(),
             plan: None,
             quotas: vec![QuotaWindow {
+                clock_offset_seconds: None,
                 id: source_id.into(),
                 label: label.into(),
                 used_percent,

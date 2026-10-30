@@ -127,6 +127,7 @@ fn quota(
     period_seconds: u64,
 ) -> QuotaWindow {
     QuotaWindow {
+        clock_offset_seconds: None,
         id: id.into(),
         label: label.into(),
         used_percent: (100.0 - remaining).clamp(0.0, 100.0),

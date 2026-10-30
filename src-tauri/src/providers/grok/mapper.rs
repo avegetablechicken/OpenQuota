@@ -43,6 +43,7 @@ pub fn map_credits(response: &GrokResponse) -> Result<GrokMetrics, GrokError> {
     }];
     let quotas = (config.period_type == WEEKLY_PERIOD_TYPE)
         .then(|| QuotaWindow {
+            clock_offset_seconds: None,
             id: "weekly".into(),
             label: "Weekly".into(),
             used_percent: config.used_percent.clamp(0.0, 100.0),

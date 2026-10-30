@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 
 use super::{auth::ClaudeOAuthConfig, ClaudeError};
 
+type UsageResponse = (StatusCode, Value, Option<u64>, Option<i64>);
+
 const OAUTH_SCOPES: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
@@ -47,7 +49,7 @@ impl ClaudeClient {
         &self,
         token: &str,
         config: &ClaudeOAuthConfig,
-    ) -> Result<(StatusCode, Value, Option<u64>), ClaudeError> {
+    ) -> Result<UsageResponse, ClaudeError> {
         let started = std::time::Instant::now();
         let response = self
             .client
@@ -63,6 +65,11 @@ impl ClaudeClient {
                 crate::app_warn!("http", "claude usage request failed (transport)");
                 ClaudeError::ConnectionFailed
             })?;
+        let clock_offset = response
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| clock_offset_seconds(value, Utc::now()));
         let status = response.status();
         crate::app_debug!(
             "http",
@@ -89,7 +96,7 @@ impl ClaudeClient {
                 Ok(Value::Null)
             }
         })?;
-        Ok((status, body, retry_after))
+        Ok((status, body, retry_after, clock_offset))
     }
 
     pub fn refresh_token(
@@ -146,6 +153,11 @@ impl ClaudeClient {
     }
 }
 
+fn clock_offset_seconds(value: &str, now: DateTime<Utc>) -> Option<i64> {
+    let server = DateTime::parse_from_rfc2822(value.trim()).ok()?.to_utc();
+    Some(server.signed_duration_since(now).num_seconds())
+}
+
 fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<u64> {
     let value = value.trim();
     if let Ok(seconds) = value.parse::<u64>() {
@@ -177,9 +189,41 @@ mod tests {
     }
 
     #[test]
+    fn server_clock_offsets_and_time_zones() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 30, 12, 0, 0).unwrap();
+        for date in [
+            "Fri, 30 Oct 2026 18:00:00 GMT",
+            "Sat, 31 Oct 2026 02:00:00 +0800",
+        ] {
+            assert_eq!(super::clock_offset_seconds(date, now), Some(6 * 3600));
+        }
+        assert_eq!(
+            super::clock_offset_seconds("Fri, 30 Oct 2026 06:00:00 GMT", now),
+            Some(-6 * 3600)
+        );
+        assert_eq!(super::clock_offset_seconds("invalid", now), None);
+    }
+
+    #[test]
+    fn usage_response_preserves_server_clock_offset() {
+        let server = Utc::now() + chrono::Duration::hours(6);
+        let date = server.to_rfc2822();
+        let base = test_http::serve_once(
+            200,
+            &[("date", &date)],
+            r#"{"five_hour":{"utilization":2}}"#,
+        );
+        let (_, _, _, offset) = ClaudeClient::new()
+            .unwrap()
+            .fetch_usage("test-token", &config(&base))
+            .unwrap();
+        assert!((offset.unwrap() - 6 * 3600).abs() <= 2);
+    }
+
+    #[test]
     fn usage_success_reads_json_and_retry_after() {
         let base = test_http::serve_once(200, &[("retry-after", "120")], r#"{"plan":"max"}"#);
-        let (status, body, retry_after) = ClaudeClient::new()
+        let (status, body, retry_after, _) = ClaudeClient::new()
             .unwrap()
             .fetch_usage("secret-token", &config(&base))
             .unwrap();
@@ -222,7 +266,7 @@ mod tests {
             (429, "busy"),
         ] {
             let base = test_http::serve_once(code, &[("retry-after", "120")], response);
-            let (status, body, retry_after) = ClaudeClient::new()
+            let (status, body, retry_after, _) = ClaudeClient::new()
                 .unwrap()
                 .fetch_usage("fake-access-token", &config(&base))
                 .unwrap();

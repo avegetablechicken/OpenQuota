@@ -741,6 +741,7 @@ mod tests {
             provider_id: "cursor".into(),
             plan: None,
             quotas: vec![QuotaWindow {
+                clock_offset_seconds: None,
                 id: "requests".into(),
                 label: "Requests".into(),
                 used_percent: 25.0,

@@ -1,6 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
-  import { formatLimit, formatReset, paceTooltip, projectPace } from './pacing';
+  import { formatLimit, formatReset, paceTooltip, projectPace, quotaNow } from './pacing';
   import type { QuotaWindow } from './types';
 
   interface Props {
@@ -74,6 +74,7 @@
     }
     return Math.min(100, Math.max(0, Math.round(usageDisplay === 'used' ? used : remaining)));
   });
+  const serverNow = $derived(quotaNow(quota, now));
   const pace = $derived(projectPace(quota, now));
   const paceDetail = $derived(paceTooltip(pace));
   const roundedUsed = $derived(Math.round(used));
@@ -101,7 +102,7 @@
     if (pace.severity === 'runningOut')
       return pace.runOutAt === null
         ? null
-        : formatLimit(pace.runOutAt, now, resetDisplay, timeFormat);
+        : formatLimit(pace.runOutAt, serverNow, resetDisplay, timeFormat);
     if (pace.projectedUsedPercent === null) return null;
     const left = Math.max(0, 100 - pace.projectedUsedPercent);
     return pace.severity === 'close' ? `~${Math.max(1, Math.round(left))}% spare` : paceDetail;
@@ -117,7 +118,7 @@
     quota.resetsAt
       ? formatReset(
           quota.resetsAt,
-          now,
+          serverNow,
           resetDisplay === 'countdown' ? 'exact' : 'countdown',
           timeFormat,
         )
@@ -198,7 +199,7 @@
       {reading}
     </button>
     <button type="button" data-tooltip={resetTooltip ?? undefined} onclick={onToggleReset}>
-      {formatReset(quota.resetsAt, now, resetDisplay, timeFormat)}
+      {formatReset(quota.resetsAt, serverNow, resetDisplay, timeFormat)}
     </button>
   </div>
 </section>

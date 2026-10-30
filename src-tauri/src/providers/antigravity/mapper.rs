@@ -68,6 +68,7 @@ pub fn parse_quota_summary(value: &Value) -> Option<Vec<QuotaWindow>> {
             .filter_map(|(bucket_id, quota_id, label, period_seconds)| {
                 let (remaining, resets_at) = found.get(*bucket_id)?;
                 Some(QuotaWindow {
+                    clock_offset_seconds: None,
                     id: (*quota_id).into(),
                     label: (*label).into(),
                     used_percent: ((1.0 - remaining.clamp(0.0, 1.0)) * 100.0).round(),
@@ -203,6 +204,7 @@ pub fn build_legacy_quotas(configs: Vec<ModelConfig>) -> Vec<QuotaWindow> {
     .filter_map(|(id, label, pool)| {
         let (remaining, resets_at) = pool?;
         Some(QuotaWindow {
+            clock_offset_seconds: None,
             id: id.into(),
             label: label.into(),
             used_percent: ((1.0 - remaining.clamp(0.0, 1.0)) * 100.0).round(),

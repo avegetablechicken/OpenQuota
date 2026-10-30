@@ -154,3 +154,11 @@ describe('quota pacing presentation', () => {
     );
   });
 });
+
+it('uses the server clock for the rendered reset countdown', () => {
+  const value = quota(2);
+  value.resetsAt = new Date(now + (6 * 3600 + 4 * 3600 + 48 * 60) * 1000).toISOString();
+  value.clockOffsetSeconds = 6 * 3600;
+  show(value);
+  expect(screen.getByRole('button', { name: 'Resets in 4h 48m' })).toBeInTheDocument();
+});

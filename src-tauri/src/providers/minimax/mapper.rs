@@ -111,6 +111,7 @@ fn quota_from_model(model: &Value, window: Window) -> Result<Option<QuotaWindow>
     let resets_at = end.and_then(millis_time);
 
     Ok(Some(QuotaWindow {
+        clock_offset_seconds: None,
         id: id.into(),
         label: label.into(),
         used_percent,
@@ -132,6 +133,7 @@ fn unlimited_quota(
     period_seconds: u64,
 ) -> QuotaWindow {
     QuotaWindow {
+        clock_offset_seconds: None,
         id: id.into(),
         label: format!("{label} (Unlimited)"),
         used_percent: 0.0,

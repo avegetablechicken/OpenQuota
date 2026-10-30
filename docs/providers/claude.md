@@ -67,3 +67,9 @@ replace the Claude login required for subscription-limit queries.
 - **Session or token expired** — sign in again with `claude`.
 - **No local history** — use Claude Code normally and check whether `CLAUDE_CONFIG_DIR` points to
   the directory containing your Claude data.
+
+Claude quota countdowns and pacing use the usage response's HTTP `Date` header to
+correct local clock skew, including virtual machines with a fast or slow clock.
+Reset timestamps remain UTC instants; exact times are displayed in the local time
+zone. The offset is cached with each quota. Old caches and responses without a
+valid `Date` header use the local clock until a successful refresh supplies one.

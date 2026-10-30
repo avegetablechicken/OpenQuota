@@ -86,6 +86,7 @@ fn weekly_quota(body: &Value) -> Result<QuotaWindow, KimiError> {
         0.0
     };
     Ok(QuotaWindow {
+        clock_offset_seconds: None,
         id: "weekly".into(),
         label: "Weekly".into(),
         used_percent,
@@ -131,6 +132,7 @@ fn session_quota(body: &Value) -> Result<Option<QuotaWindow>, KimiError> {
     let period_seconds = window_period_seconds(entry).unwrap_or(DEFAULT_WINDOW_PERIOD_SECONDS);
 
     Ok(Some(QuotaWindow {
+        clock_offset_seconds: None,
         id: "session".into(),
         label: "Session".into(),
         used_percent,

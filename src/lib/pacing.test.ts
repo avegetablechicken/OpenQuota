@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatLimit, formatReset, paceTooltip, projectPace } from './pacing';
+import { formatLimit, formatReset, paceTooltip, projectPace, quotaNow } from './pacing';
 import type { QuotaWindow } from './types';
 
 const now = new Date('2026-07-10T12:00:00Z').getTime();
@@ -118,5 +118,28 @@ describe('quota pacing', () => {
     expect(dayPeriod).toBeTruthy();
     expect(twelveHour).toContain(dayPeriod);
     expect(twentyFourHour).not.toContain(dayPeriod);
+  });
+});
+
+describe('server clock correction', () => {
+  it('corrects slow and fast clocks without changing the reset timestamp', () => {
+    const reset = '2026-07-10T16:48:00Z';
+    for (const offset of [6 * 3600, -6 * 3600, 0]) {
+      const localNow = now - offset * 1000;
+      const window = quota(25, 0.5, { resetsAt: reset, clockOffsetSeconds: offset });
+      expect(formatReset(window.resetsAt, quotaNow(window, localNow), 'countdown')).toBe(
+        'Resets in 4h 48m',
+      );
+      expect(projectPace(window, localNow)).toEqual(
+        projectPace({ ...window, clockOffsetSeconds: null }, now),
+      );
+      expect(window.resetsAt).toBe(reset);
+    }
+  });
+  it('treats equivalent time zones equally and supports old cached windows', () => {
+    expect(formatReset('2026-07-11T00:48:00+08:00', now, 'countdown')).toBe(
+      formatReset('2026-07-10T16:48:00Z', now, 'countdown'),
+    );
+    expect(quotaNow(quota(25, 0.5), now)).toBe(now);
   });
 });

@@ -85,6 +85,7 @@ pub fn map_usage(
                 if limit.is_some_and(|value| value > 0.0) {
                     let limit_value = limit.unwrap_or_default();
                     quotas.push(QuotaWindow {
+                        clock_offset_seconds: None,
                         id: "extra".into(),
                         label: "Extra Usage".into(),
                         used_percent: (used / limit_value * 100.0).clamp(0.0, 100.0),
@@ -197,6 +198,7 @@ fn append_percent(
         return;
     };
     output.push(QuotaWindow {
+        clock_offset_seconds: None,
         id: id.into(),
         label: label.into(),
         used_percent: percent,

@@ -5,7 +5,7 @@ import {
   formatSpendValue,
   totalSpendRingCenter,
 } from './metricFormat';
-import { formatLimit, formatReset, projectPace } from './pacing';
+import { formatLimit, formatReset, projectPace, quotaNow } from './pacing';
 import {
   OTHERS_SPEND_ID,
   UNPRICED_OTHERS_SPEND_ID,
@@ -385,6 +385,7 @@ function quotaShareRow(quota: QuotaWindow, settings: AppSettings, now: number): 
     }
   }
 
+  const serverNow = quotaNow(quota, now);
   const pace = projectPace(quota, now);
   const severity =
     pace.severity === 'spent' || pace.severity === 'runningOut'
@@ -400,7 +401,7 @@ function quotaShareRow(quota: QuotaWindow, settings: AppSettings, now: number): 
     pace.severity === 'spent'
       ? 'Limit reached'
       : pace.severity === 'runningOut'
-        ? formatLimit(pace.runOutAt, now, settings.resetDisplay, settings.timeFormat)
+        ? formatLimit(pace.runOutAt, serverNow, settings.resetDisplay, settings.timeFormat)
         : pace.severity === 'close' && pace.projectedUsedPercent !== null
           ? `~${Math.max(1, Math.round(100 - pace.projectedUsedPercent))}% spare`
           : pace.severity === 'healthy' &&
@@ -413,7 +414,7 @@ function quotaShareRow(quota: QuotaWindow, settings: AppSettings, now: number): 
     kind: 'quota',
     label: quota.label,
     reading,
-    trailing: formatReset(quota.resetsAt, now, settings.resetDisplay, settings.timeFormat),
+    trailing: formatReset(quota.resetsAt, serverNow, settings.resetDisplay, settings.timeFormat),
     fillPercent: clamp(fillPercent, 0, 100),
     severity,
     paceLabel,

@@ -382,7 +382,8 @@ impl ClaudeProvider {
         }
 
         let token = credential.access_token().ok_or(ClaudeError::NotLoggedIn)?;
-        let (mut status, mut body, mut retry_after) = self.client.fetch_usage(token, config)?;
+        let (mut status, mut body, mut retry_after, mut clock_offset) =
+            self.client.fetch_usage(token, config)?;
         if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
             let previous_fingerprint = credential.fingerprint();
             refresh_credential(
@@ -396,7 +397,7 @@ impl ClaudeProvider {
             )?;
             self.replace_live_usage_fingerprint(previous_fingerprint, credential.fingerprint());
             let token = credential.access_token().ok_or(ClaudeError::TokenExpired)?;
-            (status, body, retry_after) = self.client.fetch_usage(token, config)?;
+            (status, body, retry_after, clock_offset) = self.client.fetch_usage(token, config)?;
         }
         if auth::credential_generation(&self.credential_scope) != *credential_generation {
             return Err(ClaudeError::CredentialsChanged);
@@ -433,19 +434,10 @@ impl ClaudeProvider {
                 refreshed_at: now,
             });
         }
-        self.build_snapshot(status, &body, credential, usage, warnings, now)
-    }
-
-    fn build_snapshot(
-        &self,
-        status: StatusCode,
-        body: &serde_json::Value,
-        credential: &ClaudeCredential,
-        usage: crate::models::UsageHistory,
-        warnings: Vec<String>,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<ProviderSnapshot, ClaudeError> {
-        let mapped = map_usage(status, body, &credential.oauth)?;
+        let mut mapped = map_usage(status, &body, &credential.oauth)?;
+        for quota in &mut mapped.quotas {
+            quota.clock_offset_seconds = clock_offset;
+        }
         let snapshot = ProviderSnapshot {
             accounts: None,
             provider_id: self.provider_id().into(),
