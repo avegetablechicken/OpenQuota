@@ -684,11 +684,14 @@ fn normalize_quota_availability(
                     if source_id == &quota.id
             )
         });
-        !(starts_on_use
-            && quota.used_percent <= 0.0
-            && quota
-                .resets_at
-                .is_some_and(|reset| reset > snapshot.refreshed_at))
+        let has_active_reset = quota
+            .resets_at
+            .is_some_and(|reset| reset > snapshot.refreshed_at);
+        // Claude's zero usage is available only when a reset identifies an active session.
+        if definition.id == "claude" && starts_on_use && quota.used_percent <= 0.0 {
+            return has_active_reset;
+        }
+        !(starts_on_use && quota.used_percent <= 0.0 && has_active_reset)
     });
 }
 
@@ -1289,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_sessions_use_missing_quota_state_for_live_and_cached_data() {
+    fn zero_sessions_preserve_claude_windows_for_live_and_cached_data() {
         for mut definition in [
             crate::providers::claude::definition(),
             crate::providers::opencode::definition(),
@@ -1297,6 +1300,7 @@ mod tests {
         ] {
             let id = definition.id.clone();
             let starts_on_use = definition.metrics[0].source.session_window();
+            let hides_zero_session = starts_on_use && id != "claude";
             definition.fallback_enabled = true;
             let directory = tempdir().unwrap();
             let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
@@ -1322,7 +1326,16 @@ mod tests {
             storage.save_snapshot(&snapshot).unwrap();
             let service = ProviderService::new(registry, storage.clone());
             let cached = service.provider_state(&id).snapshot.unwrap();
-            assert_eq!(cached.quotas.len(), if starts_on_use { 1 } else { 2 });
+            assert_eq!(cached.quotas.len(), if hides_zero_session { 1 } else { 2 });
+            if id == "claude" {
+                let session = cached
+                    .quotas
+                    .iter()
+                    .find(|quota| quota.id == "session")
+                    .unwrap();
+                assert_eq!(session.used_percent, 0.0);
+                assert!(session.resets_at.unwrap() > cached.refreshed_at);
+            }
             assert!(cached.quotas.iter().any(|quota| quota.id == "weekly"));
             let live = service
                 .apply_refresh_result(
@@ -1354,6 +1367,52 @@ mod tests {
                 .snapshot
                 .unwrap();
             assert_eq!(active.quotas.len(), 2);
+        }
+    }
+
+    #[test]
+    fn claude_zero_sessions_without_an_active_reset_are_no_data() {
+        let mut definition = crate::providers::claude::definition();
+        definition.fallback_enabled = true;
+        for reset_offset in [None, Some(-1), Some(0), Some(18_000)] {
+            let directory = tempdir().unwrap();
+            let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+            let registry =
+                Arc::new(ProviderRegistry::from_definitions(vec![definition.clone()]).unwrap());
+            let mut snapshot = test_snapshot("claude");
+            snapshot.quotas.push(QuotaWindow {
+                id: "session".into(),
+                label: "Session".into(),
+                used_percent: 0.0,
+                resets_at: reset_offset
+                    .map(|seconds| snapshot.refreshed_at + chrono::Duration::seconds(seconds)),
+                period_seconds: 18_000,
+                format: QuotaFormat::Percent,
+                used_value: None,
+                limit_value: None,
+                unit: None,
+                estimated: false,
+                source_note: None,
+            });
+            storage.save_snapshot(&snapshot).unwrap();
+            let service = ProviderService::new(registry, storage);
+            let cached = service.provider_state("claude").snapshot.unwrap();
+            assert_eq!(
+                cached.quotas.iter().any(|quota| quota.id == "session"),
+                reset_offset.is_some_and(|seconds| seconds > 0),
+            );
+            let live = service
+                .apply_refresh_result(
+                    "claude",
+                    Ok(ProviderRefresh {
+                        snapshot,
+                        cache_identity: None,
+                        account: None,
+                    }),
+                )
+                .snapshot
+                .unwrap();
+            assert_eq!(live.quotas, cached.quotas);
         }
     }
 

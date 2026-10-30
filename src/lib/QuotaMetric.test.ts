@@ -111,6 +111,13 @@ describe('quota pacing presentation', () => {
     expect(screen.queryByText('No data')).not.toBeInTheDocument();
   });
 
+  it.each([0, 0.1])('shows an active session with %s percent usage as 0%%', (usedPercent) => {
+    show({ ...quota(usedPercent), id: 'session', label: 'Session' }, vi.fn(), 'used');
+    expect(screen.getByRole('button', { name: '0% used' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Resets in/ })).toBeInTheDocument();
+    expect(screen.queryByText('No data')).not.toBeInTheDocument();
+  });
+
   it('does not decorate unused non-session quotas as healthy pacing', () => {
     const { container } = showAlways(quota(0));
     expect(screen.queryByText(/left at reset/)).not.toBeInTheDocument();
