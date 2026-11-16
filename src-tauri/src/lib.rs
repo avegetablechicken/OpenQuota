@@ -9,6 +9,8 @@ mod desktop_integration;
 mod hashing;
 mod http_client;
 mod logging;
+#[cfg(target_os = "macos")]
+mod login_item;
 #[cfg(any(target_os = "macos", test))]
 mod menu_bar;
 mod models;
@@ -749,6 +751,18 @@ pub(crate) fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String
     #[cfg(not(target_os = "linux"))]
     {
         let manager = app.autolaunch();
+        #[cfg(target_os = "macos")]
+        if login_item::available() {
+            login_item::set_enabled(enabled).map_err(|error| {
+                crate::app_warn!("config", "login item could not be updated: {error}");
+                "Launch at login could not be updated.".to_owned()
+            })?;
+            // Replaced by the login item either way.
+            if manager.is_enabled().unwrap_or(false) {
+                let _ = manager.disable();
+            }
+            return Ok(());
+        }
         let result = if enabled {
             manager.enable()
         } else {
@@ -766,7 +780,27 @@ pub(crate) fn autostart_is_enabled(app: &AppHandle) -> Result<bool, ()> {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        #[cfg(target_os = "macos")]
+        if login_item::is_enabled() {
+            return Ok(true);
+        }
         app.autolaunch().is_enabled().map_err(|_| ())
+    }
+}
+
+/// Whether System Settings blocks the registered login item.
+pub(crate) fn autostart_needs_approval() -> bool {
+    #[cfg(target_os = "macos")]
+    return login_item::needs_approval();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// Moves a launch agent written by the autostart plugin to the login item.
+#[cfg(target_os = "macos")]
+fn migrate_autostart(app: &AppHandle) {
+    if login_item::available() && app.autolaunch().is_enabled().unwrap_or(false) {
+        let _ = set_autostart(app, true);
     }
 }
 
@@ -801,6 +835,8 @@ pub fn run() {
 
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            #[cfg(target_os = "macos")]
+            migrate_autostart(app.handle());
 
             app.handle().plugin(tauri_plugin_positioner::init())?;
             let desktop_integration = DesktopIntegration::detect();

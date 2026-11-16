@@ -11,7 +11,7 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{
-    apply_shortcut_change, autostart_is_enabled, child_process,
+    apply_shortcut_change, autostart_is_enabled, autostart_needs_approval, child_process,
     desktop_integration::DesktopIntegration,
     models::{
         AppSettings, MenuBarStyle, SettingsViewState, UpdateFrequency, UsageDisplay, WindowMode,
@@ -597,6 +597,12 @@ pub(crate) fn settings_view_state(app: &AppHandle, service: &SettingsService) ->
             Some("Launch at login status could not be read.".to_owned()),
         ),
     };
+    if autostart == Some(true) && autostart_needs_approval() {
+        integration_error = Some(
+            "macOS blocks OpenQuota from opening at login. Allow it in System Settings > General > Login Items."
+                .to_owned(),
+        );
+    }
     if let Some(shortcut) = service.get().global_shortcut {
         if !app.global_shortcut().is_registered(shortcut.as_str()) {
             integration_error =
