@@ -3009,6 +3009,7 @@ dependencies = [
  "fontdue",
  "gdk",
  "ipnet",
+ "libc",
  "native-tls",
  "notify-rust",
  "objc2",

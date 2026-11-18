@@ -971,6 +971,50 @@ mod tests {
         assert!(locks.iter().all(|lock| !lock.exists()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn refresh_takes_over_from_a_claude_code_that_died_holding_its_lock() {
+        let directory = tempdir().unwrap();
+        let account_root = directory.path().join("account");
+        let credentials = expired_login(&account_root);
+        // Exited mid-renewal: its locks are far from stale, but its owner record proves it gone.
+        let locks = super::refresh_lock::hold_as_dead_claude_code(&account_root);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let refresh = read_request(&mut stream);
+            let body =
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream);
+            write_http_response(&mut stream, 25);
+            refresh
+        });
+        let provider = isolated_provider(directory.path(), &account_root);
+        let config = ClaudeOAuthConfig {
+            usage_url: format!("{base}/usage"),
+            refresh_url: format!("{base}/token"),
+            client_id: "test-client".into(),
+        };
+
+        provider.refresh_inner_with_config(&config).unwrap();
+
+        assert!(server.join().unwrap().starts_with("POST /token "));
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&credentials).unwrap()).unwrap();
+        assert_eq!(saved["claudeAiOauth"]["accessToken"], "new-access");
+        assert!(locks.iter().all(|lock| !lock.exists()));
+        assert!(!account_root.join(super::refresh_lock::OWNER_FILE).exists());
+    }
+
     #[test]
     fn renewal_is_saved_under_claude_codes_lock_before_usage_is_asked() {
         let directory = tempdir().unwrap();
