@@ -817,7 +817,7 @@ pub fn run() {
         window::activate_existing_instance(app);
     }));
 
-    builder
+    let app = builder
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -833,8 +833,6 @@ pub fn run() {
             appearance::configure(app)?;
             logging::init(logging::default_log_path(), models::LogLevel::Info);
 
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             #[cfg(target_os = "macos")]
             migrate_autostart(app.handle());
 
@@ -1026,6 +1024,16 @@ pub fn run() {
             updates::open_update_page
         ])
         .on_window_event(handle_window_event)
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running OpenQuota");
+    // A menu bar app: no Dock icon and no app menu. tao applies this policy at
+    // launch, before it creates the window, which can join a full-screen app's
+    // space only if created while the app is an accessory.
+    #[cfg(target_os = "macos")]
+    let app = {
+        let mut app = app;
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        app
+    };
+    app.run(|_, _| {});
 }

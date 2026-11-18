@@ -485,6 +485,7 @@ pub fn present_main_window(window: &WebviewWindow, focus: bool) {
             let _ = restore_manual_panel_height(window);
             position_popup(window);
         }
+        join_active_space(window, !floating);
         if focus {
             let _ = window.show();
             let _ = window.set_focus();
@@ -514,7 +515,37 @@ fn order_front(window: &WebviewWindow) {
     let _ = window.show();
 }
 
+/// The popup appears in whichever space is active, including a full-screen
+/// app's, as the menu bar it hangs from; the floating window, like other
+/// windows, stays in the space it was put in.
+fn join_active_space(window: &WebviewWindow, join: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let target = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+            let Ok(ns_window) = target.ns_window() else {
+                return;
+            };
+            // SAFETY: Tauri returns the window's NSWindow, used on the main thread.
+            let ns_window = unsafe { &*ns_window.cast::<NSWindow>() };
+            let popup = NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::IgnoresCycle;
+            let behavior = ns_window.collectionBehavior();
+            ns_window.setCollectionBehavior(if join {
+                behavior | popup
+            } else {
+                behavior & !popup
+            });
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, join);
+}
+
 fn set_window_chrome(window: &WebviewWindow, floating: bool) -> tauri::Result<()> {
+    join_active_space(window, !floating);
     window
         .set_resizable(false)
         .and_then(|_| window.set_skip_taskbar(!floating))
