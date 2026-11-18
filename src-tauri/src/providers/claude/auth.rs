@@ -13,7 +13,9 @@ use crate::{
     providers::credential_store::{read_generic_password, write_generic_password},
 };
 
-use super::ClaudeError;
+use serde_json::Value;
+
+use super::{client::ClaudeRefreshResponse, ClaudeError};
 
 const DEFAULT_API_BASE: &str = "https://api.anthropic.com";
 const DEFAULT_REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -145,61 +147,159 @@ impl ClaudeCredential {
         pair.finalize().into()
     }
 
-    pub(super) fn update_and_save(
+    /// Applies a renewal of the refresh token `spent` to this login and to the saved login it was
+    /// read from, while that still holds `spent`. Only the members a renewal changes are
+    /// written: everything else the saved login keeps (Claude Code's client, its MCP logins,
+    /// members unknown here) stays exactly as it is. A saved login holding another refresh token
+    /// was renewed or switched by someone else and is never written over.
+    pub(super) fn save_renewal(
         &mut self,
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: Option<f64>,
+        renewal: &ClaudeRefreshResponse,
+        spent: &str,
         now_millis: i64,
-        expected_generation: &ClaudeCredentialGeneration,
-        scope: &ClaudeCredentialScope,
     ) -> Result<bool, ClaudeError> {
-        self.update_and_save_with_generation(
-            access_token,
-            refresh_token,
-            expires_in,
-            now_millis,
-            expected_generation,
-            || credential_generation(scope),
-        )
+        let saved = match &self.source {
+            CredentialSource::Environment => {
+                self.apply_in_memory(renewal, now_millis);
+                return Ok(false);
+            }
+            source => read_saved_document(source),
+        };
+        let mut document = match saved {
+            Ok(Some(document)) => document,
+            Ok(None) => return Err(ClaudeError::CredentialsChanged),
+            Err(error) => {
+                self.apply_in_memory(renewal, now_millis);
+                return Err(error);
+            }
+        };
+        let oauth = document
+            .get_mut("claudeAiOauth")
+            .and_then(Value::as_object_mut)
+            .filter(|oauth| oauth.get("refreshToken").and_then(Value::as_str) == Some(spent))
+            .ok_or(ClaudeError::CredentialsChanged)?;
+        apply_renewal(oauth, renewal, now_millis);
+        let saved: ClaudeCredentialsFile = match serde_json::from_value(document.clone()) {
+            Ok(saved) => saved,
+            Err(_) => {
+                self.apply_in_memory(renewal, now_millis);
+                return Err(ClaudeError::AuthWrite);
+            }
+        };
+        let written = serde_json::to_vec(&document)
+            .map_err(|_| ClaudeError::AuthWrite)
+            .and_then(|bytes| match &self.source {
+                CredentialSource::File(path) => {
+                    // Replace a symlink's target (a dotfiles checkout, say), not the link.
+                    let path = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                    write_private_file_atomic(&path, &bytes)
+                }
+                CredentialSource::Keychain { service, account } => {
+                    write_generic_password(service, account, &bytes)
+                        .map_err(|_| ClaudeError::AuthWrite)
+                }
+                CredentialSource::Environment => Ok(()),
+            });
+        if let Err(error) = written {
+            self.apply_in_memory(renewal, now_millis);
+            return Err(error);
+        }
+        if let Some(oauth) = saved.claude_ai_oauth.clone() {
+            self.oauth = oauth;
+        }
+        self.document = saved;
+        Ok(true)
     }
 
-    fn update_and_save_with_generation<F>(
-        &mut self,
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: Option<f64>,
-        now_millis: i64,
-        expected_generation: &ClaudeCredentialGeneration,
-        current_generation: F,
-    ) -> Result<bool, ClaudeError>
-    where
-        F: FnOnce() -> ClaudeCredentialGeneration,
+    /// Keeps a renewal that could not be saved for this session.
+    fn apply_in_memory(&mut self, renewal: &ClaudeRefreshResponse, now_millis: i64) {
+        let mut oauth = serde_json::to_value(&self.oauth)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        apply_renewal(&mut oauth, renewal, now_millis);
+        if let Ok(updated) = serde_json::from_value(Value::Object(oauth)) {
+            self.oauth = updated;
+        }
+    }
+}
+
+/// The members a token response changes, as Claude Code records them: times are integer
+/// milliseconds since the epoch.
+fn apply_renewal(
+    oauth: &mut serde_json::Map<String, Value>,
+    renewal: &ClaudeRefreshResponse,
+    now_millis: i64,
+) {
+    oauth.insert("accessToken".into(), renewal.access_token.clone().into());
+    if let Some(refresh) = renewal
+        .refresh_token
+        .as_deref()
+        .filter(|value| !value.is_empty())
     {
-        if current_generation() != *expected_generation {
-            return Err(ClaudeError::CredentialsChanged);
+        oauth.insert("refreshToken".into(), refresh.into());
+    }
+    let at = |seconds: Option<f64>| {
+        seconds
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .map(|seconds| now_millis.saturating_add((seconds * 1000.0).round() as i64))
+    };
+    if let Some(expires) = at(renewal.expires_in) {
+        oauth.insert("expiresAt".into(), expires.into());
+    }
+    if let Some(expires) = at(renewal.refresh_token_expires_in) {
+        oauth.insert("refreshTokenExpiresAt".into(), expires.into());
+    }
+    if let Some(scope) = renewal.scope.as_deref() {
+        let scopes: Vec<&str> = scope.split_whitespace().collect();
+        if !scopes.is_empty() {
+            oauth.insert("scopes".into(), scopes.into());
         }
-        self.oauth.access_token = Some(access_token);
-        if let Some(refresh_token) = refresh_token.filter(|value| !value.is_empty()) {
-            self.oauth.refresh_token = Some(refresh_token);
-        }
-        if let Some(expires_in) = expires_in {
-            self.oauth.expires_at = Some(now_millis as f64 + expires_in * 1000.0);
-        }
-        self.document.claude_ai_oauth = Some(self.oauth.clone());
-        let bytes = serde_json::to_vec(&self.document).map_err(|_| ClaudeError::AuthWrite)?;
-        match &self.source {
-            CredentialSource::File(path) => {
-                write_private_file_atomic(path, &bytes)?;
-                Ok(true)
+    }
+}
+
+/// The saved login as a document; `None` once it is gone.
+fn read_saved_document(source: &CredentialSource) -> Result<Option<Value>, ClaudeError> {
+    let bytes = match source {
+        CredentialSource::File(path) => match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ClaudeError::AuthWrite),
+        },
+        CredentialSource::Keychain { service, account } => {
+            match read_generic_password(service, account) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => return Ok(None),
+                Err(_) => return Err(ClaudeError::AuthWrite),
             }
-            CredentialSource::Keychain { service, account } => {
-                write_generic_password(service, account, &bytes)
-                    .map_err(|_| ClaudeError::AuthWrite)?;
-                Ok(true)
-            }
-            CredentialSource::Environment => Ok(false),
         }
+        CredentialSource::Environment => return Ok(None),
+    };
+    Ok(parse_document(&bytes))
+}
+
+/// How long a renewal waits while Claude Code renews its login.
+const CLAUDE_CODE_LOCK_WAIT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(600)
+} else {
+    std::time::Duration::from_secs(10)
+};
+
+/// Claude Code's refresh lock over the login kept in `scope`'s configuration directory; held
+/// until dropped. Claude Code creates the directory before locking it.
+pub(super) fn claude_code_lock(
+    scope: &ClaudeCredentialScope,
+) -> Result<super::refresh_lock::RefreshLock, ClaudeError> {
+    let path = credential_path(scope);
+    let directory = path.parent().ok_or(ClaudeError::RefreshLockUnavailable)?;
+    fs::create_dir_all(directory).map_err(|_| ClaudeError::RefreshLockUnavailable)?;
+    match super::refresh_lock::RefreshLock::acquire(
+        directory,
+        super::refresh_lock::Wait::up_to(CLAUDE_CODE_LOCK_WAIT),
+    ) {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => Err(ClaudeError::ClaudeCodeRenewing),
+        Err(_) => Err(ClaudeError::RefreshLockUnavailable),
     }
 }
 
@@ -493,6 +593,11 @@ fn parse_candidate(
 }
 
 fn parse_credentials(bytes: &[u8]) -> Option<ClaudeCredentialsFile> {
+    serde_json::from_value(parse_document(bytes)?).ok()
+}
+
+/// A credentials document: JSON, or JSON hex-encoded as Claude Code writes the Keychain item.
+fn parse_document(bytes: &[u8]) -> Option<Value> {
     serde_json::from_slice(bytes).ok().or_else(|| {
         let text = std::str::from_utf8(bytes).ok()?.trim();
         if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -585,9 +690,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        has_desktop_app_material_at, load_candidates_with_environment, parse_credentials,
-        write_private_file_atomic, ClaudeCredential, ClaudeCredentialGeneration,
-        ClaudeCredentialScope, ClaudeCredentialsFile, ClaudeOAuth, CredentialSource,
+        has_desktop_app_material_at, load_candidates_with_environment, parse_candidate,
+        parse_credentials, parse_document, write_private_file_atomic, ClaudeCredential,
+        ClaudeCredentialGeneration, ClaudeCredentialScope, ClaudeCredentialsFile, ClaudeOAuth,
+        ClaudeRefreshResponse, CredentialSource,
     };
     use crate::providers::claude::ClaudeError;
 
@@ -745,33 +851,73 @@ mod tests {
         assert_eq!(candidates[0].access_token(), Some("first-token"));
     }
 
+    fn renewal(access: &str, refresh: Option<&str>) -> ClaudeRefreshResponse {
+        ClaudeRefreshResponse {
+            access_token: access.into(),
+            refresh_token: refresh.map(Into::into),
+            expires_in: Some(3600.0),
+            refresh_token_expires_in: Some(7200.0),
+            scope: Some("user:profile user:inference".into()),
+        }
+    }
+
+    fn file_credential(path: &std::path::Path) -> ClaudeCredential {
+        parse_candidate(
+            &fs::read(path).unwrap(),
+            CredentialSource::File(path.to_path_buf()),
+            false,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn credential_write_failures_are_typed_and_do_not_expose_tokens() {
         let directory = tempdir().unwrap();
-        let blocked_parent = directory.path().join("not-a-directory");
-        fs::write(&blocked_parent, b"block directory creation").unwrap();
-        let mut credential = ClaudeCredential {
-            oauth: ClaudeOAuth::default(),
-            source: CredentialSource::File(blocked_parent.join("credentials.json")),
-            document: ClaudeCredentialsFile::default(),
-            inference_only: false,
-        };
-        let generation = ClaudeCredentialGeneration::from_candidates(&[credential.clone()]);
+        let path = directory.path().join(".credentials.json");
+        fs::write(
+            &path,
+            br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"spent"}}"#,
+        )
+        .unwrap();
+        let mut credential = file_credential(&path);
+        // The saved login cannot be replaced: its directory is read-only.
+        let blocked = directory.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        let blocked_path = blocked.join(".credentials.json");
+        fs::copy(&path, &blocked_path).unwrap();
+        credential.source = CredentialSource::File(blocked_path.clone());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        #[cfg(not(unix))]
+        fs::remove_file(&blocked_path)
+            .and_then(|()| fs::create_dir(&blocked_path))
+            .unwrap();
 
         let error = credential
-            .update_and_save_with_generation(
-                "secret-access".into(),
-                Some("secret-refresh".into()),
-                Some(3600.0),
+            .save_renewal(
+                &renewal("secret-access", Some("secret-refresh")),
+                "spent",
                 Utc::now().timestamp_millis(),
-                &generation,
-                || generation.clone(),
             )
             .unwrap_err();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        }
 
         assert!(matches!(error, ClaudeError::AuthWrite));
         assert!(!error.to_string().contains("secret-access"));
         assert!(!error.to_string().contains("secret-refresh"));
+        // The renewal stays usable for this session.
+        assert_eq!(credential.access_token(), Some("secret-access"));
+        assert_eq!(
+            credential.oauth.refresh_token.as_deref(),
+            Some("secret-refresh")
+        );
     }
 
     #[test]
@@ -786,45 +932,130 @@ mod tests {
     }
 
     #[test]
+    fn renewal_keeps_every_member_it_does_not_change() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(".credentials.json");
+        // Members Claude Code keeps beside the tokens, including ones unknown here.
+        fs::write(
+            &path,
+            br#"{"mcpOAuth":{"server|1":{"accessToken":"mcp","expiresAt":5}},"claudeAiOauth":{"accessToken":"old","refreshToken":"spent","expiresAt":1,"clientId":"code-client","subscriptionType":"max","rateLimitTier":null,"scopes":["user:inference"],"tokenAccount":{"uuid":"acct"}},"other":[1,2]}"#,
+        )
+        .unwrap();
+        let mut credential = file_credential(&path);
+        let now = 1_700_000_000_123;
+
+        assert!(credential
+            .save_renewal(&renewal("new", Some("next")), "spent", now)
+            .unwrap());
+
+        let raw = fs::read_to_string(&path).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let oauth = &saved["claudeAiOauth"];
+        assert_eq!(oauth["accessToken"], "new");
+        assert_eq!(oauth["refreshToken"], "next");
+        // Integer milliseconds, as Claude Code writes them.
+        assert_eq!(oauth["expiresAt"].as_i64(), Some(now + 3_600_000));
+        assert_eq!(
+            oauth["refreshTokenExpiresAt"].as_i64(),
+            Some(now + 7_200_000)
+        );
+        assert!(!raw.contains(".0,") && !raw.contains(".0}"));
+        assert_eq!(
+            oauth["scopes"],
+            serde_json::json!(["user:profile", "user:inference"])
+        );
+        assert_eq!(oauth["clientId"], "code-client");
+        assert_eq!(oauth["subscriptionType"], "max");
+        assert!(oauth["rateLimitTier"].is_null() && oauth.get("rateLimitTier").is_some());
+        assert_eq!(oauth["tokenAccount"]["uuid"], "acct");
+        assert_eq!(saved["mcpOAuth"]["server|1"]["accessToken"], "mcp");
+        assert_eq!(saved["other"], serde_json::json!([1, 2]));
+        // What was saved is what is used and what is read back.
+        assert_eq!(credential.access_token(), Some("new"));
+        assert_eq!(
+            ClaudeCredentialGeneration::from_candidates(&[credential.clone()]),
+            ClaudeCredentialGeneration::from_candidates(&[file_credential(&path)])
+        );
+
+        // A response without a new refresh token keeps the one in use.
+        assert!(credential
+            .save_renewal(&renewal("newer", None), "next", now)
+            .unwrap());
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["claudeAiOauth"]["accessToken"], "newer");
+        assert_eq!(saved["claudeAiOauth"]["refreshToken"], "next");
+    }
+
+    #[test]
     fn credential_rotation_refuses_to_overwrite_a_changed_login() {
         let directory = tempdir().unwrap();
-        let path = directory.path().join("credentials.json");
-        fs::write(&path, b"original credential").unwrap();
-        let mut credential = ClaudeCredential {
-            oauth: ClaudeOAuth {
-                access_token: Some("account-a".into()),
-                refresh_token: Some("refresh-a".into()),
-                ..ClaudeOAuth::default()
-            },
-            source: CredentialSource::File(path.clone()),
-            document: ClaudeCredentialsFile::default(),
-            inference_only: false,
-        };
-        let expected = ClaudeCredentialGeneration::from_candidates(&[credential.clone()]);
-        let changed = ClaudeCredential {
-            oauth: ClaudeOAuth {
-                access_token: Some("account-b".into()),
-                refresh_token: Some("refresh-b".into()),
-                ..ClaudeOAuth::default()
-            },
-            ..credential.clone()
-        };
-        let current = ClaudeCredentialGeneration::from_candidates(&[changed]);
+        let path = directory.path().join(".credentials.json");
+        fs::write(
+            &path,
+            br#"{"claudeAiOauth":{"accessToken":"account-a","refreshToken":"refresh-a"}}"#,
+        )
+        .unwrap();
+        let mut credential = file_credential(&path);
+        // Renewed or switched by another program while our refresh ran.
+        let changed =
+            br#"{"claudeAiOauth":{"accessToken":"account-b","refreshToken":"refresh-b"}}"#;
+        fs::write(&path, changed).unwrap();
 
         let error = credential
-            .update_and_save_with_generation(
-                "rotated-a".into(),
-                Some("rotated-refresh-a".into()),
-                Some(3600.0),
+            .save_renewal(
+                &renewal("rotated-a", Some("rotated-refresh-a")),
+                "refresh-a",
                 Utc::now().timestamp_millis(),
-                &expected,
-                || current,
             )
             .unwrap_err();
 
         assert!(matches!(error, ClaudeError::CredentialsChanged));
         assert_eq!(credential.oauth.access_token.as_deref(), Some("account-a"));
-        assert_eq!(fs::read(path).unwrap(), b"original credential");
+        assert_eq!(fs::read(&path).unwrap(), changed);
+        // A removed login is not recreated either.
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            credential.save_renewal(&renewal("rotated-a", None), "refresh-a", 0),
+            Err(ClaudeError::CredentialsChanged)
+        ));
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renewal_replaces_a_symlinked_logins_target_not_the_link() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("dotfiles-credentials.json");
+        fs::write(
+            &target,
+            br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"spent"}}"#,
+        )
+        .unwrap();
+        let link = directory.path().join(".credentials.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut credential = file_credential(&link);
+
+        credential
+            .save_renewal(&renewal("new", Some("next")), "spent", 0)
+            .unwrap();
+
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+        assert_eq!(saved["claudeAiOauth"]["accessToken"], "new");
+    }
+
+    #[test]
+    fn hex_encoded_keychain_documents_are_read_whole() {
+        let raw = br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"},"mcpOAuth":{"k":1}}"#;
+        let hex = raw
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let document = parse_document(hex.as_bytes()).unwrap();
+        assert_eq!(document["mcpOAuth"]["k"], 1);
     }
 
     #[test]

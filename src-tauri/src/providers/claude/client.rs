@@ -15,6 +15,12 @@ pub struct ClaudeRefreshResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: Option<f64>,
+    /// Claude Code records when the refresh token itself expires.
+    #[serde(default)]
+    pub refresh_token_expires_in: Option<f64>,
+    /// The scopes granted, which Claude Code records.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Clone)]

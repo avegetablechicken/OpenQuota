@@ -4,6 +4,7 @@ mod client;
 pub mod config;
 mod local_usage;
 mod mapper;
+mod refresh_lock;
 
 pub(crate) use mapper::map_sub2api_usage;
 
@@ -138,6 +139,10 @@ pub enum ClaudeError {
     AuthWrite,
     #[error("Claude login changed during refresh. Refresh again.")]
     CredentialsChanged,
+    #[error("Claude Code is renewing its login. Refresh again in a moment.")]
+    ClaudeCodeRenewing,
+    #[error("Claude Code's login refresh lock could not be taken.")]
+    RefreshLockUnavailable,
     #[error("The Claude account changed while usage was refreshing. Refresh again.")]
     AccountChanged,
     #[error("Claude usage request failed (HTTP {0}).")]
@@ -527,21 +532,34 @@ fn refresh_credential(
     credential_generation: &mut ClaudeCredentialGeneration,
     credential_scope: &ClaudeCredentialScope,
 ) -> Result<(), ClaudeError> {
-    let refresh_token = credential
+    let spent = credential
         .oauth
         .refresh_token
-        .as_deref()
+        .clone()
         .filter(|value| !value.is_empty())
         .ok_or(ClaudeError::TokenExpired)?;
-    let refreshed = client.refresh_token(refresh_token, config)?;
-    match credential.update_and_save(
-        refreshed.access_token,
-        refreshed.refresh_token,
-        refreshed.expires_in,
-        now.timestamp_millis(),
-        credential_generation,
-        credential_scope,
-    ) {
+    // Claude Code renews its login only while holding this lock and rereads the login inside
+    // it. Holding it until the renewal is saved means no two programs spend one refresh token,
+    // and neither writes a spent one over the other's renewal.
+    let lock = auth::claude_code_lock(credential_scope)?;
+    // A login renewed or switched while we waited is reloaded, not renewed again.
+    if auth::credential_generation(credential_scope) != *credential_generation {
+        return Err(ClaudeError::CredentialsChanged);
+    }
+    // Taken over as a dead holder's: another program may be renewing now.
+    if lock.compromised() {
+        return Err(ClaudeError::ClaudeCodeRenewing);
+    }
+    let refreshed = match client.refresh_token(&spent, config) {
+        // A program that ignores the lock may have spent the token meanwhile.
+        Err(ClaudeError::SessionExpired)
+            if auth::credential_generation(credential_scope) != *credential_generation =>
+        {
+            return Err(ClaudeError::CredentialsChanged);
+        }
+        refreshed => refreshed?,
+    };
+    match credential.save_renewal(&refreshed, &spent, now.timestamp_millis()) {
         Ok(true) => {
             *credential_generation = credential_generation
                 .replacing(credential)
@@ -582,9 +600,10 @@ fn provider_error(error: ClaudeError) -> crate::providers::ProviderError {
         | ClaudeError::SessionExpired
         | ClaudeError::TokenExpired
         | ClaudeError::CredentialsChanged
+        | ClaudeError::ClaudeCodeRenewing
         | ClaudeError::AccountChanged => Kind::Authentication,
         ClaudeError::InvalidOAuthUrl | ClaudeError::InvalidResponse => Kind::InvalidResponse,
-        ClaudeError::AuthWrite => Kind::CredentialStorage,
+        ClaudeError::AuthWrite | ClaudeError::RefreshLockUnavailable => Kind::CredentialStorage,
         ClaudeError::RequestFailed(429) => Kind::RateLimited,
         ClaudeError::RequestFailed(_) | ClaudeError::ConnectionFailed => Kind::Network,
         ClaudeError::LocalUsage => Kind::LocalData,
@@ -810,5 +829,213 @@ mod tests {
         let authorization = server.join().unwrap();
         assert!(matches!(error, ClaudeError::AccountChanged));
         assert_eq!(authorization, "Bearer account-a");
+    }
+
+    /// A provider over an isolated Claude configuration directory.
+    fn isolated_provider(
+        directory: &std::path::Path,
+        account_root: &std::path::Path,
+    ) -> Arc<ClaudeProvider> {
+        let storage = Arc::new(Storage::open(&directory.join("openquota.db")).unwrap());
+        let pricing = Arc::new(PricingStore::new(directory.join("pricing")).unwrap());
+        Arc::new(ClaudeProvider::with_scope(
+            ClaudeCredentialScope::ConfigDir {
+                path: account_root.to_path_buf(),
+                keychain_literal: account_root.to_string_lossy().into_owned(),
+            },
+            storage,
+            pricing,
+            ClaudeClient::new().unwrap(),
+        ))
+    }
+
+    fn expired_login(account_root: &std::path::Path) -> std::path::PathBuf {
+        fs::create_dir_all(account_root).unwrap();
+        let path = account_root.join(".credentials.json");
+        fs::write(
+            &path,
+            r#"{"mcpOAuth":{"server":{"accessToken":"mcp"}},"claudeAiOauth":{"accessToken":"old","refreshToken":"spent","expiresAt":1,"clientId":"code-client","subscriptionType":"max","scopes":["user:profile","user:inference"]}}"#,
+        )
+        .unwrap();
+        path
+    }
+
+    /// One HTTP request: its head and body.
+    fn read_request(stream: &mut impl Read) -> String {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let length = stream.read(&mut chunk).unwrap();
+            bytes.extend_from_slice(&chunk[..length]);
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let expected = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if body.len() >= expected || length == 0 {
+                    return text;
+                }
+            }
+            if length == 0 {
+                return text;
+            }
+        }
+    }
+
+    fn unreachable_config() -> ClaudeOAuthConfig {
+        // Nothing listens here: any request fails as a connection error.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        ClaudeOAuthConfig {
+            usage_url: format!("{base}/usage"),
+            refresh_url: format!("{base}/token"),
+            client_id: "test-client".into(),
+        }
+    }
+
+    #[test]
+    fn refresh_waits_while_claude_code_renews_and_never_spends_its_token() {
+        let directory = tempdir().unwrap();
+        let account_root = directory.path().join("account");
+        let credentials = expired_login(&account_root);
+        let before = fs::read(&credentials).unwrap();
+        let locks = super::refresh_lock::lock_paths(&account_root);
+        for lock in &locks {
+            fs::create_dir(lock).unwrap();
+        }
+        let provider = isolated_provider(directory.path(), &account_root);
+
+        let error = provider
+            .refresh_inner_with_config(&unreachable_config())
+            .unwrap_err();
+
+        // Nothing was sent: the refresh token is Claude Code's to spend.
+        assert!(matches!(error, ClaudeError::ClaudeCodeRenewing), "{error}");
+        assert_eq!(fs::read(&credentials).unwrap(), before);
+        assert!(locks.iter().all(|lock| lock.is_dir()));
+    }
+
+    #[test]
+    fn refresh_adopts_the_renewal_claude_code_finished_while_it_waited() {
+        let directory = tempdir().unwrap();
+        let account_root = directory.path().join("account");
+        let credentials = expired_login(&account_root);
+        let locks = super::refresh_lock::lock_paths(&account_root);
+        for lock in &locks {
+            fs::create_dir(lock).unwrap();
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            write_http_response(&mut stream, 25);
+            request
+        });
+        let finish = {
+            let (credentials, locks) = (credentials.clone(), locks.clone());
+            thread::spawn(move || {
+                thread::sleep(StdDuration::from_millis(150));
+                fs::write(
+                    &credentials,
+                    credential_json("code-access", "code-refresh", "max"),
+                )
+                .unwrap();
+                for lock in locks.iter().rev() {
+                    fs::remove_dir(lock).unwrap();
+                }
+            })
+        };
+        let provider = isolated_provider(directory.path(), &account_root);
+        let config = ClaudeOAuthConfig {
+            usage_url: format!("{base}/usage"),
+            refresh_url: format!("{base}/token"),
+            client_id: "test-client".into(),
+        };
+
+        provider.refresh_inner_with_config(&config).unwrap();
+        finish.join().unwrap();
+
+        // The only request asks for usage with Claude Code's renewal.
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /usage "), "{request}");
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer code-access"));
+        assert!(locks.iter().all(|lock| !lock.exists()));
+    }
+
+    #[test]
+    fn renewal_is_saved_under_claude_codes_lock_before_usage_is_asked() {
+        let directory = tempdir().unwrap();
+        let account_root = directory.path().join("account");
+        let credentials = expired_login(&account_root);
+        let locks = super::refresh_lock::lock_paths(&account_root);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = {
+            let (credentials, locks) = (credentials.clone(), locks.clone());
+            thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let refresh = read_request(&mut stream);
+                let locked_during_refresh = locks.iter().all(|lock| lock.is_dir());
+                let body = r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"refresh_token_expires_in":7200,"scope":"user:profile user:inference"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                drop(stream);
+                let (mut stream, _) = listener.accept().unwrap();
+                let usage = read_request(&mut stream);
+                let locked_during_usage = locks.iter().any(|lock| lock.exists());
+                let saved_before_usage = fs::read_to_string(&credentials).unwrap();
+                write_http_response(&mut stream, 25);
+                (
+                    refresh,
+                    locked_during_refresh,
+                    usage,
+                    locked_during_usage,
+                    saved_before_usage,
+                )
+            })
+        };
+        let provider = isolated_provider(directory.path(), &account_root);
+        let config = ClaudeOAuthConfig {
+            usage_url: format!("{base}/usage"),
+            refresh_url: format!("{base}/token"),
+            client_id: "test-client".into(),
+        };
+
+        provider.refresh_inner_with_config(&config).unwrap();
+
+        let (refresh, locked_during_refresh, usage, locked_during_usage, saved_before_usage) =
+            server.join().unwrap();
+        assert!(refresh.starts_with("POST /token "), "{refresh}");
+        assert!(refresh.contains("\"refresh_token\":\"spent\""));
+        assert!(locked_during_refresh);
+        assert!(usage.starts_with("GET /usage "), "{usage}");
+        assert!(usage
+            .to_ascii_lowercase()
+            .contains("authorization: bearer new-access"));
+        assert!(!locked_during_usage);
+        assert!(saved_before_usage.contains("new-refresh"));
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&credentials).unwrap()).unwrap();
+        let oauth = &saved["claudeAiOauth"];
+        assert_eq!(oauth["accessToken"], "new-access");
+        assert_eq!(oauth["refreshToken"], "new-refresh");
+        assert!(oauth["expiresAt"].is_i64());
+        assert!(oauth["refreshTokenExpiresAt"].is_i64());
+        assert_eq!(oauth["clientId"], "code-client");
+        assert_eq!(oauth["subscriptionType"], "max");
+        assert_eq!(saved["mcpOAuth"]["server"]["accessToken"], "mcp");
     }
 }
