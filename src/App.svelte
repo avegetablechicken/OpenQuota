@@ -5,6 +5,7 @@
     beginPanelResize,
     dismissMainWindow,
     getBootstrapState,
+    reportFirstPanelFrame,
     getLogPath,
     getPanelHeightMode,
     getPanelResizeEdge,
@@ -67,10 +68,10 @@
   let screen = $state<Screen>('dashboard');
   let now = $state(Date.now());
   let settingsError = $state<string | null>(null);
-  let automaticUpdatesReady = $state(false);
+  let bootstrapReady = $state(false);
   let systemReducedMotion = $state(false);
   let slideDirection = $state(1);
-  let slidePageTransition = $state(true);
+  let slidePageTransition = $state(false);
   let customizationHistory = $state<AppSettings[]>([]);
   let customizationGestureStart: AppSettings | null = null;
   let reordering = $state(false);
@@ -94,7 +95,7 @@
   const platform = desktopPlatform();
   const shortcuts = shortcutLabels(platform);
   const settingsController = new SettingsController((message) => (settingsError = message));
-  const settingsState = $derived(settingsController.state);
+  const settingsState = $derived(bootstrapReady ? settingsController.state : null);
   const reducedMotion = $derived(
     systemReducedMotion || Boolean(settingsState?.settings.reduceAnimations),
   );
@@ -132,7 +133,7 @@
   });
 
   $effect(() => {
-    if (!automaticUpdatesReady || !settingsState?.settings.autoCheckUpdates) return;
+    if (!bootstrapReady || !settingsState?.settings.autoCheckUpdates) return;
     const delay = automaticUpdateDelay(settingsState.settings.lastUpdateCheckAt);
     let interval: ReturnType<typeof setInterval> | undefined;
     const timer = setTimeout(() => {
@@ -184,6 +185,7 @@
     slidePageTransition = shouldSlideBetweenScreens(screen, next);
     slideDirection = screenRank(next) >= screenRank(screen) ? 1 : -1;
     screen = next;
+    if (next === 'settings' && bootstrapReady) void settingsController.refreshIfIdle();
   }
   async function openProviderCustomization(providerId: string, focusBack = false) {
     navigate(`provider:${providerId}`);
@@ -710,7 +712,7 @@
     updateMotionPreference();
     motionQuery.addEventListener('change', updateMotionPreference);
     const refreshWindowState = () => {
-      void settingsController.refreshIfIdle();
+      if (bootstrapReady && screen === 'settings') void settingsController.refreshIfIdle();
       updatePanelResizeEdge();
       updatePanelHeightMode();
       scheduleWindowFit();
@@ -822,7 +824,8 @@
     listeners.add(
       onMainWindowHidden(() => {
         resetTransientUi();
-        navigate('dashboard');
+        slidePageTransition = false;
+        screen = 'dashboard';
       }),
     );
     listeners.add(
@@ -830,15 +833,41 @@
         updates.setProgress(progress);
       }),
     );
+    // A hidden WebView can wait a long time for its first visible frame. Keep
+    // the IPC duration separate from the age of the document in the local log.
+    let frame = 0;
+    let disposed = false;
+    let bootstrapMs: number | undefined;
+    function observeFirstFrame() {
+      if (bootstrapMs === undefined || document.visibilityState !== 'visible' || frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          if (document.visibilityState !== 'visible' || bootstrapMs === undefined) return;
+          void reportFirstPanelFrame(bootstrapMs, Math.round(performance.now())).catch(() => {});
+          document.removeEventListener('visibilitychange', observeFirstFrame);
+          bootstrapMs = undefined;
+        });
+      });
+    }
+    document.addEventListener('visibilitychange', observeFirstFrame);
+    const requestedAt = performance.now();
     void getBootstrapState()
       .then((state) => {
+        if (disposed) return;
+        bootstrapMs = Math.round(performance.now() - requestedAt);
         catalog = new ProviderCatalogIndex(state.catalog);
         viewState = state.usage;
         settingsController.setState(state.settings);
-        automaticUpdatesReady = true;
+        bootstrapReady = true;
+        observeFirstFrame();
+        if (screen === 'settings') void settingsController.refreshIfIdle();
       })
       .catch(() => (settingsError = 'OpenQuota backend is unavailable.'));
     return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', observeFirstFrame);
+      cancelAnimationFrame(frame);
       document.removeEventListener('keydown', handleKeydown);
       window.clearInterval(clock);
       windowController.dispose();

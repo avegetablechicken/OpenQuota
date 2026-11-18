@@ -120,7 +120,7 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
     });
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_app_settings(
     app: AppHandle,
     settings: State<'_, Arc<SettingsService>>,

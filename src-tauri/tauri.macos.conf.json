@@ -14,6 +14,7 @@
         "fullscreen": false,
         "decorations": false,
         "transparent": true,
+        "backgroundThrottling": "throttle",
         "visible": false,
         "skipTaskbar": true,
         "alwaysOnTop": true,

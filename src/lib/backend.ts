@@ -24,6 +24,10 @@ function onEvent<T>(name: string, handler: PayloadHandler<T>): Promise<StopListe
   return listen<T>(name, (event) => handler(event.payload));
 }
 
+export function reportFirstPanelFrame(bootstrapMs: number, documentMs: number) {
+  return invoke<void>('report_first_panel_frame', { bootstrapMs, documentMs });
+}
+
 export function getBootstrapState() {
   return invoke<BootstrapState>('get_bootstrap_state');
 }

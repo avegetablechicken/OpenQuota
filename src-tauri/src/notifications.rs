@@ -76,14 +76,15 @@ fn notification_snapshot(state: &ProviderViewState) -> Option<&ProviderSnapshot>
 }
 
 fn deliver(app: &AppHandle, alerts: &[PaceAlert]) -> Vec<PaceAlert> {
+    if alerts.is_empty() {
+        return Vec::new();
+    }
     if permission(app) != "granted" {
-        if !alerts.is_empty() {
-            crate::app_debug!(
-                "notifications",
-                "skipped {} alerts because permission is unavailable",
-                alerts.len()
-            );
-        }
+        crate::app_debug!(
+            "notifications",
+            "skipped {} alerts because permission is unavailable",
+            alerts.len()
+        );
         return alerts.to_vec();
     }
     alerts

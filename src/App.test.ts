@@ -117,6 +117,19 @@ describe('OpenQuota dashboard', () => {
   });
   afterEach(cleanup);
 
+  it('renders cached usage while live system settings are pending', async () => {
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) =>
+      command === 'get_app_settings' ? new Promise(() => {}) : original(command, args),
+    );
+    render(App);
+    expect((await screen.findAllByText('Codex', { exact: true }))[0]).toBeVisible();
+    await fireEvent.focus(window);
+    expect(mocks.invoke).not.toHaveBeenCalledWith('get_app_settings');
+    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(mocks.invoke).toHaveBeenCalledWith('get_app_settings');
+  });
+
   it.each([0, 1, 3])('renders exactly %i returned upstream accounts', async (count) => {
     const original = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command, args) => {

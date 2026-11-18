@@ -32,7 +32,10 @@ export function createWindowController(options: WindowControllerOptions) {
   let dashboardBodyHeight: number | null = null;
 
   function shouldDefer() {
-    return options.reordering() || shouldDeferPanelFit(options.screen(), options.refreshing());
+    return (
+      options.reordering() ||
+      (!initialFit && shouldDeferPanelFit(options.screen(), options.refreshing()))
+    );
   }
 
   function cancelPendingResize() {
@@ -85,7 +88,10 @@ export function createWindowController(options: WindowControllerOptions) {
     const pageHeight = renderedHeight > 0 ? renderedHeight : page.offsetHeight || page.scrollHeight;
     stage.style.height = `${pageHeight}px`;
 
-    if (!options.automatic() || !('__TAURI_INTERNALS__' in window) || !resizeAvailable) return;
+    if (!options.automatic() || !('__TAURI_INTERNALS__' in window) || !resizeAvailable) {
+      initialFit = false;
+      return;
+    }
 
     const contentStyle = window.getComputedStyle(content);
     const contentPadding =

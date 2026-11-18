@@ -799,13 +799,14 @@ pub(crate) fn autostart_needs_approval() -> bool {
 /// Moves a launch agent written by the autostart plugin to the login item.
 #[cfg(target_os = "macos")]
 fn migrate_autostart(app: &AppHandle) {
-    if login_item::available() && app.autolaunch().is_enabled().unwrap_or(false) {
+    if app.autolaunch().is_enabled().unwrap_or(false) && login_item::available() {
         let _ = set_autostart(app, true);
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let process_start = std::time::Instant::now();
     #[cfg(target_os = "linux")]
     appearance::enable_compositing();
     #[cfg(target_os = "linux")]
@@ -828,11 +829,16 @@ pub fn run() {
         ))
         .manage(PopupDismissGuard::default())
         .manage(updates::UpdateCoordinator::default())
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(target_os = "linux")]
             appearance::configure(app)?;
             logging::init(logging::default_log_path(), models::LogLevel::Info);
 
+            app_info!(
+                "lifecycle",
+                "native setup entered ({} ms since run)",
+                process_start.elapsed().as_millis()
+            );
             #[cfg(target_os = "macos")]
             migrate_autostart(app.handle());
 
@@ -983,6 +989,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap::get_bootstrap_state,
+            commands::bootstrap::report_first_panel_frame,
             commands::provider::open_provider_link,
             commands::provider::probe_provider_proxy,
             commands::provider::get_provider_api_key_state,

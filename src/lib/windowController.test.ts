@@ -244,7 +244,7 @@ describe('hybrid window controller', () => {
     controller.dispose();
   });
 
-  it('defers automatic fitting while refresh or reordering can move rows', async () => {
+  it('fits cached content during startup and defers subsequent fits until refresh ends', async () => {
     let refreshing = true;
     const controller = createWindowController({
       screen: () => 'dashboard',
@@ -256,7 +256,10 @@ describe('hybrid window controller', () => {
     });
 
     controller.scheduleFit();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(430));
+    mocks.fitPanelToContent.mockClear();
+    controller.scheduleFit();
+    await new Promise((resolve) => setTimeout(resolve, 30));
     expect(mocks.fitPanelToContent).not.toHaveBeenCalled();
 
     refreshing = false;
