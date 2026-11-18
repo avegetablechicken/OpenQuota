@@ -129,6 +129,14 @@ authorization works. DMG builds fall back to packaging without Finder layout if
 Automation permission is unavailable, then verify the image contents and print
 its SHA-256 checksum. Artifacts are written under `src-tauri/target/release/bundle`.
 
+For a Windows x64 app only, run `corepack pnpm build:windows` (or
+`powershell -File scripts/build-windows.ps1`). Add `installer` to generate an NSIS installer,
+and `-Check` to run the full repository checks first. The script uses installed dependencies
+and the `stable-x86_64-pc-windows-msvc` Rust toolchain, including on Windows ARM64 hosts;
+install it first with `rustup toolchain install stable-x86_64-pc-windows-msvc`.
+It verifies the executable architecture and prints the installer's SHA-256 checksum.
+Artifacts are written under `src-tauri/target/x86_64-pc-windows-msvc/release`.
+
 Maintainers can review updater and optional native-signing requirements in
 [docs/releasing.md](docs/releasing.md).
 

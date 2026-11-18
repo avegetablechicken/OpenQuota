@@ -10,6 +10,7 @@
     "build:installer": "tauri build --bundles nsis",
     "build:linux": "tauri build --bundles deb,appimage",
     "build:macos": "bash scripts/build-macos.sh",
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "check": "svelte-check --tsconfig ./tsconfig.app.json",
     "test": "vitest run",
     "test:watch": "vitest",
