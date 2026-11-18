@@ -38,18 +38,18 @@ try {
     if ($runningApp) {
         throw "Close the running application before rebuilding: $appPath"
     }
-    $corepack = (Get-Command corepack.cmd -ErrorAction Stop).Source
+    $tauri = Join-Path $PWD 'node_modules/.bin/tauri.cmd'
     # Select the x64 compiler itself, including on Windows ARM64 hosts.
     $env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-msvc'
     Invoke-Checked rustc @('-vV')
     if ($Check) {
-        Invoke-Checked $corepack @('pnpm', 'verify')
+        Invoke-Checked corepack.cmd @('pnpm', 'verify')
         Invoke-Checked git @('diff', '--check')
     }
     if ($Mode -eq 'installer') {
-        Invoke-Checked $corepack @('pnpm', 'build:installer', '--target', $target)
+        Invoke-Checked $tauri @('build', '--bundles', 'nsis', '--target', $target)
     } else {
-        Invoke-Checked $corepack @('pnpm', 'tauri', 'build', '--no-bundle', '--target', $target)
+        Invoke-Checked $tauri @('build', '--no-bundle', '--target', $target)
     }
     $stream = [System.IO.File]::OpenRead($appPath)
     $reader = [System.IO.BinaryReader]::new($stream)
