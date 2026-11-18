@@ -1,0 +1,9 @@
+@font-face {
+  font-family: 'Twemoji Country Flags';
+  src: url('./TwemojiCountryFlags.woff2') format('woff2');
+  unicode-range: U+1F1E6-1F1FF;
+}
+
+.proxy-location {
+  font-family: 'Twemoji Country Flags', 'Segoe UI Emoji', sans-serif;
+}

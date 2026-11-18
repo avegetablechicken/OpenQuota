@@ -8,11 +8,24 @@ const packageVersion = (
   }
 ).version;
 
+const windows = process.env.TAURI_ENV_PLATFORM
+  ? process.env.TAURI_ENV_PLATFORM === 'windows'
+  : process.platform === 'win32';
+
 export default defineConfig({
+  publicDir: windows ? 'assets/windows' : 'public',
   define: {
     'import.meta.env.APP_VERSION': JSON.stringify(packageVersion),
   },
-  plugins: [svelte()],
+  plugins: [
+    svelte(),
+    windows && {
+      name: 'windows-proxy-flags',
+      transformIndexHtml: () => [
+        { tag: 'link', attrs: { rel: 'stylesheet', href: '/fonts/proxy-flags.css' } },
+      ],
+    },
+  ],
   resolve: {
     conditions: ['browser'],
   },
