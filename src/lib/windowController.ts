@@ -24,6 +24,7 @@ export function createWindowController(options: WindowControllerOptions) {
   let resizeFrame = 0;
   let resizeGeneration = 0;
   let resizeAvailable = true;
+  let initialFit = true;
   let contentMorphActive = false;
   let contentMorphTimer: ReturnType<typeof setTimeout> | undefined;
   let resizeInFlight = false;
@@ -116,7 +117,8 @@ export function createWindowController(options: WindowControllerOptions) {
     );
     const target = screenPanelHeight(screen, contentTarget, dashboardTarget);
 
-    if (options.reducedMotion() || contentMorphActive) {
+    if (initialFit || options.reducedMotion() || contentMorphActive) {
+      initialFit = false;
       ++resizeGeneration;
       window.cancelAnimationFrame(resizeFrame);
       await resize(target);

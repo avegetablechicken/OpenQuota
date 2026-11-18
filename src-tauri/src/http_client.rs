@@ -223,11 +223,6 @@ impl ProviderClient {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn warm_system_proxy_credentials() {
-    platform::warm_system_proxy_credentials();
-}
-
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use reqwest::blocking::ClientBuilder;
@@ -354,16 +349,6 @@ mod platform {
         builder
             .no_proxy()
             .proxy(Proxy::custom(move |url| resolver.proxy_for_url(url)))
-    }
-
-    pub(super) fn warm_system_proxy_credentials() {
-        let Ok(url) = Url::parse("https://chatgpt.com/backend-api/wham/usage") else {
-            return;
-        };
-        PROXY_RESOLVER
-            .get_or_init(ProxyResolver::from_sources)
-            .system
-            .warm_credentials_for_url(&url);
     }
 
     struct ProxyResolver {
@@ -512,16 +497,6 @@ mod platform {
                 .as_ref()
                 .and_then(|resolver| resolver.proxy_for_url(url))
         }
-
-        fn warm_credentials_for_url(&self, url: &Url) {
-            let Ok(mut cache) = self.cache.lock() else {
-                return;
-            };
-            cache.update(SystemProxyConfiguration::from_settings());
-            if let Some(resolver) = &cache.resolver {
-                resolver.warm_credentials_for_url(url);
-            }
-        }
     }
 
     impl SystemProxyCache {
@@ -625,11 +600,14 @@ mod platform {
                 return proxy;
             };
             let endpoint = ProxyEndpoint { host, port };
-            let credentials = self
-                .credentials
-                .lock()
-                .ok()
-                .and_then(|cache| cache.get(&endpoint).cloned().flatten());
+            // Look up credentials on the first request to this proxy. Cache misses too,
+            // so an unauthenticated proxy only needs one Keychain lookup per configuration.
+            let credentials = self.credentials.lock().ok().and_then(|mut cache| {
+                cache
+                    .entry(endpoint)
+                    .or_insert_with_key(load_proxy_credentials)
+                    .clone()
+            });
             let Some(credentials) = credentials else {
                 return proxy;
             };
@@ -639,36 +617,6 @@ mod platform {
                 return proxy;
             }
             url.into()
-        }
-
-        fn warm_credentials_for_url(&self, url: &Url) {
-            if self.bypass.matches(url) {
-                return;
-            }
-            let proxy = if let Some(pac) = &self.pac {
-                self.apply_pac_decision(url, pac.decision_for_url(url))
-            } else {
-                self.fallback
-                    .as_ref()
-                    .and_then(|proxy| proxy.proxy_for_url(url))
-            };
-            let Some(proxy) = proxy.and_then(|proxy| Url::parse(&proxy).ok()) else {
-                return;
-            };
-            if !matches!(proxy.scheme(), "http" | "https") || !proxy.username().is_empty() {
-                return;
-            }
-            let Some(host) = proxy.host_str().map(str::to_owned) else {
-                return;
-            };
-            let Some(port) = proxy.port_or_known_default() else {
-                return;
-            };
-            let endpoint = ProxyEndpoint { host, port };
-            let credentials = load_proxy_credentials(&endpoint);
-            if let Ok(mut cache) = self.credentials.lock() {
-                cache.insert(endpoint, credentials);
-            }
         }
     }
 
@@ -1459,7 +1407,6 @@ mod platform {
                 .0
                 .expect("macOS system proxy should resolve");
             let target = url("https://chatgpt.com/backend-api/wham/usage");
-            resolver.warm_credentials_for_url(&target);
             let proxy = resolver
                 .proxy_for_url(&target)
                 .expect("ChatGPT should use the configured proxy");

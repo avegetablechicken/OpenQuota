@@ -73,6 +73,23 @@ describe('hybrid window controller', () => {
     vi.clearAllMocks();
   });
 
+  it('applies the initial height without animating through intermediate sizes', async () => {
+    const controller = createWindowController({
+      screen: () => 'dashboard',
+      refreshing: () => false,
+      reordering: () => false,
+      automatic: () => true,
+      reducedMotion: () => false,
+      onError: vi.fn(),
+    });
+
+    controller.scheduleFit();
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(430));
+    expect(mocks.fitPanelToContent).toHaveBeenCalledTimes(1);
+    expect(mocks.getCurrentWindow).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it('lets an in-content morph drive automatic native fitting directly', async () => {
     const controller = createWindowController({
       screen: () => 'dashboard',

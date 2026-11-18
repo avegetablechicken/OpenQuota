@@ -680,13 +680,16 @@ fn panel_resize_edge_for_context(
     work_area: VerticalFrame,
     floating: bool,
 ) -> PanelResizeEdge {
-    if floating {
+    // The macOS tray is always in the menu bar, even when a tall popup
+    // happens to end closer to the bottom of the work area.
+    if floating || cfg!(target_os = "macos") {
         PanelResizeEdge::Bottom
     } else {
         panel_resize_edge_for_frames(current, work_area)
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn anchored_vertical_frame(
     current: VerticalFrame,
     work_area: VerticalFrame,
@@ -803,6 +806,28 @@ fn restore_manual_panel_height(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn resize_panel_for_context(window: &WebviewWindow, height: u32) -> Result<(), String> {
+    let target = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let Ok(ptr) = target.ns_window() else { return };
+            // SAFETY: Tauri owns the NSWindow and this closure runs on the main thread.
+            let window = unsafe { &*ptr.cast::<objc2_app_kit::NSWindow>() };
+            let frame = window.frame();
+            let mut content = window.contentRectForFrameRect(frame);
+            content.size.width = PANEL_WIDTH;
+            content.size.height = f64::from(height);
+            let mut next = window.frameRectForContentRect(content);
+            next.origin.y = frame.origin.y + frame.size.height - next.size.height;
+            if next != frame {
+                window.setFrame_display(next, true);
+            }
+        })
+        .map_err(|_| "OpenQuota window could not be resized.".to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn resize_panel_for_context(window: &WebviewWindow, height: u32) -> Result<(), String> {
     if window
         .app_handle()
@@ -950,7 +975,7 @@ pub fn resize_popup_anchored(window: &WebviewWindow, height: u32) -> Result<(), 
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn resize_popup_anchored(window: &WebviewWindow, height: u32) -> Result<(), String> {
     let outer_position = window
         .outer_position()
