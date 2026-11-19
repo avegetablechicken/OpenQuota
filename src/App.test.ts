@@ -340,7 +340,7 @@ describe('OpenQuota dashboard', () => {
       'data-tooltip',
       '$3.84 · Estimated locally, so it may be off',
     );
-    expect(screen.getByText(`OpenQuota ${import.meta.env.APP_VERSION}`)).toBeInTheDocument();
+    expect(screen.queryByText(`OpenQuota ${import.meta.env.APP_VERSION}`)).not.toBeInTheDocument();
     expect(container.querySelector('.floating-chrome')).not.toBeInTheDocument();
   });
 
@@ -1436,7 +1436,8 @@ describe('OpenQuota dashboard', () => {
   it('supports manual refresh and popup close shortcuts', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByRole('button', { name: 'Refresh all provider usage' }));
+    await fireEvent.click(screen.getByLabelText('Open options'));
+    await chooseMenuItem('Refresh All');
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('refresh_usage'));
     await fireEvent.keyDown(document, { key: 'Escape' });
     expect(mocks.invoke).toHaveBeenCalledWith('dismiss_main_window');
@@ -1524,7 +1525,6 @@ describe('OpenQuota dashboard', () => {
     await screen.findByRole('group', { name: 'Claude provider' });
     const codex = screen.getByRole('group', { name: 'Codex provider' });
     const claude = screen.getByRole('group', { name: 'Claude provider' });
-    expect(screen.getByText('Next update in 1m')).toBeInTheDocument();
     await fireEvent.contextMenu(codex, {
       clientX: 120,
       clientY: 180,
@@ -1534,13 +1534,11 @@ describe('OpenQuota dashboard', () => {
     expect(mocks.invoke).toHaveBeenCalledWith('refresh_provider_usage', { providerId: 'codex' });
     expect(within(codex).getByLabelText('Refreshing')).toBeInTheDocument();
     expect(within(claude).queryByLabelText('Refreshing')).not.toBeInTheDocument();
-    expect(screen.getByText('Updating…')).toBeInTheDocument();
 
     finishRefresh?.(multiProviderState);
     await waitFor(() =>
       expect(within(codex).queryByLabelText('Refreshing')).not.toBeInTheDocument(),
     );
-    expect(screen.getByText('Next update in 1m')).toBeInTheDocument();
   });
 
   it('keeps the full-refresh schedule when a provider refresh fails to start', async () => {
@@ -1557,13 +1555,11 @@ describe('OpenQuota dashboard', () => {
 
     render(App);
     const provider = await screen.findByRole('group', { name: 'Codex provider' });
-    expect(screen.getByText('Next update in 1m')).toBeInTheDocument();
     await fireEvent.contextMenu(provider, { clientX: 120, clientY: 180 });
     await chooseMenuItem('Refresh Codex');
 
     expect(await screen.findByText('Codex usage could not be refreshed.')).toBeInTheDocument();
     expect(within(provider).queryByLabelText('Refreshing')).not.toBeInTheDocument();
-    expect(screen.getByText('Next update in 1m')).toBeInTheDocument();
   });
 
   it('keeps the Claude card structure stable while optional quota data refreshes', async () => {
@@ -1623,7 +1619,8 @@ describe('OpenQuota dashboard', () => {
     expect(statusSlot).toBeInTheDocument();
     expect(statusSlot).not.toHaveClass('active');
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Refresh all provider usage' }));
+    await fireEvent.click(screen.getByLabelText('Open options'));
+    await chooseMenuItem('Refresh All');
     expect(await within(provider).findByLabelText('Refreshing')).toBeInTheDocument();
     expect(statusSlot).toHaveClass('active');
     expect(within(provider).getByRole('region', { name: 'Claude usage' })).toBe(card);
@@ -1821,15 +1818,14 @@ describe('OpenQuota dashboard', () => {
     render(App);
     const provider = await screen.findByRole('group', { name: 'Codex provider' });
     const card = within(provider).getByRole('region', { name: 'Codex usage' });
-    expect(screen.getByText('Next update in 1m')).toBeInTheDocument();
-    await fireEvent.click(screen.getByRole('button', { name: 'Refresh all provider usage' }));
+    await fireEvent.click(screen.getByLabelText('Open options'));
+    await chooseMenuItem('Refresh All');
     await waitFor(() =>
       expect(within(provider).queryByLabelText('Refreshing')).not.toBeInTheDocument(),
     );
     expect(within(provider).getByRole('region', { name: 'Codex usage' })).toBe(card);
     expect(provider.querySelector('.provider-status-slot')).not.toHaveClass('active');
     expect(screen.getByText('OpenQuota could not start a provider refresh.')).toBeInTheDocument();
-    expect(screen.getByText('Next update in 1m')).toBeInTheDocument();
   });
 
   it('shows the Settings and Quit shortcuts in the Options menu and handles Ctrl+Q', async () => {
@@ -1858,6 +1854,8 @@ describe('OpenQuota dashboard', () => {
     await fireEvent.click(button);
 
     expect(menuLabels()).toEqual([
+      'Refresh All',
+      '-',
       'Customize',
       'Settings',
       '-',

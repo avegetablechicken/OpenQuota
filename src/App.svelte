@@ -59,7 +59,7 @@
   import { SettingsController } from './lib/settingsController.svelte';
   import type { SpendProjection } from './lib/totalSpend';
   import type { AppSettings, UsageViewState } from './lib/types';
-  import { nextUpdateLabel, UpdateController } from './lib/updateController.svelte';
+  import { UpdateController } from './lib/updateController.svelte';
   import { automaticUpdateDelay, UPDATE_CHECK_INTERVAL_MS } from './lib/updateSchedule';
   import { createWindowController, type AppScreen } from './lib/windowController';
 
@@ -92,8 +92,6 @@
   let shareTimer: ReturnType<typeof setTimeout> | undefined;
   const providerStates = $derived(Object.values(viewState.providers));
   const anyRefreshing = $derived(providerStates.some((state) => state.refreshing));
-  const lastFullRefresh = $derived(viewState.lastFullRefreshAt ?? undefined);
-  const refreshIntervalMs = $derived((viewState.refreshIntervalSeconds ?? 5 * 60) * 1000);
   const platform = desktopPlatform();
   const shortcuts = shortcutLabels(platform);
   const settingsController = new SettingsController((message) => (settingsError = message));
@@ -571,6 +569,13 @@
       ) ?? [];
     void popupMenu(
       [
+        {
+          text: 'Refresh All',
+          accelerator: 'CmdOrCtrl+R',
+          enabled: !anyRefreshing,
+          action: () => void refresh(),
+        },
+        'separator',
         { text: 'Customize', action: () => navigate('customize') },
         { text: 'Settings', accelerator: 'CmdOrCtrl+,', action: () => navigate('settings') },
         'separator',
@@ -1073,47 +1078,41 @@
       </div>
     </div>
 
-    {#if screen === 'dashboard' || screen === 'settings'}
+    {#if screen === 'dashboard'}
       <footer class="footer">
-        <button
-          class="identity"
-          type="button"
-          onclick={refresh}
-          disabled={anyRefreshing}
-          aria-label="Refresh all provider usage"
-        >
-          <span>OpenQuota {appVersion}</span><small
-            >{anyRefreshing
-              ? 'Updating…'
-              : nextUpdateLabel(lastFullRefresh, now, refreshIntervalMs)}</small
-          >
-        </button>
-        {#if screen === 'dashboard'}
-          <div class="footer-actions">
-            {#if settingsState.trayAvailable}
-              <button
-                class="window-mode-toggle"
-                class:window-mode-toggle--active={floatingWindow}
-                type="button"
-                aria-label={floatingWindow ? 'Return to Tray Popup' : 'Keep Window Open'}
-                aria-pressed={floatingWindow}
-                data-tooltip={floatingWindow ? 'Return to Tray Popup' : 'Keep Window Open'}
-                onclick={toggleFloatingWindow}
-              >
-                <Icon name={floatingWindow ? 'pin-filled' : 'pin'} size={14} strokeWidth={1.9} />
-              </button>
-            {/if}
-            <button
-              type="button"
-              class="options-menu"
-              aria-label="Open options"
-              aria-haspopup="menu"
-              bind:this={optionsButton}
-              onclick={openOptionsMenu}
-              ><span>Options</span><Icon name="chevron-down" size={11} strokeWidth={2.2} /></button
-            >
-          </div>
+        {#if renderedResizeEdge === 'bottom'}
+          <div
+            class="panel-resize-dragger panel-resize-dragger--bottom panel-resize-dragger--inline"
+            role="separator"
+            aria-label="Resize panel height"
+            aria-orientation="horizontal"
+            onpointerdown={handlePanelResizePointerDown}
+          ></div>
         {/if}
+        <div class="footer-actions">
+          {#if settingsState.trayAvailable}
+            <button
+              class="window-mode-toggle"
+              class:window-mode-toggle--active={floatingWindow}
+              type="button"
+              aria-label={floatingWindow ? 'Return to Tray Popup' : 'Keep Window Open'}
+              aria-pressed={floatingWindow}
+              data-tooltip={floatingWindow ? 'Return to Tray Popup' : 'Keep Window Open'}
+              onclick={toggleFloatingWindow}
+            >
+              <Icon name={floatingWindow ? 'pin-filled' : 'pin'} size={13} strokeWidth={1.9} />
+            </button>
+          {/if}
+          <button
+            type="button"
+            class="options-menu"
+            aria-label="Open options"
+            aria-haspopup="menu"
+            bind:this={optionsButton}
+            onclick={openOptionsMenu}
+            ><span>Options</span><Icon name="chevron-down" size={11} strokeWidth={2.2} /></button
+          >
+        </div>
       </footer>
     {/if}
 
@@ -1191,7 +1190,7 @@
       {/if}
     </div>
   {/if}
-  {#if renderedResizeEdge === 'bottom'}
+  {#if renderedResizeEdge === 'bottom' && !(settingsState && screen === 'dashboard')}
     <div
       class="panel-resize-dragger panel-resize-dragger--bottom"
       role="separator"
@@ -1340,8 +1339,25 @@
       box-shadow: 0 10px 18px -20px rgba(0, 0, 0, 0.7);
     }
 
+    /* Overlays the bottom edge instead of taking a row of its own. */
     .panel-resize-dragger--bottom {
-      box-shadow: 0 -10px 18px -20px rgba(0, 0, 0, 0.7);
+      position: absolute;
+      bottom: 0;
+      left: 50%;
+      width: 72px;
+      height: 8px;
+      transform: translateX(-50%);
+    }
+
+    /* On the dashboard the grip shares the footer row, centred between its ends. */
+    .panel-resize-dragger--inline {
+      position: relative;
+      bottom: auto;
+      left: auto;
+      height: 20px;
+      flex: none;
+      grid-column: 2;
+      transform: none;
     }
 
     .content {
@@ -1366,19 +1382,6 @@
       padding: 10px 14px;
       border-top: 1px solid var(--separator);
       background: color-mix(in srgb, var(--tray) 92%, transparent);
-    }
-
-    .identity {
-      display: flex;
-      flex-direction: column;
-      color: var(--secondary);
-      font-size: 10px;
-      line-height: 14px;
-    }
-
-    .identity small {
-      color: var(--tertiary);
-      font: inherit;
     }
 
     .options-menu {
@@ -1442,12 +1445,6 @@
       padding: 9px 11px 7px;
     }
 
-    :root[data-density='compact'] .footer {
-      min-height: 48px;
-      padding-top: 6px;
-      padding-bottom: 6px;
-    }
-
     .content {
       padding: 14px 14px 12px;
       scrollbar-width: none;
@@ -1476,33 +1473,20 @@
     }
 
     .footer {
-      min-height: 52px;
-      padding: 12px 14px;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      min-height: 0;
+      padding: 2px 8px 1px;
       border-top: 0;
-      background: color-mix(in srgb, var(--surface) 94%, transparent);
-      box-shadow: 0 -10px 18px -18px rgba(0, 0, 0, 0.65);
-    }
-
-    .identity {
-      padding: 0;
-      border: 0;
-      color: var(--secondary);
-      background: none;
-      font-size: 10px;
-      line-height: 12px;
-      text-align: left;
-      cursor: pointer;
-    }
-
-    .identity:disabled {
-      cursor: default;
+      background: transparent;
     }
 
     .footer-actions {
       display: flex;
       align-items: center;
       gap: 6px;
-      margin-left: auto;
+      grid-column: 3;
+      justify-self: end;
     }
 
     .footer-actions .options-menu {
@@ -1511,11 +1495,11 @@
 
     .window-mode-toggle {
       display: grid;
-      width: 26px;
-      height: 26px;
+      width: 20px;
+      height: 20px;
       padding: 0;
       border: 0;
-      border-radius: 8px;
+      border-radius: 6px;
       color: var(--secondary);
       background: transparent;
       cursor: pointer;
@@ -1560,12 +1544,12 @@
       margin-left: auto;
       display: flex;
       width: auto;
-      height: 26px;
+      height: 20px;
       align-items: center;
-      gap: 4px;
-      padding: 0 9px 0 10px;
+      gap: 3px;
+      padding: 0 6px 0 8px;
       border: 1px solid var(--separator);
-      border-radius: 8px;
+      border-radius: 6px;
       color: var(--text);
       background: color-mix(in srgb, var(--card) 72%, transparent);
       font-size: 11px;

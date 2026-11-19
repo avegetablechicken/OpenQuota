@@ -72,6 +72,12 @@ export function createWindowController(options: WindowControllerOptions) {
     measureFrame = window.requestAnimationFrame(() => void fit());
   }
 
+  // An overlaid resize grip takes no height of its own.
+  function inFlowHeight(element: HTMLElement | null) {
+    if (!element || window.getComputedStyle(element).position === 'absolute') return 0;
+    return element.offsetHeight;
+  }
+
   async function fit() {
     if (shouldDefer()) return;
     const screen = options.screen();
@@ -80,7 +86,11 @@ export function createWindowController(options: WindowControllerOptions) {
     const stage = document.querySelector<HTMLElement>('.screen-stage');
     const header = document.querySelector<HTMLElement>('.screen-header');
     const footer = document.querySelector<HTMLElement>('.footer');
-    const dragger = document.querySelector<HTMLElement>('.panel-resize-dragger');
+    // A grip inside the footer is already counted with the footer.
+    const dragger =
+      Array.from(document.querySelectorAll<HTMLElement>('.panel-resize-dragger')).find(
+        (element) => !element.closest('.footer'),
+      ) ?? null;
     const floatingChrome = document.querySelector<HTMLElement>('.floating-chrome');
     if (!page || !content || !stage) return;
 
@@ -101,8 +111,8 @@ export function createWindowController(options: WindowControllerOptions) {
       pageHeight +
       contentPadding +
       (header?.offsetHeight ?? 0) +
-      (footer?.offsetHeight ?? 0) +
-      (dragger?.offsetHeight ?? 0) +
+      inFlowHeight(footer) +
+      inFlowHeight(dragger) +
       chromeHeight;
     const monitor = await currentMonitor().catch(() => null);
     const workAreaHeight = monitor

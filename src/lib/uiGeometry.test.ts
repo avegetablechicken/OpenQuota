@@ -62,7 +62,7 @@ describe('popover geometry contract', () => {
     );
     expect(css).toMatch(/\.total-card__empty\s*{[^}]*min-height: 36px;/s);
     expect(css).toMatch(/\.app-top-bar\s*{[^}]*min-height: 44px;/s);
-    expect(css).toMatch(/\.footer\s*{[^}]*min-height: 52px;/s);
+    expect(css).toMatch(/\.footer\s*{[^}]*padding: 2px 8px 1px;/s);
   });
 
   it('shows the provider focus ring only when keyboard focus should be visible', () => {
