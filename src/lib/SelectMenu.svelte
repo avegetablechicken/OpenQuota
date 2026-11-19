@@ -1,9 +1,6 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
-  import { cubicOut } from 'svelte/easing';
-  import type { TransitionConfig } from 'svelte/transition';
   import Icon from './Icon.svelte';
-  import { menuHighlight } from './menuHighlight';
+  import { below, popupMenu } from './nativeMenu';
 
   export interface SelectOption {
     value: string;
@@ -19,247 +16,88 @@
   }
 
   let { label, value, options, onChange, variant = 'field' }: Props = $props();
-  let root = $state<HTMLDivElement>();
-  let listbox = $state<HTMLDivElement>();
-  let open = $state(false);
-  let openAbove = $state(false);
-  let maxListHeight = $state(240);
-  let listTop = $state(8);
-  let listLeft = $state(8);
-  let triggerWidth = $state(132);
-  let positioned = $state(false);
-  const listboxId = `select-menu-${Math.random().toString(36).slice(2)}`;
+  let pullDown = $state<HTMLButtonElement>();
   const selectedLabel = $derived(options.find((option) => option.value === value)?.label ?? value);
 
-  onMount(() => {
-    const closeOutside = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (root && !root.contains(target) && !listbox?.contains(target)) open = false;
-    };
-    const reposition = () => {
-      if (open) placeListbox();
-    };
-    // An open list takes the arrows wherever focus is: a click focuses
-    // neither the trigger nor, in every WebKit (macOS 26), the option it
-    // asked for, which would leave the keys to the page.
-    const keysWhileOpen = (event: KeyboardEvent) => {
-      if (!open || !listbox || event.metaKey || event.ctrlKey || event.altKey) return;
-      const target = event.target as Node;
-      if (listbox.contains(target) || root?.contains(target)) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        open = false;
-        root?.querySelector<HTMLButtonElement>('[role="combobox"]')?.focus();
-        return;
-      }
-      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-      const items = [...listbox.querySelectorAll<HTMLButtonElement>('[role="option"]')];
-      if (items.length === 0) return;
-      event.preventDefault();
-      event.stopPropagation();
-      // Into the list at the chosen option, as ↓ on the trigger does.
-      const selected = Math.max(
-        0,
-        options.findIndex((option) => option.value === value),
-      );
-      const index = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : selected;
-      items[index]?.focus();
-    };
-    document.addEventListener('pointerdown', closeOutside);
-    document.addEventListener('keydown', keysWhileOpen, true);
-    document.addEventListener('scroll', reposition, true);
-    window.addEventListener('resize', reposition);
-    return () => {
-      document.removeEventListener('pointerdown', closeOutside);
-      document.removeEventListener('keydown', keysWhileOpen, true);
-      document.removeEventListener('scroll', reposition, true);
-      window.removeEventListener('resize', reposition);
-    };
-  });
-
-  function portal(node: HTMLElement) {
-    document.body.appendChild(node);
-    return {
-      destroy() {
-        node.remove();
-      },
-    };
-  }
-
-  function placeListbox(estimatedHeight = listbox?.scrollHeight || options.length * 24 + 12) {
-    const trigger = root?.querySelector<HTMLButtonElement>('[role="combobox"]');
-    if (!root || !trigger) return;
-
-    const triggerBounds = trigger.getBoundingClientRect();
-    const boundaryTop = 8;
-    const boundaryBottom = window.innerHeight - 8;
-    const gap = 5;
-    const spaceAbove = Math.max(0, triggerBounds.top - boundaryTop - gap);
-    const spaceBelow = Math.max(0, boundaryBottom - triggerBounds.bottom - gap);
-
-    openAbove = spaceBelow < Math.min(estimatedHeight, 120) && spaceAbove > spaceBelow;
-    maxListHeight = Math.max(48, Math.floor(openAbove ? spaceAbove : spaceBelow));
-    triggerWidth = Math.round(triggerBounds.width);
-
-    const renderedHeight = Math.min(estimatedHeight, maxListHeight);
-    const renderedWidth =
-      listbox?.offsetWidth || Math.max(triggerBounds.width, variant === 'title' ? 138 : 132);
-    const preferredTop = openAbove
-      ? triggerBounds.top - gap - renderedHeight
-      : triggerBounds.bottom + gap;
-    const preferredLeft =
-      variant === 'title' ? triggerBounds.left - 5 : triggerBounds.right - renderedWidth;
-    listTop = Math.round(
-      Math.min(Math.max(boundaryTop, preferredTop), boundaryBottom - renderedHeight),
-    );
-    listLeft = Math.round(
-      Math.min(Math.max(8, preferredLeft), window.innerWidth - 8 - renderedWidth),
-    );
-    positioned = true;
-  }
-
-  async function openAndFocus(position: 'selected' | 'first' | 'last' = 'selected') {
-    positioned = false;
-    open = true;
-    await tick();
-    placeListbox();
-    // The list stays hidden until placed, and WebKit does not focus a hidden
-    // element, which would leave focus and the arrows on the trigger.
-    await tick();
-    const items = listbox?.querySelectorAll<HTMLButtonElement>('[role="option"]');
-    if (!items?.length) return;
-    const selected = options.findIndex((option) => option.value === value);
-    const index = position === 'first' ? 0 : position === 'last' ? items.length - 1 : selected;
-    items[Math.max(0, index)]?.focus();
-  }
-
-  function choose(next: string) {
-    open = false;
+  function change(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const next = select.value;
+    // The page owns the value: it shows `value` until the change is applied.
+    select.value = value;
     if (next !== value) onChange(next);
-    root?.querySelector<HTMLButtonElement>('[role="combobox"]')?.focus();
   }
 
-  function triggerKeydown(event: KeyboardEvent) {
-    if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      void openAndFocus(event.key === 'ArrowDown' ? 'selected' : 'first');
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      void openAndFocus('last');
-    }
-  }
-
-  function optionKeydown(event: KeyboardEvent) {
-    const item = event.currentTarget as HTMLButtonElement;
-    if (event.key === 'Escape' || event.key === 'Tab') {
-      open = false;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        root?.querySelector<HTMLButtonElement>('[role="combobox"]')?.focus();
-      }
-      return;
-    }
-    if (
-      event.key !== 'ArrowDown' &&
-      event.key !== 'ArrowUp' &&
-      event.key !== 'Home' &&
-      event.key !== 'End'
-    )
-      return;
-    event.preventDefault();
-    const items = [...(listbox?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])];
-    const current = items.indexOf(item);
-    const index =
-      event.key === 'Home'
-        ? 0
-        : event.key === 'End'
-          ? items.length - 1
-          : event.key === 'ArrowDown'
-            ? (current + 1) % items.length
-            : (current - 1 + items.length) % items.length;
-    items[index]?.focus();
-  }
-
-  function menuMotion(duration: number): TransitionConfig {
-    const reducedMotion = document.documentElement.hasAttribute('data-reduced-motion');
-    return {
-      duration: reducedMotion ? 0 : duration,
-      easing: cubicOut,
-      css: (progress) => `opacity: ${progress};`,
-    };
-  }
-
-  function menuReveal(node: Element): TransitionConfig {
-    void node;
-    return menuMotion(150);
-  }
-
-  function menuDismiss(node: Element): TransitionConfig {
-    void node;
-    return menuMotion(100);
+  // A title pulls its menu down below it, the chosen option checked, rather
+  // than laying the menu over itself and what is above as a pop-up does.
+  function openPullDown() {
+    if (!pullDown) return;
+    void popupMenu(
+      options.map((option) => ({
+        text: option.label,
+        checked: option.value === value,
+        action: () => {
+          if (option.value !== value) onChange(option.value);
+        },
+      })),
+      below(pullDown),
+    ).catch(() => undefined);
   }
 </script>
 
-<div class="select-menu" class:select-menu--title={variant === 'title'} bind:this={root}>
-  <button
-    type="button"
-    class="select-menu__trigger"
-    role="combobox"
-    aria-label={label}
-    aria-controls={listboxId}
-    aria-expanded={open}
-    aria-haspopup="listbox"
-    onclick={() => (open ? (open = false) : void openAndFocus())}
-    onkeydown={triggerKeydown}
-  >
-    <span>{selectedLabel}</span><Icon name="chevron-down" size={12} strokeWidth={2} />
-  </button>
-  {#if open}
-    <div
-      class="select-menu__list"
-      id={listboxId}
-      role="listbox"
+<!-- A field is a native <select>, whose list is the system's own menu: it
+     highlights, checks and moves with the keys as every other menu does. The
+     trigger drawn beneath shows the chosen label and sizes the control to it.
+     A title is a pull-down button opening a system menu (nativeMenu). -->
+<div class="select-menu" class:select-menu--title={variant === 'title'}>
+  {#if variant === 'title'}
+    <button
+      type="button"
+      class="select-menu__trigger"
       aria-label={label}
-      class:select-menu__list--above={openAbove}
-      class:select-menu__list--title={variant === 'title'}
-      class:select-menu__list--pending={!positioned}
-      style={`--select-menu-max-height: ${maxListHeight}px; --select-menu-trigger-width: ${triggerWidth}px; top: ${listTop}px; left: ${listLeft}px`}
-      bind:this={listbox}
-      use:portal
-      use:menuHighlight={'[role="option"]'}
-      in:menuReveal
-      out:menuDismiss
+      aria-haspopup="menu"
+      bind:this={pullDown}
+      onclick={openPullDown}
     >
+      <span class="select-menu__label">{selectedLabel}</span><span class="select-menu__stepper"
+        ><Icon name="chevron-down" size={11} strokeWidth={2.2} /></span
+      >
+    </button>
+  {:else}
+    <span class="select-menu__trigger" aria-hidden="true">
+      <span class="select-menu__label">{selectedLabel}</span><span class="select-menu__stepper"
+        ><Icon name="chevron-up-down" size={11} strokeWidth={2.2} /></span
+      >
+    </span>
+    <select class="select-menu__native" aria-label={label} {value} onchange={change}>
       {#each options as option (option.value)}
-        <button
-          type="button"
-          role="option"
-          aria-selected={option.value === value}
-          class:active={option.value === value}
-          onclick={() => choose(option.value)}
-          onkeydown={optionKeydown}
-        >
-          <span class="select-menu__check"
-            >{#if option.value === value}<Icon
-                name="check"
-                size={12}
-                strokeWidth={2.2}
-              />{/if}</span
-          >
-          <span>{option.label}</span>
-        </button>
+        <option value={option.value}>{option.label}</option>
       {/each}
-    </div>
+    </select>
   {/if}
 </div>
 
 <style>
   :global {
+    /* A pop-up button as System Settings draws one in a list: the value,
+       then a round button with up and down chevrons.
+
+       The system menu takes its font from the select and puts the chosen
+       item's label a fixed distance in from the select's left edge (as for
+       a pop-up button, whatever the select's padding), so the select starts
+       that far left of the value for the two to line up. The menu is as
+       wide as the select and starts a little left of it, so the select also
+       reaches that much past the trigger's right edge for the menu to end
+       where the trigger does. Clipped to the trigger, it takes clicks only
+       there. */
     .select-menu {
+      --select-inset: 0px;
+      --popup-title-inset: 17.5px;
+      --popup-menu-lead: 13.5px;
       position: relative;
-      min-width: 112px;
+      min-width: 0;
       flex: 0 0 auto;
+      font-size: 12px;
+      line-height: 18px;
     }
 
     .select-menu__trigger {
@@ -267,113 +105,68 @@
       width: 100%;
       min-height: 28px;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      padding: 4px 8px 4px 10px;
-      border: 1px solid var(--separator);
-      border-radius: 7px;
+      justify-content: flex-end;
+      gap: 6px;
+      padding: 0 0 0 var(--select-inset);
+      border: 0;
+      border-radius: 5px;
       color: var(--text);
-      background: var(--control);
-      font-size: 12px;
-      line-height: 18px;
+      background: transparent;
+      font: inherit;
+      white-space: nowrap;
+    }
+
+    .select-menu__label {
+      color: var(--secondary);
+    }
+
+    .select-menu__stepper {
+      display: grid;
+      width: 20px;
+      height: 20px;
+      flex: 0 0 20px;
+      place-items: center;
+      border-radius: 50%;
+      color: var(--text);
+      background: color-mix(in srgb, var(--text) 8%, transparent);
+      transition: background var(--motion-switch);
+    }
+
+    .select-menu:hover .select-menu__stepper {
+      background: color-mix(in srgb, var(--text) 14%, transparent);
+    }
+
+    /* Covers the trigger so a click or a key reaches the native control. */
+    .select-menu__native {
+      --select-overhang: calc(var(--popup-title-inset) - var(--select-inset));
+      position: absolute;
+      top: 0;
+      left: calc(0px - var(--select-overhang));
+      width: calc(100% + var(--select-overhang) + var(--popup-menu-lead));
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      -webkit-appearance: none;
+      appearance: none;
+      background: transparent;
+      clip-path: inset(0 var(--popup-menu-lead) 0 var(--select-overhang));
+      opacity: 0;
+      font: inherit;
       cursor: pointer;
-      transition:
-        border-color var(--motion-switch),
-        background var(--motion-switch),
-        box-shadow var(--motion-switch);
     }
 
-    .select-menu__trigger:hover,
-    .select-menu__trigger[aria-expanded='true'] {
-      border-color: color-mix(in srgb, var(--text) 18%, transparent);
-      background: var(--card-hover);
-    }
-
-    .select-menu__trigger:focus-visible {
+    .select-menu:has(.select-menu__native:focus-visible) .select-menu__stepper {
       outline: 2px solid color-mix(in srgb, var(--meter-fill) 55%, transparent);
       outline-offset: 1px;
     }
 
-    .select-menu__trigger[aria-expanded='true'] .symbol-icon {
-      transform: rotate(180deg);
-    }
-
-    .select-menu__list {
-      position: fixed;
-      z-index: 1000;
-      width: max-content;
-      min-width: max(var(--select-menu-trigger-width), 132px);
-      max-width: min(240px, calc(100vw - 16px));
-      max-height: min(var(--select-menu-max-height), calc(100vh - 16px));
-      padding: 4px;
-      overflow-y: auto;
-      overscroll-behavior: contain;
-      border: 0;
-      border-radius: 6px;
-      background: var(--menu-surface);
-      box-shadow: var(--menu-shadow);
-      -webkit-backdrop-filter: var(--menu-backdrop);
-      backdrop-filter: var(--menu-backdrop);
-      transform-origin: top right;
-      will-change: transform, opacity;
-    }
-
-    .select-menu__list--above {
-      transform-origin: bottom right;
-    }
-
-    .select-menu__list--pending {
-      visibility: hidden;
-    }
-
-    .select-menu__list button {
-      display: flex;
-      width: 100%;
-      min-height: 24px;
-      align-items: center;
-      justify-content: flex-start;
-      gap: 5px;
-      padding: 3px 8px 3px 3px;
-      border: 0;
-      border-radius: 3px;
-      color: var(--text);
-      background: transparent;
-      font-size: 13px;
-      line-height: 17px;
-      text-align: left;
-      cursor: pointer;
-    }
-
-    /* One highlight, which the pointer and the arrows both move (menuHighlight). */
-    .select-menu__list button:focus {
-      outline: none;
-      color: #ffffff;
-      background: var(--meter-fill);
-    }
-
-    .select-menu__list button.active {
-      font-weight: 400;
-    }
-
-    .select-menu__list button > span:last-child {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .select-menu__check {
-      display: grid;
-      width: 16px;
-      height: 16px;
-      flex: 0 0 16px;
-      place-items: center;
+    :root[data-density='compact'] .select-menu {
+      line-height: 16px;
     }
 
     :root[data-density='compact'] .select-menu__trigger {
       min-height: 26px;
-      padding: 3px 7px 3px 9px;
-      font-size: 12px;
-      line-height: 16px;
     }
   }
 </style>

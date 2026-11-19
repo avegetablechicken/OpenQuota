@@ -285,29 +285,6 @@
     font-size: 11px;
   }
 
-  .options-menu__panel hr,
-  .context-menu hr {
-    height: 1px;
-    margin: 4px 2px;
-    border: 0;
-    background: var(--separator);
-  }
-
-  /* Native menus highlight one item, which the pointer and the arrows both move
-     (menuHighlight), and a submenu's parent, in the accent color. */
-  .share-menu button:focus,
-  .share-menu > summary:focus,
-  .share-menu[open] > summary {
-    color: #ffffff;
-    background: var(--meter-fill);
-  }
-
-  .share-menu button:focus,
-  .share-menu > summary:focus,
-  .share-menu > summary:focus-visible {
-    outline: none;
-  }
-
   :root[data-density='compact'] .provider-section + .provider-section,
   :root[data-density='compact'] .provider-reorder-shell + .provider-reorder-shell,
   :root[data-density='compact'] .total-spend-section + .provider-section,

@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
+import { chooseMenuItem } from './test/nativeMenu';
 import type { SettingsViewState } from './lib/types';
 import { liveState, providerCatalog, settingsState } from './test/appFixtures';
 
@@ -75,7 +76,7 @@ describe('OpenQuota customization persistence and reorder', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    await chooseMenuItem('Customize');
     await fireEvent.click(screen.getByRole('button', { name: 'Reset all customization' }));
 
     const dialog = screen.getByRole('alertdialog', { name: 'Reset All Customization?' });
@@ -101,7 +102,7 @@ describe('OpenQuota customization persistence and reorder', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    await chooseMenuItem('Customize');
     const toggle = screen.getByRole('checkbox', { name: 'Enable codex' });
     await fireEvent.click(toggle);
     await waitFor(() =>
@@ -141,7 +142,7 @@ describe('OpenQuota customization persistence and reorder', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await chooseMenuItem('Settings');
     const launchAtLogin = screen.getByRole('checkbox', { name: 'Launch at Login' });
 
     await fireEvent.click(launchAtLogin);

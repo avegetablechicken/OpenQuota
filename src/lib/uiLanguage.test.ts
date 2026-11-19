@@ -105,7 +105,7 @@ describe('native UI language contract', () => {
     expect(dashboard).toContain('Open Customize');
     expect(dashboard).toContain('Turn on Customize to choose what to show.');
     expect(dashboard).toContain('Customize…');
-    expect(dashboard).toContain('Refresh {providerDisplayName(menuProvider.id)}');
+    expect(dashboard).toContain('`Refresh ${providerDisplayName(providerId)}`');
     expect(dashboard).not.toContain('Providers Detected');
     expect(dashboard).not.toContain('Starter Provider');
     expect(dashboard).not.toContain("Expand'} On Demand");
@@ -117,10 +117,5 @@ describe('native UI language contract', () => {
       /\.provider-name-card:focus-within\s*{[^}]*box-shadow: inset 0 0 0 2px/s,
     );
     expect(providerNameSection).toMatch(/input\s*{[^}]*display: block;/s);
-    expect(dashboard).toMatch(
-      /\.context-menu button:not\(:disabled\):focus\s*{[^}]*background: var\(--meter-fill\);/s,
-    );
-    expect(sharedComponentCss).not.toContain('.context-menu button:hover');
-    expect(sharedComponentCss).not.toContain('.context-menu button:not(:disabled):focus');
   });
 });

@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
+import { chooseMenuItem, menuLabels, openMenu } from './test/nativeMenu';
+import { selectOption } from './test/selectOption';
 import * as shareCard from './lib/shareCard';
 import type { PanelHeightMode } from './lib/backend';
 import type {
@@ -126,7 +128,8 @@ describe('OpenQuota dashboard', () => {
     expect((await screen.findAllByText('Codex', { exact: true }))[0]).toBeVisible();
     await fireEvent.focus(window);
     expect(mocks.invoke).not.toHaveBeenCalledWith('get_app_settings');
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await fireEvent.click(screen.getByLabelText('Open options'));
+    await chooseMenuItem('Settings');
     expect(mocks.invoke).toHaveBeenCalledWith('get_app_settings');
   });
 
@@ -283,7 +286,7 @@ describe('OpenQuota dashboard', () => {
           Object.defineProperty(card, 'innerText', { value: card.textContent });
         }
         await fireEvent.contextMenu(selected);
-        await fireEvent.click(screen.getByRole('menuitem', { name: 'Share Screenshot' }));
+        await chooseMenuItem('Share Screenshot');
         await waitFor(() => expect(renderCard).toHaveBeenCalled());
         const options = renderCard.mock.calls[0][1];
         const expectedAccounts = target === 'provider' ? ['first', 'second'] : [target];
@@ -586,9 +589,8 @@ describe('OpenQuota dashboard', () => {
         'panel-resize-dragger--bottom',
       );
       await fireEvent.click(screen.getByLabelText('Open options'));
-      await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-      await fireEvent.click(screen.getByRole('combobox', { name: 'Window Mode' }));
-      await fireEvent.click(screen.getByRole('option', { name: 'Tray Popup' }));
+      await chooseMenuItem('Settings');
+      await selectOption(screen.getByRole('combobox', { name: 'Window Mode' }), 'Tray Popup');
 
       await waitFor(() =>
         expect(screen.getByRole('separator', { name: 'Resize panel height' })).toHaveClass(
@@ -739,7 +741,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     const provider = await screen.findByRole('group', { name: 'Claude provider' });
     await fireEvent.contextMenu(provider);
-    await fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
+    await chooseMenuItem('Rename…');
     const dialog = screen.getByRole('dialog', { name: 'Rename Card' });
     const input = within(dialog).getByRole('textbox', { name: 'Name' });
     await fireEvent.input(input, { target: { value: 'Personal' } });
@@ -827,7 +829,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     const provider = await screen.findByRole('group', { name: 'Claude — Work provider' });
     await fireEvent.contextMenu(provider);
-    await fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
+    await chooseMenuItem('Rename…');
     const dialog = screen.getByRole('dialog', { name: 'Rename Card' });
     await fireEvent.input(within(dialog).getByRole('textbox', { name: 'Name' }), {
       target: { value: 'Client' },
@@ -845,8 +847,8 @@ describe('OpenQuota dashboard', () => {
   it('persists Total Spend metric and period choices', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByRole('combobox', { name: 'Total Spend Metric' }));
-    await fireEvent.click(screen.getByRole('option', { name: 'Tokens' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Total Spend Metric' }));
+    await chooseMenuItem('Tokens');
     await fireEvent.click(screen.getByRole('button', { name: '30 Days' }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
@@ -898,8 +900,8 @@ describe('OpenQuota dashboard', () => {
         'No cost data for this period',
       ),
     ).toBeInTheDocument();
-    await fireEvent.click(within(totalSpend).getByRole('combobox', { name: 'Total Spend Metric' }));
-    await fireEvent.click(screen.getByRole('option', { name: 'Tokens' }));
+    await fireEvent.click(within(totalSpend).getByRole('button', { name: 'Total Spend Metric' }));
+    await chooseMenuItem('Tokens');
     expect(within(totalSpend).getByText('Codex')).toBeInTheDocument();
     expect(within(totalSpend).getByText('2.1')).toBeInTheDocument();
     expect(within(totalSpend).getByText('million')).toBeInTheDocument();
@@ -1039,7 +1041,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    await chooseMenuItem('Customize');
     expect(screen.getByRole('heading', { name: 'Customize' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Customize codex' }));
     expect(screen.getByRole('group', { name: 'Always Visible metrics' })).toBeInTheDocument();
@@ -1050,7 +1052,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    await chooseMenuItem('Customize');
     await fireEvent.click(screen.getByRole('button', { name: 'Customize codex' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Reset Codex' }));
 
@@ -1065,7 +1067,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    await chooseMenuItem('Customize');
     await fireEvent.click(screen.getByRole('button', { name: 'Customize codex' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Pin Today' }));
     expect(screen.getByText('Up to 2 stars per provider')).toBeInTheDocument();
@@ -1087,11 +1089,9 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    await fireEvent.click(screen.getByRole('combobox', { name: 'Density' }));
-    await fireEvent.click(screen.getByRole('option', { name: 'Compact' }));
-    await fireEvent.click(screen.getByRole('combobox', { name: 'Time Format' }));
-    await fireEvent.click(screen.getByRole('option', { name: '24-hour' }));
+    await chooseMenuItem('Settings');
+    await selectOption(screen.getByRole('combobox', { name: 'Density' }), 'Compact');
+    await selectOption(screen.getByRole('combobox', { name: 'Time Format' }), '24-hour');
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
         'save_app_settings',
@@ -1117,9 +1117,8 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    await fireEvent.click(screen.getByRole('combobox', { name: 'Log Level' }));
-    await fireEvent.click(screen.getByRole('option', { name: 'Debug' }));
+    await chooseMenuItem('Settings');
+    await selectOption(screen.getByRole('combobox', { name: 'Log Level' }), 'Debug');
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
         'save_app_settings',
@@ -1195,7 +1194,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await chooseMenuItem('Settings');
 
     mocks.invoke.mockRejectedValueOnce(new Error('log path unavailable'));
     await fireEvent.click(screen.getByRole('button', { name: 'Copy Log Path' }));
@@ -1231,7 +1230,7 @@ describe('OpenQuota dashboard', () => {
     expect(screen.queryByRole('button', { name: 'Keep Window Open' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Return to Tray Popup' })).not.toBeInTheDocument();
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await chooseMenuItem('Settings');
     expect(screen.getByText('GNOME · Wayland · standalone window')).toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Window Mode' })).not.toBeInTheDocument();
   });
@@ -1240,7 +1239,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await chooseMenuItem('Settings');
     const recorder = screen.getByRole('button', { name: 'Record Shortcut' });
     await fireEvent.click(recorder);
     expect(recorder).toHaveAttribute('aria-pressed', 'true');
@@ -1271,7 +1270,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await chooseMenuItem('Settings');
     await fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(label) }));
     await waitFor(() => {
       expect(mocks.invoke).toHaveBeenCalledWith(
@@ -1291,7 +1290,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await chooseMenuItem('Settings');
     const trigger = screen.getByRole('button', { name: 'Reset All Settings…' });
     trigger.focus();
     await fireEvent.click(trigger);
@@ -1344,7 +1343,7 @@ describe('OpenQuota dashboard', () => {
       render(App);
       await screen.findByText('Plus');
       await fireEvent.click(screen.getByLabelText('Open options'));
-      await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      await chooseMenuItem('Settings');
       await fireEvent.click(screen.getByRole('button', { name: 'Reset All Settings…' }));
       await fireEvent.click(screen.getByRole('button', { name: 'Reset All' }));
       await waitFor(() =>
@@ -1356,7 +1355,9 @@ describe('OpenQuota dashboard', () => {
       await screen.findByText('All settings restored');
       resolvePanelMode?.('manual');
       await Promise.resolve();
-      expect(screen.getByRole('combobox', { name: 'Panel Height' })).toHaveTextContent('Automatic');
+      expect(screen.getByRole('combobox', { name: 'Panel Height' })).toHaveDisplayValue(
+        'Automatic',
+      );
       await waitFor(() =>
         expect(
           mocks.invoke.mock.calls.filter(([command]) => command === 'get_panel_resize_edge').length,
@@ -1392,7 +1393,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await chooseMenuItem('Settings');
     expect(screen.getByText('Notifications are blocked')).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Open Settings' }));
     expect(mocks.invoke).toHaveBeenCalledWith('open_notification_settings');
@@ -1444,8 +1445,8 @@ describe('OpenQuota dashboard', () => {
   it('returns from pages with a Back button using the platform back shortcut', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByText('Options').closest('summary')!);
-    await fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    await fireEvent.click(screen.getByLabelText('Open options'));
+    await chooseMenuItem('Customize');
     expect(await screen.findByRole('button', { name: 'Back' })).toHaveAttribute(
       'aria-keyshortcuts',
       'Alt+ArrowLeft',
@@ -1528,7 +1529,7 @@ describe('OpenQuota dashboard', () => {
       clientX: 120,
       clientY: 180,
     });
-    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Refresh Codex' }));
+    await chooseMenuItem('Refresh Codex');
 
     expect(mocks.invoke).toHaveBeenCalledWith('refresh_provider_usage', { providerId: 'codex' });
     expect(within(codex).getByLabelText('Refreshing')).toBeInTheDocument();
@@ -1558,7 +1559,7 @@ describe('OpenQuota dashboard', () => {
     const provider = await screen.findByRole('group', { name: 'Codex provider' });
     expect(screen.getByText('Next update in 1m')).toBeInTheDocument();
     await fireEvent.contextMenu(provider, { clientX: 120, clientY: 180 });
-    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Refresh Codex' }));
+    await chooseMenuItem('Refresh Codex');
 
     expect(await screen.findByText('Codex usage could not be refreshed.')).toBeInTheDocument();
     expect(within(provider).queryByLabelText('Refreshing')).not.toBeInTheDocument();
@@ -1831,70 +1832,52 @@ describe('OpenQuota dashboard', () => {
     expect(screen.getByText('Next update in 1m')).toBeInTheDocument();
   });
 
-  it('shows platform-correct Ctrl shortcuts and handles Ctrl+Q', async () => {
+  it('shows the Settings and Quit shortcuts in the Options menu and handles Ctrl+Q', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByText('Options').closest('summary')!);
-    expect(screen.getByText('Ctrl+,')).toBeInTheDocument();
-    expect(screen.getByText('Ctrl+Q')).toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText('Open options'));
+    const entries = openMenu()!.entries;
+    expect(entries).toContainEqual(
+      expect.objectContaining({ text: 'Settings', accelerator: 'CmdOrCtrl+,' }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({ text: 'Quit OpenQuota', accelerator: 'CmdOrCtrl+Q' }),
+    );
 
     await fireEvent.keyDown(document, { key: 'q', ctrlKey: true });
     expect(mocks.invoke).toHaveBeenCalledWith('quit_app');
   });
 
-  it('closes the custom Options surface after a command like a native menu', async () => {
+  it('opens Options as a system menu pulled down from its button', async () => {
     render(App);
     await screen.findByText('Plus');
-    const summary = screen.getByText('Options').closest('summary')!;
-    const menu = summary.closest('details')!;
-    await fireEvent.click(summary);
-    expect(menu).toHaveAttribute('open');
-    await fireEvent.click(screen.getByRole('button', { name: 'Check for Updates…' }));
-    expect(menu).not.toHaveAttribute('open');
-  });
-
-  it('resets native Options and Share details when the popup is hidden', async () => {
-    let emitMainWindowHidden: (() => void) | undefined;
-    mocks.listen.mockImplementation(
-      (eventName: string, handler: (event: { payload: unknown }) => void) => {
-        if (eventName === 'main-window-hidden') {
-          emitMainWindowHidden = () => handler({ payload: undefined });
-        }
-        return Promise.resolve(vi.fn());
-      },
+    const button = screen.getByLabelText('Open options');
+    vi.spyOn(button, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ x: 240, y: 600, width: 70, height: 26 }),
     );
+    await fireEvent.click(button);
 
-    render(App);
-    await screen.findByText('Plus');
-    const optionsSummary = screen.getByLabelText('Open options');
-    const optionsMenu = optionsSummary.closest('details')!;
-    await fireEvent.click(optionsSummary);
-    const shareSummary = screen.getByText('Share Screenshot').closest('summary')!;
-    const shareMenu = shareSummary.closest('details')!;
-    await fireEvent.click(shareSummary);
-    expect(optionsMenu).toHaveAttribute('open');
-    expect(shareMenu).toHaveAttribute('open');
-    await waitFor(() =>
-      expect(within(shareMenu).getByRole('button', { name: 'Codex' })).toBeInTheDocument(),
+    expect(menuLabels()).toEqual([
+      'Customize',
+      'Settings',
+      '-',
+      'Share Screenshot',
+      'Check for Updates…',
+      '-',
+      'About OpenQuota',
+      'Quit OpenQuota',
+    ]);
+    expect(openMenu()!.at).toEqual({ x: 240, y: 630 });
+    // Share Screenshot is a submenu of the enabled providers.
+    const share = openMenu()!.entries.find(
+      (entry) => entry !== 'separator' && entry.text === 'Share Screenshot',
     );
+    expect(
+      share !== 'separator' && share?.items?.map((item) => item !== 'separator' && item.text),
+    ).toContain('Codex');
 
-    await waitFor(() => expect(emitMainWindowHidden).toBeTypeOf('function'));
-    emitMainWindowHidden!();
-
-    await waitFor(() => {
-      expect(optionsMenu).not.toHaveAttribute('open');
-      expect(shareMenu).not.toHaveAttribute('open');
-      expect(within(shareMenu).queryByRole('button')).not.toBeInTheDocument();
-    });
-
-    await fireEvent.click(optionsSummary);
-    expect(optionsMenu).toHaveAttribute('open');
-    expect(shareMenu).not.toHaveAttribute('open');
-    await fireEvent.click(shareSummary);
-    expect(shareMenu).toHaveAttribute('open');
-    await waitFor(() =>
-      expect(within(shareMenu).getByRole('button', { name: 'Codex' })).toBeInTheDocument(),
-    );
+    await chooseMenuItem('Check for Updates…');
+    expect(openMenu()).toBeNull();
   });
 
   it('honors Reduce Motion without overriding a manually sized native panel', async () => {
@@ -1923,9 +1906,9 @@ describe('OpenQuota dashboard', () => {
       await waitFor(() => expect(document.documentElement).toHaveAttribute('data-reduced-motion'));
       await screen.findByText('Plus');
       await fireEvent.click(screen.getByLabelText('Open options'));
-      await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      await chooseMenuItem('Settings');
       await waitFor(() =>
-        expect(screen.getByRole('combobox', { name: 'Panel Height' })).toHaveTextContent('Manual'),
+        expect(screen.getByRole('combobox', { name: 'Panel Height' })).toHaveDisplayValue('Manual'),
       );
       await fireEvent.click(screen.getByLabelText('Back'));
       mocks.invoke.mockClear();
@@ -1973,7 +1956,7 @@ describe('OpenQuota dashboard', () => {
       await waitFor(() => expect(document.documentElement).toHaveAttribute('data-reduced-motion'));
       await screen.findByText('Plus');
       await fireEvent.click(screen.getByLabelText('Open options'));
-      await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      await chooseMenuItem('Settings');
       const toggle = screen.getByRole('checkbox', { name: 'Reduce Animations' });
       expect(toggle).toBeChecked();
       await fireEvent.click(toggle);
@@ -2073,10 +2056,9 @@ describe('OpenQuota dashboard', () => {
       render(App);
       await screen.findByText('Plus');
       await fireEvent.click(screen.getByLabelText('Open options'));
-      await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      await chooseMenuItem('Settings');
       const windowMode = screen.getByRole('combobox', { name: 'Window Mode' });
-      await fireEvent.click(windowMode);
-      await fireEvent.click(screen.getByRole('option', { name: 'Floating Window' }));
+      await selectOption(windowMode, 'Floating Window');
       await waitFor(() =>
         expect(mocks.invoke).toHaveBeenCalledWith(
           'save_app_settings',
@@ -2087,17 +2069,15 @@ describe('OpenQuota dashboard', () => {
       );
 
       const heightMode = screen.getByRole('combobox', { name: 'Panel Height' });
-      await waitFor(() => expect(heightMode).toHaveTextContent('Manual'));
+      await waitFor(() => expect(heightMode).toHaveDisplayValue('Manual'));
 
-      await fireEvent.click(heightMode);
-      await fireEvent.click(screen.getByRole('option', { name: 'Automatic' }));
+      await selectOption(heightMode, 'Automatic');
       expect(mocks.invoke).toHaveBeenCalledWith('set_panel_height_automatic');
-      await waitFor(() => expect(heightMode).toHaveTextContent('Automatic'));
+      await waitFor(() => expect(heightMode).toHaveDisplayValue('Automatic'));
 
-      await fireEvent.click(heightMode);
-      await fireEvent.click(screen.getByRole('option', { name: 'Manual' }));
+      await selectOption(heightMode, 'Manual');
       expect(mocks.invoke).toHaveBeenCalledWith('set_panel_height_manual');
-      await waitFor(() => expect(heightMode).toHaveTextContent('Manual'));
+      await waitFor(() => expect(heightMode).toHaveDisplayValue('Manual'));
 
       await fireEvent.click(screen.getByLabelText('Back'));
       const grip = screen.getByRole('separator', { name: 'Resize panel height' });
@@ -2117,8 +2097,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.click(screen.getByLabelText('Open options'));
-    const trigger = screen.getByRole('button', { name: 'About OpenQuota' });
-    await fireEvent.click(trigger);
+    await chooseMenuItem('About OpenQuota');
     expect(screen.getByRole('dialog', { name: 'About OpenQuota' })).toBeInTheDocument();
     const close = screen.getByRole('button', { name: 'Close About' });
     await waitFor(() => expect(close).toHaveFocus());
@@ -2138,8 +2117,8 @@ describe('OpenQuota dashboard', () => {
       clientX: 120,
       clientY: 180,
     });
-    expect(screen.getByRole('menuitem', { name: 'Share Screenshot' })).toBeInTheDocument();
-    await fireEvent.click(screen.getByRole('menuitem', { name: 'Customize…' }));
+    expect(menuLabels()).toContain('Share Screenshot');
+    await chooseMenuItem('Customize…');
     expect(screen.getByRole('heading', { name: 'Codex' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
@@ -2148,104 +2127,30 @@ describe('OpenQuota dashboard', () => {
     expect(screen.getByRole('heading', { name: 'Customize' })).toBeInTheDocument();
   });
 
-  it('supports native-like keyboard navigation in dashboard context menus', async () => {
+  it('opens dashboard context menus as system menus where the pointer is', async () => {
     render(App);
     await screen.findByText('Plus');
     await fireEvent.contextMenu(screen.getByRole('group', { name: 'Codex provider' }), {
       clientX: 120,
       clientY: 180,
     });
-    const hide = screen.getByRole('menuitem', { name: 'Hide Codex' });
-    await waitFor(() => expect(hide).toHaveFocus());
-    await fireEvent.keyDown(hide, { key: 'ArrowDown' });
-    expect(screen.getByRole('menuitem', { name: 'Refresh Codex' })).toHaveFocus();
-    await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
-    expect(document.querySelector('.context-menu')).toBeNull();
-  });
+    expect(openMenu()!.at).toEqual({ x: 120, y: 180 });
+    const provider = menuLabels();
+    expect(provider.slice(0, 3)).toEqual(['Hide Codex', '-', 'Refresh Codex']);
+    expect(provider.slice(-3)).toEqual(['Customize…', '-', 'Share Screenshot']);
 
-  it('takes the arrows in an Options menu opened by a click that left focus elsewhere', async () => {
-    render(App);
-    await screen.findByText('Plus');
-    const summary = screen.getByLabelText('Open options');
-    const menu = summary.closest('details')!;
-    // As in macOS 26's WebKit, the click focuses nothing in the menu.
-    await fireEvent.click(summary);
-    expect(menu.open).toBe(true);
-    (document.activeElement as HTMLElement | null)?.blur();
-    expect(document.activeElement).toBe(document.body);
-
-    expect(await fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(false);
-    expect(screen.getByRole('button', { name: 'Customize' })).toHaveFocus();
-    (document.activeElement as HTMLElement).blur();
-    await fireEvent.keyDown(document.body, { key: 'ArrowUp' });
-    expect(screen.getByRole('button', { name: 'Quit OpenQuota' })).toHaveFocus();
-    (document.activeElement as HTMLElement).blur();
-    await fireEvent.keyDown(document.body, { key: 'Escape' });
-    expect(menu.open).toBe(false);
-    expect(summary).toHaveFocus();
-    // Closed, the menu leaves the arrows to the page.
-    summary.blur();
-    expect(await fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(true);
-  });
-
-  it('moves through the open Options menu with the arrow keys instead of scrolling', async () => {
-    render(App);
-    await screen.findByText('Plus');
-    const summary = screen.getByLabelText('Open options');
-    const menu = summary.closest('details')!;
-    await fireEvent.click(summary);
-    expect(menu.open).toBe(true);
-    summary.focus();
-
-    const down = await fireEvent.keyDown(summary, { key: 'ArrowDown' });
-    expect(down).toBe(false);
-    expect(screen.getByRole('button', { name: 'Customize' })).toHaveFocus();
-    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-    expect(screen.getByRole('button', { name: 'Settings' })).toHaveFocus();
-    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-    const share = screen.getByText('Share Screenshot').closest('summary')!;
-    expect(share).toHaveFocus();
-    await fireEvent.keyDown(document.activeElement!, { key: 'End' });
-    expect(screen.getByRole('button', { name: 'Quit OpenQuota' })).toHaveFocus();
-    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-    expect(screen.getByRole('button', { name: 'Customize' })).toHaveFocus();
-    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
-    expect(screen.getByRole('button', { name: 'Quit OpenQuota' })).toHaveFocus();
-
-    // Share Screenshot unfolds leftward: ← enters it, → comes back.
-    share.focus();
-    await fireEvent.keyDown(share, { key: 'ArrowLeft' });
-    const submenu = share.closest('details')!;
-    expect(submenu.open).toBe(true);
-    await waitFor(() => expect(submenu.querySelector('div button')).toHaveFocus());
-    const first = document.activeElement!;
-    await fireEvent.keyDown(first, { key: 'ArrowDown' });
-    expect(submenu.querySelector('div')).toContainElement(document.activeElement as HTMLElement);
-    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
-    expect(submenu.open).toBe(false);
-    expect(share).toHaveFocus();
-
-    await fireEvent.keyDown(share, { key: 'Escape' });
-    expect(menu.open).toBe(false);
-    expect(summary).toHaveFocus();
-  });
-
-  it('does not preselect a context-menu item after a pointer invocation', async () => {
-    render(App);
-    await screen.findByText('Plus');
-    await fireEvent.contextMenu(screen.getByRole('group', { name: 'Codex provider' }), {
-      button: 2,
-      clientX: 120,
-      clientY: 180,
+    await fireEvent.contextMenu(screen.getByRole('group', { name: 'Session options' }), {
+      clientX: 140,
+      clientY: 220,
     });
-    const hide = screen.getByRole('menuitem', { name: 'Hide Codex' });
-    const menu = hide.closest<HTMLElement>('[role="menu"]');
-    if (!menu) throw new Error('Context menu was not rendered.');
-    await waitFor(() => expect(menu).toHaveFocus());
-    expect(hide).not.toHaveFocus();
-
-    await fireEvent.keyDown(menu, { key: 'ArrowDown' });
-    expect(hide).toHaveFocus();
+    expect(openMenu()!.at).toEqual({ x: 140, y: 220 });
+    expect(menuLabels()).toEqual([
+      'Hide',
+      expect.stringMatching(/^(Unstar|Star for menu bar)$/),
+      '-',
+      'Refresh Codex',
+      'Customize…',
+    ]);
   });
 
   it('hides a dashboard metric without removing its menu bar star', async () => {
@@ -2255,7 +2160,7 @@ describe('OpenQuota dashboard', () => {
       clientX: 120,
       clientY: 180,
     });
-    await fireEvent.click(screen.getByRole('menuitem', { name: 'Hide' }));
+    await chooseMenuItem('Hide');
 
     await waitFor(() => {
       const save = [...mocks.invoke.mock.calls]
@@ -2267,22 +2172,5 @@ describe('OpenQuota dashboard', () => {
         ?.metrics.find((metric) => metric.id === 'codex.session');
       expect(session).toMatchObject({ enabled: false, pinned: true });
     });
-  });
-
-  it('lets a dropdown consume Escape without navigating away from Settings', async () => {
-    render(App);
-    await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    const theme = screen.getByRole('combobox', { name: 'Theme' });
-
-    await fireEvent.keyDown(theme, { key: 'ArrowDown' });
-    const listbox = screen.getByRole('listbox', { name: 'Theme' });
-    await vi.waitFor(() => expect(listbox).toContainElement(document.activeElement as HTMLElement));
-    await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
-
-    expect(screen.queryByRole('listbox', { name: 'Theme' })).not.toBeInTheDocument();
-    expect(theme).toHaveFocus();
-    expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument();
   });
 });

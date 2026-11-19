@@ -40,10 +40,10 @@
   import Dashboard from './lib/Dashboard.svelte';
   import Icon from './lib/Icon.svelte';
   import { editsText, handleMenuBarKey } from './lib/menuKeys';
-  import { menuHighlight } from './lib/menuHighlight';
   import { createListenerRegistry } from './lib/listenerRegistry';
   import { emptyProviderCatalog, ProviderCatalogIndex } from './lib/metrics';
   import { springMotion } from './lib/motion';
+  import { below, popupMenu } from './lib/nativeMenu';
   import OpenQuotaMark from './lib/OpenQuotaMark.svelte';
   import { horizontalPageTransition, shouldSlideBetweenScreens } from './lib/pageTransition';
   import { desktopPlatform, shortcutLabels } from './lib/platform';
@@ -88,9 +88,7 @@
   let showAbout = $state(false);
   let aboutTrigger: HTMLElement | null = null;
   let aboutCloseButton = $state<HTMLButtonElement>();
-  let shareMenuOpen = $state(false);
-  let optionsMenuElement = $state<HTMLDetailsElement>();
-  let shareMenuElement = $state<HTMLDetailsElement>();
+  let optionsButton = $state<HTMLButtonElement>();
   let shareTimer: ReturnType<typeof setTimeout> | undefined;
   const providerStates = $derived(Object.values(viewState.providers));
   const anyRefreshing = $derived(providerStates.some((state) => state.refreshing));
@@ -164,7 +162,6 @@
     void dismissMainWindow();
   }
   function resetTransientUi() {
-    closeOptionsMenu();
     showAbout = false;
     resetConfirmationOpen = false;
     settingsResetConfirmationOpen = false;
@@ -532,7 +529,7 @@
     return screen === 'settings' ? 'Settings' : 'Customize';
   }
   async function openAbout() {
-    aboutTrigger = optionsMenuElement?.querySelector<HTMLElement>(':scope > summary') ?? null;
+    aboutTrigger = optionsButton ?? null;
     showAbout = true;
     await tick();
     aboutCloseButton?.focus();
@@ -564,72 +561,34 @@
       ) !== null
     );
   }
-  function handleOptionsKey(event: KeyboardEvent) {
-    const menu = optionsMenuElement;
-    if (!menu?.open || event.metaKey || event.ctrlKey || event.altKey) return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      closeOptionsMenu(true);
-      return;
-    }
-    // As in a native menu: ↑/↓ move through the items of the open level, ←
-    // opens Share Screenshot (it unfolds leftward) and → returns from it.
-    const share = shareMenuElement;
-    const inShare = share?.open && share.querySelector('div')?.contains(event.target as Node);
-    if (event.key === 'ArrowLeft' && share && event.target === share.querySelector('summary')) {
-      event.preventDefault();
-      event.stopPropagation();
-      share.open = true;
-      shareMenuOpen = true;
-      void tick().then(() => share.querySelector<HTMLElement>('div button')?.focus());
-      return;
-    }
-    if (event.key === 'ArrowRight' && share && inShare) {
-      event.preventDefault();
-      event.stopPropagation();
-      share.open = false;
-      shareMenuOpen = false;
-      share.querySelector<HTMLElement>('summary')?.focus();
-      return;
-    }
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-    const level = inShare
-      ? share!.querySelectorAll<HTMLElement>('div button:not(:disabled)')
-      : menu.querySelectorAll<HTMLElement>(
-          '.options-menu__panel > button:not(:disabled), .options-menu__panel > details > summary',
-        );
-    const items = [...level];
-    if (items.length === 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const current = items.indexOf(document.activeElement as HTMLElement);
-    const next =
-      event.key === 'Home'
-        ? 0
-        : event.key === 'End'
-          ? items.length - 1
-          : event.key === 'ArrowDown'
-            ? current < 0
-              ? 0
-              : (current + 1) % items.length
-            : current < 0
-              ? items.length - 1
-              : (current - 1 + items.length) % items.length;
-    items[next].focus();
-  }
-  // A click does not focus the Options button in every WebKit (macOS 26 leaves
-  // focus where it was), so keys outside the open menu are its too, taken on
-  // the document before the page; those inside reach its own handlers.
-  function handleKeyOutsideOptions(event: KeyboardEvent) {
-    if (!optionsMenuElement?.contains(event.target as Node)) handleOptionsKey(event);
-  }
-  function closeOptionsMenu(restoreFocus = false) {
-    if (shareMenuElement?.open) shareMenuElement.open = false;
-    shareMenuOpen = false;
-    if (!optionsMenuElement?.open) return;
-    optionsMenuElement.open = false;
-    if (restoreFocus) optionsMenuElement.querySelector<HTMLElement>('summary')?.focus();
+  // The system draws Options, as it does every menu of the platform: it
+  // highlights, keys, dismisses and nests Share Screenshot itself.
+  function openOptionsMenu() {
+    if (!optionsButton) return;
+    const providers =
+      settingsState?.settings.providers.filter(
+        (provider) => provider.enabled && catalog.provider(provider.id),
+      ) ?? [];
+    void popupMenu(
+      [
+        { text: 'Customize', action: () => navigate('customize') },
+        { text: 'Settings', accelerator: 'CmdOrCtrl+,', action: () => navigate('settings') },
+        'separator',
+        {
+          text: 'Share Screenshot',
+          enabled: providers.length > 0,
+          items: providers.map((provider) => ({
+            text: providerDisplayName(provider.id),
+            action: () => void shareProvider(provider.id),
+          })),
+        },
+        { text: 'Check for Updates…', action: () => void checkForUpdates(true) },
+        'separator',
+        { text: 'About OpenQuota', action: () => void openAbout() },
+        { text: 'Quit OpenQuota', accelerator: 'CmdOrCtrl+Q', action: quitApp },
+      ],
+      below(optionsButton),
+    ).catch(() => undefined);
   }
   function handleWindowPointerDown(event: PointerEvent) {
     if (
@@ -637,13 +596,6 @@
       event.target.closest('.floating-chrome__drag') !== null
     ) {
       handleFloatingWindowPointerDown(event);
-    }
-    if (
-      optionsMenuElement?.open &&
-      event.target instanceof Node &&
-      !optionsMenuElement.contains(event.target)
-    ) {
-      closeOptionsMenu();
     }
   }
   function updatePanelResizeEdge() {
@@ -846,7 +798,6 @@
       }
     };
     document.addEventListener('keydown', handleKeydown);
-    document.addEventListener('keydown', handleKeyOutsideOptions, true);
     // Held open by keyboard navigation of the menu bar (macOS 27), the window
     // passes on the ←/→ it does not use; see menuKeys.
     let navigating = false;
@@ -941,7 +892,6 @@
       document.removeEventListener('visibilitychange', observeFirstFrame);
       cancelAnimationFrame(frame);
       document.removeEventListener('keydown', handleKeydown);
-      document.removeEventListener('keydown', handleKeyOutsideOptions, true);
       document.removeEventListener('keydown', handleMenuKeydown);
       window.clearInterval(clock);
       windowController.dispose();
@@ -1153,79 +1103,15 @@
                 <Icon name={floatingWindow ? 'pin-filled' : 'pin'} size={14} strokeWidth={1.9} />
               </button>
             {/if}
-            <details class="options-menu" bind:this={optionsMenuElement}>
-              <summary aria-label="Open options" onkeydown={handleOptionsKey}
-                ><span>Options</span><Icon
-                  name="chevron-down"
-                  size={11}
-                  strokeWidth={2.2}
-                /></summary
-              >
-              <div
-                class="options-menu__panel"
-                role="menu"
-                aria-label="Options menu"
-                tabindex="-1"
-                onkeydown={handleOptionsKey}
-                use:menuHighlight
-                onclick={(event) => {
-                  if (event.target instanceof Element && event.target.closest('button')) {
-                    closeOptionsMenu();
-                  }
-                }}
-              >
-                <button
-                  class="menu-item"
-                  type="button"
-                  aria-label="Customize"
-                  onclick={() => navigate('customize')}
-                  ><Icon name="sliders" /><span>Customize</span><kbd>↩</kbd></button
-                >
-                <button
-                  class="menu-item"
-                  type="button"
-                  aria-label="Settings"
-                  onclick={() => navigate('settings')}
-                  ><Icon name="gear" /><span>Settings</span><kbd>{shortcuts.settings}</kbd></button
-                >
-                <hr />
-                <details
-                  bind:this={shareMenuElement}
-                  class="share-menu"
-                  ontoggle={(event) => (shareMenuOpen = event.currentTarget.open)}
-                >
-                  <summary
-                    ><span class="share-menu__direction"
-                      ><Icon name="chevron-left" size={12} /></span
-                    ><span>Share Screenshot</span></summary
-                  >
-                  <div>
-                    {#if shareMenuOpen}
-                      {#each settingsState.settings.providers.filter((provider) => provider.enabled && catalog.provider(provider.id)) as provider (provider.id)}
-                        <button type="button" onclick={() => shareProvider(provider.id)}
-                          >{providerDisplayName(provider.id)}</button
-                        >
-                      {/each}
-                    {/if}
-                  </div>
-                </details>
-                <button class="menu-item" type="button" onclick={() => void checkForUpdates(true)}
-                  ><Icon name="refresh" /><span>Check for Updates…</span></button
-                >
-                <hr />
-                <button class="menu-item" type="button" onclick={openAbout}
-                  ><Icon name="about" /><span>About OpenQuota</span></button
-                >
-                <button
-                  class="menu-item menu-item--danger"
-                  type="button"
-                  aria-label="Quit OpenQuota"
-                  onclick={quitApp}
-                  ><Icon name="power" /><span>Quit OpenQuota</span><kbd>{shortcuts.quit}</kbd
-                  ></button
-                >
-              </div>
-            </details>
+            <button
+              type="button"
+              class="options-menu"
+              aria-label="Open options"
+              aria-haspopup="menu"
+              bind:this={optionsButton}
+              onclick={openOptionsMenu}
+              ><span>Options</span><Icon name="chevron-down" size={11} strokeWidth={2.2} /></button
+            >
           </div>
         {/if}
       </footer>
@@ -1497,9 +1383,6 @@
 
     .options-menu {
       position: relative;
-    }
-
-    .options-menu > summary {
       display: grid;
       width: 30px;
       height: 30px;
@@ -1511,49 +1394,9 @@
       place-items: center;
     }
 
-    .options-menu > summary::-webkit-details-marker {
-      display: none;
-    }
-
-    .options-menu[open] > summary,
-    .options-menu > summary:hover {
+    .options-menu:hover {
       color: var(--text);
       background: var(--button-hover);
-    }
-
-    .options-menu > div {
-      position: absolute;
-      right: 0;
-      bottom: 36px;
-      z-index: 10;
-      width: 130px;
-      padding: 4px;
-      border: 1px solid var(--separator);
-      border-radius: 9px;
-      background: var(--menu-surface);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-    }
-
-    .options-menu button {
-      width: 100%;
-      padding: 6px 8px;
-      border: 0;
-      border-radius: 3px;
-      color: var(--text);
-      background: none;
-      font-size: 11px;
-      text-align: left;
-    }
-
-    /* One highlight, which the pointer and the arrows both move (menuHighlight). */
-    .options-menu__panel button:focus {
-      outline: none;
-      color: #ffffff;
-      background: var(--meter-fill);
-    }
-
-    .options-menu .menu-item:focus kbd {
-      color: inherit;
     }
 
     .screen-header {
@@ -1715,9 +1558,6 @@
 
     .options-menu {
       margin-left: auto;
-    }
-
-    .options-menu > summary {
       display: flex;
       width: auto;
       height: 26px;
@@ -1732,56 +1572,10 @@
       font-weight: 550;
     }
 
-    .options-menu > summary i {
+    .options-menu i {
       margin-top: -2px;
       font-size: 11px;
       font-style: normal;
-    }
-
-    .options-menu > summary .symbol-icon {
-      transition: transform 160ms ease;
-    }
-
-    .options-menu[open] > summary .symbol-icon {
-      transform: rotate(180deg);
-    }
-
-    .options-menu > div {
-      bottom: 34px;
-      width: 172px;
-      padding: 4px;
-      border: 0;
-      border-radius: 6px;
-      box-shadow: var(--menu-shadow);
-      -webkit-backdrop-filter: var(--menu-backdrop);
-      backdrop-filter: var(--menu-backdrop);
-      transform-origin: bottom right;
-      animation: menu-in 180ms ease-out both;
-    }
-
-    /* Unlike Copool's top-level menus, Share is nested here. Keep the parent
-       filter on its paint layer so the submenu can also sample the page. */
-    :root[data-platform='linux'].composited .options-menu > div {
-      background: transparent;
-      -webkit-backdrop-filter: none;
-      backdrop-filter: none;
-      animation-fill-mode: backwards;
-    }
-
-    :root[data-platform='linux'].composited .options-menu > div::before {
-      position: absolute;
-      z-index: -1;
-      inset: 0;
-      border-radius: inherit;
-      background: var(--menu-surface);
-      -webkit-backdrop-filter: var(--menu-backdrop);
-      backdrop-filter: var(--menu-backdrop);
-      pointer-events: none;
-      content: '';
-    }
-
-    .options-menu button {
-      font-size: 11px;
     }
 
     .screen-header {
@@ -1834,94 +1628,6 @@
 
     .screen-header .text-button::after {
       content: none;
-    }
-
-    .options-menu .menu-item,
-    .share-menu > summary {
-      display: flex;
-      width: 100%;
-      min-height: 32px;
-      align-items: center;
-      gap: 8px;
-      padding: 7px 9px;
-      border: 0;
-      border-radius: 3px;
-      color: var(--text);
-      background: transparent;
-      font-size: 11px;
-      text-align: left;
-    }
-
-    .options-menu .menu-item span,
-    .share-menu > summary span {
-      flex: 1;
-    }
-
-    .options-menu kbd {
-      color: var(--tertiary);
-      background: none;
-      font: 10px/1 inherit;
-    }
-
-    .options-menu .menu-item--danger {
-      color: var(--meter-critical);
-    }
-
-    .share-menu {
-      position: relative;
-    }
-
-    .share-menu > summary {
-      cursor: pointer;
-      list-style: none;
-    }
-
-    .share-menu > summary::-webkit-details-marker {
-      display: none;
-    }
-
-    .share-menu > summary .share-menu__direction {
-      display: grid;
-      width: 16px;
-      flex: 0 0 16px;
-      place-items: center;
-    }
-
-    .share-menu > summary .share-menu__direction .symbol-icon {
-      transition: transform 140ms ease;
-    }
-
-    .share-menu[open] > summary .share-menu__direction .symbol-icon {
-      transform: translateX(-2px);
-    }
-
-    .share-menu > div {
-      position: absolute;
-      right: calc(100% - 2px);
-      bottom: -5px;
-      width: 130px;
-      max-width: calc(100vw - 16px);
-      padding: 4px;
-      border: 0;
-      border-radius: 6px;
-      background: var(--menu-surface);
-      box-shadow: var(--menu-shadow);
-      -webkit-backdrop-filter: var(--menu-backdrop);
-      backdrop-filter: var(--menu-backdrop);
-      transform-origin: bottom right;
-      animation: menu-in 160ms ease-out both;
-    }
-
-    .share-menu button {
-      width: 100%;
-      min-height: 30px;
-      padding: 7px 9px;
-      border: 0;
-      border-radius: 3px;
-      color: var(--text);
-      background: transparent;
-      font-size: 11px;
-      text-align: left;
     }
 
     .transient-pill {

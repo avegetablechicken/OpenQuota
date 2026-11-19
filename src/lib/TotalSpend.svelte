@@ -495,33 +495,40 @@
       white-space: nowrap;
     }
 
-    .select-menu--title {
-      min-width: 0;
+    .select-menu.select-menu--title {
+      font-size: 14px;
     }
 
     .select-menu--title .select-menu__trigger {
       min-height: 24px;
       gap: 4px;
-      padding: 0;
-      border: 0;
-      background: transparent;
-      font-size: 14px;
       font-weight: 600;
+      cursor: pointer;
     }
 
-    .select-menu--title .select-menu__trigger:hover,
-    .select-menu--title .select-menu__trigger[aria-expanded='true'] {
-      color: var(--meter-fill);
+    .select-menu--title .select-menu__trigger:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--meter-fill) 55%, transparent);
+      outline-offset: 2px;
+    }
+
+    .select-menu--title .select-menu__label {
+      color: inherit;
+    }
+
+    .select-menu--title .select-menu__stepper {
+      width: auto;
+      height: auto;
+      flex: 0 0 auto;
+      color: inherit;
       background: transparent;
     }
 
-    .select-menu__list--title {
-      min-width: 138px;
-      transform-origin: top left;
+    .select-menu.select-menu--title:hover .select-menu__trigger {
+      color: var(--meter-fill);
     }
 
-    .select-menu__list--title.select-menu__list--above {
-      transform-origin: bottom left;
+    .select-menu.select-menu--title:hover .select-menu__stepper {
+      background: transparent;
     }
 
     .total-card__header .icon-button--plain {

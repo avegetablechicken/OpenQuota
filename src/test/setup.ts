@@ -1,4 +1,6 @@
 import '@testing-library/jest-dom/vitest';
+import { afterEach, vi } from 'vitest';
+import { closeMenu } from './nativeMenu';
 
 if (!window.matchMedia) {
   window.matchMedia = (query: string) =>
@@ -69,3 +71,8 @@ if (!Element.prototype.animate) {
 if (!Element.prototype.getAnimations) {
   Element.prototype.getAnimations = () => [];
 }
+
+// The system menu exists only in the app; tests use the double, which
+// records what opens and chooses from it.
+vi.mock('../lib/nativeMenu', () => import('./nativeMenu'));
+afterEach(() => closeMenu());

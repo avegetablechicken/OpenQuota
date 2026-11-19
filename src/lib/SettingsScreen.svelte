@@ -643,7 +643,7 @@
       font-weight: 400;
     }
 
-    .setting-row .select-menu__trigger {
+    .setting-row .select-menu {
       font-size: 13px;
     }
 

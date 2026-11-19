@@ -16,7 +16,7 @@
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
   import { sub2ApiUpstreamAccountName } from './sub2ApiUpstreams';
-  import { menuHighlight } from './menuHighlight';
+  import { popupMenu, type NativeMenuEntry } from './nativeMenu';
   import {
     shouldShowProviderForMode,
     PROVIDER_USAGE_SCOPE_LABELS,
@@ -207,10 +207,6 @@
     await tick();
     if (!button.isConnected) providerSection?.focus({ preventScroll: true });
   }
-  let providerMenu = $state<{ id: string; accountId?: string; x: number; y: number } | null>(null);
-  let metricMenu = $state<{ providerId: string; metricId: string; x: number; y: number } | null>(
-    null,
-  );
   const accountExpansion = new SvelteMap<string, boolean>();
   let demandMorphing = $state(false);
   let usageViewMode = $state<UsageViewMode>('all');
@@ -395,64 +391,57 @@
     metrics.splice(insertAt, 0, { ...source, section });
     updateProvider({ ...provider, metrics });
   }
+  // The system draws these menus where the pointer is, as it does every
+  // context menu of the platform.
   function openProviderMenu(event: MouseEvent, providerId: string, accountId?: string) {
     event.preventDefault();
-    metricMenu = null;
-    const focusFirstItem = event.button !== 2;
-    const provider = settings.providers.find((item) => item.id === providerId);
-    const menuHeight = provider && canRenameProvider(provider.id, renamableProviderIds) ? 204 : 174;
-    providerMenu = {
-      id: providerId,
-      accountId,
-      x: Math.max(6, Math.min(event.clientX, window.innerWidth - 196)),
-      y: Math.max(6, Math.min(event.clientY, window.innerHeight - menuHeight)),
-    };
-    queueMicrotask(() => focusContextMenu(focusFirstItem));
+    if (!settings.providers.some((item) => item.id === providerId)) return;
+    const name = providerDisplayName(providerId);
+    const entries: NativeMenuEntry[] = [
+      { text: `Hide ${name}`, action: () => hideProvider(providerId) },
+      'separator',
+      { text: `Refresh ${name}`, action: () => void onRefresh(providerId) },
+    ];
+    if (canRenameProvider(providerId, renamableProviderIds)) {
+      entries.push({ text: 'Rename…', action: () => onRenameProvider(providerId) });
+    }
+    entries.push(
+      { text: 'Customize…', action: () => onOpenProviderCustomize(providerId) },
+      'separator',
+      {
+        text: 'Share Screenshot',
+        action: () =>
+          onShare(providerId, usageViewMode, accountId, Object.fromEntries(accountExpansion)),
+      },
+    );
+    void popupMenu(entries, { x: event.clientX, y: event.clientY }).catch(() => undefined);
   }
   function openMetricMenu(event: MouseEvent, providerId: string, metricId: string) {
     event.preventDefault();
     event.stopPropagation();
-    providerMenu = null;
-    const focusFirstItem = event.button !== 2;
-    metricMenu = {
-      providerId,
-      metricId,
-      x: Math.max(6, Math.min(event.clientX, window.innerWidth - 196)),
-      y: Math.max(6, Math.min(event.clientY, window.innerHeight - 154)),
-    };
-    queueMicrotask(() => focusContextMenu(focusFirstItem));
-  }
-  function focusContextMenu(focusFirstItem: boolean) {
-    const menu = document.querySelector<HTMLElement>('.context-menu');
-    if (focusFirstItem) menu?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
-    else menu?.focus({ preventScroll: true });
-  }
-  function handleContextMenuKey(event: KeyboardEvent) {
-    const menu = event.currentTarget as HTMLElement;
-    const items = [...menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      providerMenu = null;
-      metricMenu = null;
-      return;
+    const provider = settings.providers.find((item) => item.id === providerId);
+    const metric = provider?.metrics.find((item) => item.id === metricId);
+    if (!provider || !metric) return;
+    const entries: NativeMenuEntry[] = [
+      { text: 'Hide', action: () => patchMetric(providerId, metricId, { enabled: false }) },
+    ];
+    if (metricDefinition(metricId)?.pinnable) {
+      entries.push({
+        text: metric.pinned ? 'Unstar' : 'Star for menu bar',
+        // At most two stars per provider.
+        enabled: metric.pinned || provider.metrics.filter((item) => item.pinned).length < 2,
+        action: () => patchMetric(providerId, metricId, { pinned: !metric.pinned }),
+      });
     }
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || items.length === 0) return;
-    event.preventDefault();
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next =
-      event.key === 'Home'
-        ? 0
-        : event.key === 'End'
-          ? items.length - 1
-          : event.key === 'ArrowDown'
-            ? current < 0
-              ? 0
-              : (current + 1) % items.length
-            : current < 0
-              ? items.length - 1
-              : (current - 1 + items.length) % items.length;
-    items[next].focus();
+    entries.push(
+      'separator',
+      {
+        text: `Refresh ${providerDisplayName(providerId)}`,
+        action: () => void onRefresh(providerId),
+      },
+      { text: 'Customize…', action: () => onOpenProviderCustomize(providerId) },
+    );
+    void popupMenu(entries, { x: event.clientX, y: event.clientY }).catch(() => undefined);
   }
   function patchMetric(providerId: string, metricId: string, patch: Partial<MetricLayout>) {
     const provider = settings.providers.find((item) => item.id === providerId);
@@ -463,12 +452,10 @@
         metric.id === metricId ? { ...metric, ...patch } : metric,
       ),
     });
-    metricMenu = null;
   }
   function hideProvider(providerId: string) {
     const provider = settings.providers.find((item) => item.id === providerId);
     if (provider) updateProvider({ ...provider, enabled: false });
-    providerMenu = null;
   }
   function dismissDetection() {
     onSettingsChange({ ...settings, detectionNoticeDismissed: true });
@@ -484,13 +471,6 @@
     return `Last updated ${hours}h${remainingMinutes ? ` ${remainingMinutes}m` : ''} ago`;
   }
 </script>
-
-<svelte:window
-  onclick={() => {
-    providerMenu = null;
-    metricMenu = null;
-  }}
-/>
 
 {#if updateStatus?.available && updateStatus.version !== settings.dismissedUpdateVersion}
   <section class="hint-card update-banner" aria-label="Update Available">
@@ -863,102 +843,6 @@
     </section>
   </div>
 {/each}
-
-{#if providerMenu}
-  {@const menuProvider = settings.providers.find((provider) => provider.id === providerMenu?.id)}
-  {#if menuProvider}
-    <div
-      class="context-menu"
-      style={`left:${providerMenu.x}px;top:${providerMenu.y}px`}
-      role="menu"
-      tabindex="-1"
-      onkeydown={handleContextMenuKey}
-      use:menuHighlight
-    >
-      <button
-        class="danger"
-        type="button"
-        role="menuitem"
-        onclick={() => hideProvider(menuProvider.id)}
-        ><Icon name="power" size={15} />Hide {providerDisplayName(menuProvider.id)}</button
-      >
-      <hr />
-      <button type="button" role="menuitem" onclick={() => onRefresh(menuProvider.id)}
-        ><Icon name="refresh" size={15} />Refresh {providerDisplayName(menuProvider.id)}</button
-      >
-      {#if canRenameProvider(menuProvider.id, renamableProviderIds)}
-        <button type="button" role="menuitem" onclick={() => onRenameProvider(menuProvider.id)}
-          ><Icon name="edit" size={15} />Rename…</button
-        >
-      {/if}
-      <button type="button" role="menuitem" onclick={() => onOpenProviderCustomize(menuProvider.id)}
-        ><Icon name="sliders" size={15} />Customize…</button
-      >
-      <hr />
-      <button
-        type="button"
-        role="menuitem"
-        onclick={() =>
-          onShare(
-            menuProvider.id,
-            usageViewMode,
-            providerMenu?.accountId,
-            Object.fromEntries(accountExpansion),
-          )}><Icon name="share" size={15} />Share Screenshot</button
-      >
-    </div>
-  {/if}
-{/if}
-
-{#if metricMenu}
-  {@const metricProvider = settings.providers.find(
-    (provider) => provider.id === metricMenu?.providerId,
-  )}
-  {@const menuMetric = metricProvider?.metrics.find((metric) => metric.id === metricMenu?.metricId)}
-  {#if metricProvider && menuMetric}
-    <div
-      class="context-menu"
-      style={`left:${metricMenu.x}px;top:${metricMenu.y}px`}
-      role="menu"
-      tabindex="-1"
-      onkeydown={handleContextMenuKey}
-      use:menuHighlight
-    >
-      <button
-        class="danger"
-        type="button"
-        role="menuitem"
-        onclick={() => patchMetric(metricProvider.id, menuMetric.id, { enabled: false })}
-        ><Icon name="power" size={15} />Hide</button
-      >
-      {#if metricDefinition(menuMetric.id)?.pinnable}
-        <button
-          type="button"
-          role="menuitem"
-          disabled={!menuMetric.pinned &&
-            metricProvider.metrics.filter((metric) => metric.pinned).length >= 2}
-          onclick={() =>
-            patchMetric(metricProvider.id, menuMetric.id, {
-              pinned: !menuMetric.pinned,
-            })}
-          ><Icon name={menuMetric.pinned ? 'star-filled' : 'star'} size={15} />{menuMetric.pinned
-            ? 'Unstar'
-            : 'Star for menu bar'}</button
-        >
-      {/if}
-      <hr />
-      <button type="button" role="menuitem" onclick={() => onRefresh(metricProvider.id)}
-        ><Icon name="refresh" size={15} />Refresh {providerDisplayName(metricProvider.id)}</button
-      >
-      <button
-        type="button"
-        role="menuitem"
-        onclick={() => onOpenProviderCustomize(metricProvider.id)}
-        ><Icon name="sliders" size={15} />Customize…</button
-      >
-    </div>
-  {/if}
-{/if}
 
 {#if enabledProviders.length === 0}
   <section class="empty-dashboard">
@@ -1526,53 +1410,6 @@
 
     .metric-context-target:hover > .metric-reorder-handle {
       opacity: 0.82;
-    }
-
-    .context-menu {
-      position: fixed;
-      z-index: 80;
-      width: 190px;
-      padding: 4px;
-      border: 0;
-      border-radius: 6px;
-      background: var(--menu-surface);
-      box-shadow: var(--menu-shadow);
-      -webkit-backdrop-filter: var(--menu-backdrop);
-      backdrop-filter: var(--menu-backdrop);
-      animation: menu-in 180ms ease-out both;
-    }
-
-    .context-menu:focus {
-      outline: none;
-    }
-
-    .context-menu button {
-      display: flex;
-      width: 100%;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 8px;
-      border: 0;
-      border-radius: 3px;
-      color: var(--text);
-      background: transparent;
-      font-size: 11px;
-      text-align: left;
-    }
-
-    .context-menu button.danger {
-      color: var(--meter-critical);
-    }
-
-    /* One highlight, which the pointer and the arrows both move (menuHighlight). */
-    .context-menu button:not(:disabled):focus {
-      outline: none;
-      color: #ffffff;
-      background: var(--meter-fill);
-    }
-
-    .context-menu button:disabled {
-      opacity: 0.45;
     }
 
     @keyframes spin {

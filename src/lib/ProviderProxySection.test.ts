@@ -4,6 +4,7 @@ import { tick } from 'svelte';
 import { probeProviderProxy } from './backend';
 import type { ProxyExitLocation } from './types';
 import { settingsState } from '../test/appFixtures';
+import { selectOption } from '../test/selectOption';
 import ProviderProxySection from './ProviderProxySection.svelte';
 
 vi.mock('./backend', () => ({ probeProviderProxy: vi.fn() }));
@@ -68,12 +69,11 @@ it('starts collapsed and summarizes the saved mode in the header', async () => {
   expect(screen.queryByRole('combobox', { name: 'Proxy mode' })).toBeNull();
   await fireEvent.click(disclosure);
   expect(disclosure).toHaveAttribute('aria-expanded', 'true');
-  expect(screen.getByRole('combobox', { name: 'Proxy mode' })).toHaveTextContent('Direct');
+  expect(screen.getByRole('combobox', { name: 'Proxy mode' })).toHaveDisplayValue('Direct');
 });
 
 async function chooseMode(name: 'System' | 'Direct' | 'Custom') {
-  await fireEvent.click(screen.getByRole('combobox', { name: 'Proxy mode' }));
-  await fireEvent.click(screen.getByRole('option', { name }));
+  await selectOption(screen.getByRole('combobox', { name: 'Proxy mode' }), name);
 }
 
 it('uses system routing by default and saves direct routing from the mode menu', async () => {

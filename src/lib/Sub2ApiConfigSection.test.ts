@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import Sub2ApiConfigSection from './Sub2ApiConfigSection.svelte';
+import { selectOption } from '../test/selectOption';
 import {
   forgetSub2ApiUpstream,
   rememberSub2ApiUpstream,
@@ -12,8 +13,7 @@ const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 
 async function chooseUpstream(name: 'Codex' | 'Claude') {
-  await fireEvent.click(screen.getByRole('combobox', { name: 'Upstream' }));
-  await fireEvent.click(screen.getByRole('option', { name }));
+  await selectOption(screen.getByRole('combobox', { name: 'Upstream' }), name);
 }
 
 describe('Sub2ApiConfigSection', () => {
