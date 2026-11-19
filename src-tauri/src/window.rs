@@ -457,13 +457,10 @@ pub(crate) fn show_linux_panel(
     window.set_focus()
 }
 
+/// Shows and focuses the window. On macOS 27 this also serves the status
+/// item's session begun by keyboard navigation of the menu bar: focus
+/// activates the app, so its shortcuts arrive as after a click.
 pub fn show_main_window(window: &WebviewWindow) {
-    present_main_window(window, true);
-}
-
-/// Shows the window as `show_main_window`, taking focus from the active app
-/// only if `focus`.
-pub fn present_main_window(window: &WebviewWindow, focus: bool) {
     let show_started = std::time::Instant::now();
     if window
         .app_handle()
@@ -497,38 +494,14 @@ pub fn present_main_window(window: &WebviewWindow, focus: bool) {
             position_popup(window);
         }
         join_active_space(window, !floating);
-        if focus {
-            let _ = window.show();
-            let _ = window.set_focus();
-        } else {
-            order_front(window);
-        }
+        let _ = window.show();
+        let _ = window.set_focus();
     }
-    #[cfg(target_os = "linux")]
-    let _ = focus;
     crate::app_debug!(
         "window",
         "panel presentation dispatched ({} ms)",
         show_started.elapsed().as_millis()
     );
-}
-
-/// Shows the window without making it the key window, which would end keyboard
-/// navigation of the menu bar even while the app stays inactive.
-#[cfg(not(target_os = "linux"))]
-fn order_front(window: &WebviewWindow) {
-    #[cfg(target_os = "macos")]
-    if let Ok(ns_window) = window.ns_window() {
-        // SAFETY: Tauri returns the window's NSWindow, used here on the main thread.
-        let () = unsafe {
-            objc2::msg_send![
-                &*ns_window.cast::<objc2::runtime::AnyObject>(),
-                orderFrontRegardless
-            ]
-        };
-        return;
-    }
-    let _ = window.show();
 }
 
 /// The popup appears in whichever space is active, including a full-screen

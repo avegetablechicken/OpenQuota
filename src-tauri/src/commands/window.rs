@@ -74,6 +74,17 @@ pub fn lock_panel_resize_axis(app: AppHandle) -> Result<(), String> {
     lock_native_panel_resize_axis(&window)
 }
 
+/// Moves menu bar keyboard navigation from the open window to the
+/// neighbouring item (macOS); elsewhere the window is not part of such
+/// navigation.
+#[tauri::command]
+pub fn navigate_menu_bar(app: AppHandle, right: bool) {
+    #[cfg(target_os = "macos")]
+    crate::status_item::navigate(&app, right);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, right);
+}
+
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {

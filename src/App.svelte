@@ -12,6 +12,8 @@
     lockPanelResizeAxis,
     onOpenScreen,
     onMainWindowHidden,
+    onMenuBarSession,
+    navigateMenuBar,
     onPanelBackdrop,
     onSettingsState,
     onUpdateProgress,
@@ -37,6 +39,7 @@
   import { restoreCustomization } from './lib/customizationHistory';
   import Dashboard from './lib/Dashboard.svelte';
   import Icon from './lib/Icon.svelte';
+  import { editsText, handleMenuBarKey } from './lib/menuKeys';
   import { createListenerRegistry } from './lib/listenerRegistry';
   import { emptyProviderCatalog, ProviderCatalogIndex } from './lib/metrics';
   import { springMotion } from './lib/motion';
@@ -792,6 +795,12 @@
       }
     };
     document.addEventListener('keydown', handleKeydown);
+    // Held open by keyboard navigation of the menu bar (macOS 27), the window
+    // passes on the ←/→ it does not use; see menuKeys.
+    let navigating = false;
+    const handleMenuKeydown = (event: KeyboardEvent) =>
+      handleMenuBarKey(event, navigating, (right) => void navigateMenuBar(right).catch(() => {}));
+    document.addEventListener('keydown', handleMenuKeydown);
     const clock = window.setInterval(() => (now = Date.now()), 30_000);
     const listeners = createListenerRegistry(() => {
       settingsError ??= 'OpenQuota event bridge is unavailable.';
@@ -822,7 +831,18 @@
       onOpenScreen((target) => navigate(target === 'settings' ? 'settings' : 'customize')),
     );
     listeners.add(
+      onMenuBarSession(({ active, keyboard }) => {
+        navigating = active && keyboard;
+        // Keys start on the window, not in a text field left focused, where
+        // ←/→ would not move along the menu bar.
+        if (navigating && editsText(document.activeElement)) {
+          (document.activeElement as HTMLElement).blur();
+        }
+      }),
+    );
+    listeners.add(
       onMainWindowHidden(() => {
+        navigating = false;
         resetTransientUi();
         slidePageTransition = false;
         screen = 'dashboard';
@@ -869,6 +889,7 @@
       document.removeEventListener('visibilitychange', observeFirstFrame);
       cancelAnimationFrame(frame);
       document.removeEventListener('keydown', handleKeydown);
+      document.removeEventListener('keydown', handleMenuKeydown);
       window.clearInterval(clock);
       windowController.dispose();
       motionQuery.removeEventListener('change', updateMotionPreference);

@@ -55,7 +55,7 @@ use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 #[cfg(target_os = "macos")]
-use crate::window::{hide_main_window, present_main_window};
+use crate::window::hide_main_window;
 use crate::{
     desktop_integration::DesktopIntegration,
     models::{AppSettings, MenuBarStyle, UpdateFrequency, UsageDisplay, WindowMode},
@@ -510,10 +510,27 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
                     remember_tray_position(&begin);
                     begin.state::<PopupDismissGuard>().cancel_pending();
                     if let Some(window) = begin.get_webview_window(MAIN_WINDOW) {
-                        present_main_window(&window, clicked);
+                        show_main_window(&window);
+                        // Begun by keyboard navigation, it passes unused ←/→ back to the menu bar.
+                        let _ = window.emit(
+                            "menu-bar-session",
+                            MenuBarSession {
+                                active: true,
+                                keyboard: !clicked,
+                            },
+                        );
                     }
                 }),
                 end: Box::new(move || {
+                    if let Some(window) = end.get_webview_window(MAIN_WINDOW) {
+                        let _ = window.emit(
+                            "menu-bar-session",
+                            MenuBarSession {
+                                active: false,
+                                keyboard: false,
+                            },
+                        );
+                    }
                     if end.state::<DesktopIntegration>().is_floating() {
                         return;
                     }
@@ -525,6 +542,16 @@ fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     Ok(())
+}
+
+/// The status item's expanded interface session (macOS 27), which holds the
+/// window as the item's menu while it lasts.
+#[cfg(target_os = "macos")]
+#[derive(Clone, serde::Serialize)]
+struct MenuBarSession {
+    active: bool,
+    /// Keyboard navigation of the menu bar began it, not a click.
+    keyboard: bool,
 }
 
 /// Tells the positioner where the icon is, which it otherwise learns only from
@@ -1014,6 +1041,7 @@ pub fn run() {
             commands::settings::get_log_path,
             commands::settings::open_log_folder,
             commands::window::dismiss_main_window,
+            commands::window::navigate_menu_bar,
             commands::window::get_panel_resize_edge,
             commands::window::get_panel_height_mode,
             commands::window::replay_panel_backdrop,

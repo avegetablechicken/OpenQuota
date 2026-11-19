@@ -180,6 +180,18 @@ export function lockPanelResizeAxis() {
   return invoke<void>('lock_panel_resize_axis');
 }
 
+/// Moves menu bar keyboard navigation to the neighbouring status item (macOS 27).
+export function navigateMenuBar(right: boolean) {
+  return invoke<void>('navigate_menu_bar', { right });
+}
+
+export type MenuBarSession = { active: boolean; keyboard: boolean };
+
+/// The window opened as the status item's menu (macOS 27), or closed again.
+export function onMenuBarSession(handler: PayloadHandler<MenuBarSession>) {
+  return onEvent('menu-bar-session', handler);
+}
+
 export function quitApplication() {
   return invoke<void>('quit_app');
 }
