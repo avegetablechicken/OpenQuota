@@ -3,6 +3,7 @@
   import { cubicOut } from 'svelte/easing';
   import type { TransitionConfig } from 'svelte/transition';
   import Icon from './Icon.svelte';
+  import { menuHighlight } from './menuHighlight';
 
   export interface SelectOption {
     value: string;
@@ -38,11 +39,40 @@
     const reposition = () => {
       if (open) placeListbox();
     };
+    // An open list takes the arrows wherever focus is: a click focuses
+    // neither the trigger nor, in every WebKit (macOS 26), the option it
+    // asked for, which would leave the keys to the page.
+    const keysWhileOpen = (event: KeyboardEvent) => {
+      if (!open || !listbox || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as Node;
+      if (listbox.contains(target) || root?.contains(target)) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        open = false;
+        root?.querySelector<HTMLButtonElement>('[role="combobox"]')?.focus();
+        return;
+      }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+      const items = [...listbox.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+      if (items.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      // Into the list at the chosen option, as ↓ on the trigger does.
+      const selected = Math.max(
+        0,
+        options.findIndex((option) => option.value === value),
+      );
+      const index = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : selected;
+      items[index]?.focus();
+    };
     document.addEventListener('pointerdown', closeOutside);
+    document.addEventListener('keydown', keysWhileOpen, true);
     document.addEventListener('scroll', reposition, true);
     window.addEventListener('resize', reposition);
     return () => {
       document.removeEventListener('pointerdown', closeOutside);
+      document.removeEventListener('keydown', keysWhileOpen, true);
       document.removeEventListener('scroll', reposition, true);
       window.removeEventListener('resize', reposition);
     };
@@ -197,6 +227,7 @@
       style={`--select-menu-max-height: ${maxListHeight}px; --select-menu-trigger-width: ${triggerWidth}px; top: ${listTop}px; left: ${listLeft}px`}
       bind:this={listbox}
       use:portal
+      use:menuHighlight={'[role="option"]'}
       in:menuReveal
       out:menuDismiss
     >
@@ -313,8 +344,8 @@
       cursor: pointer;
     }
 
-    .select-menu__list button:hover,
-    .select-menu__list button:focus-visible {
+    /* One highlight, which the pointer and the arrows both move (menuHighlight). */
+    .select-menu__list button:focus {
       outline: none;
       color: #ffffff;
       background: var(--meter-fill);

@@ -2163,6 +2163,73 @@ describe('OpenQuota dashboard', () => {
     expect(document.querySelector('.context-menu')).toBeNull();
   });
 
+  it('takes the arrows in an Options menu opened by a click that left focus elsewhere', async () => {
+    render(App);
+    await screen.findByText('Plus');
+    const summary = screen.getByLabelText('Open options');
+    const menu = summary.closest('details')!;
+    // As in macOS 26's WebKit, the click focuses nothing in the menu.
+    await fireEvent.click(summary);
+    expect(menu.open).toBe(true);
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+
+    expect(await fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(false);
+    expect(screen.getByRole('button', { name: 'Customize' })).toHaveFocus();
+    (document.activeElement as HTMLElement).blur();
+    await fireEvent.keyDown(document.body, { key: 'ArrowUp' });
+    expect(screen.getByRole('button', { name: 'Quit OpenQuota' })).toHaveFocus();
+    (document.activeElement as HTMLElement).blur();
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(menu.open).toBe(false);
+    expect(summary).toHaveFocus();
+    // Closed, the menu leaves the arrows to the page.
+    summary.blur();
+    expect(await fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(true);
+  });
+
+  it('moves through the open Options menu with the arrow keys instead of scrolling', async () => {
+    render(App);
+    await screen.findByText('Plus');
+    const summary = screen.getByLabelText('Open options');
+    const menu = summary.closest('details')!;
+    await fireEvent.click(summary);
+    expect(menu.open).toBe(true);
+    summary.focus();
+
+    const down = await fireEvent.keyDown(summary, { key: 'ArrowDown' });
+    expect(down).toBe(false);
+    expect(screen.getByRole('button', { name: 'Customize' })).toHaveFocus();
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(screen.getByRole('button', { name: 'Settings' })).toHaveFocus();
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    const share = screen.getByText('Share Screenshot').closest('summary')!;
+    expect(share).toHaveFocus();
+    await fireEvent.keyDown(document.activeElement!, { key: 'End' });
+    expect(screen.getByRole('button', { name: 'Quit OpenQuota' })).toHaveFocus();
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(screen.getByRole('button', { name: 'Customize' })).toHaveFocus();
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+    expect(screen.getByRole('button', { name: 'Quit OpenQuota' })).toHaveFocus();
+
+    // Share Screenshot unfolds leftward: ← enters it, → comes back.
+    share.focus();
+    await fireEvent.keyDown(share, { key: 'ArrowLeft' });
+    const submenu = share.closest('details')!;
+    expect(submenu.open).toBe(true);
+    await waitFor(() => expect(submenu.querySelector('div button')).toHaveFocus());
+    const first = document.activeElement!;
+    await fireEvent.keyDown(first, { key: 'ArrowDown' });
+    expect(submenu.querySelector('div')).toContainElement(document.activeElement as HTMLElement);
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
+    expect(submenu.open).toBe(false);
+    expect(share).toHaveFocus();
+
+    await fireEvent.keyDown(share, { key: 'Escape' });
+    expect(menu.open).toBe(false);
+    expect(summary).toHaveFocus();
+  });
+
   it('does not preselect a context-menu item after a pointer invocation', async () => {
     render(App);
     await screen.findByText('Plus');

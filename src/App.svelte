@@ -40,6 +40,7 @@
   import Dashboard from './lib/Dashboard.svelte';
   import Icon from './lib/Icon.svelte';
   import { editsText, handleMenuBarKey } from './lib/menuKeys';
+  import { menuHighlight } from './lib/menuHighlight';
   import { createListenerRegistry } from './lib/listenerRegistry';
   import { emptyProviderCatalog, ProviderCatalogIndex } from './lib/metrics';
   import { springMotion } from './lib/motion';
@@ -564,14 +565,64 @@
     );
   }
   function handleOptionsKey(event: KeyboardEvent) {
-    const menu = (event.currentTarget as HTMLElement).closest<HTMLDetailsElement>(
-      'details.options-menu',
-    );
-    if (!menu) return;
-    if (event.key !== 'Escape' || !menu.open) return;
+    const menu = optionsMenuElement;
+    if (!menu?.open || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeOptionsMenu(true);
+      return;
+    }
+    // As in a native menu: ↑/↓ move through the items of the open level, ←
+    // opens Share Screenshot (it unfolds leftward) and → returns from it.
+    const share = shareMenuElement;
+    const inShare = share?.open && share.querySelector('div')?.contains(event.target as Node);
+    if (event.key === 'ArrowLeft' && share && event.target === share.querySelector('summary')) {
+      event.preventDefault();
+      event.stopPropagation();
+      share.open = true;
+      shareMenuOpen = true;
+      void tick().then(() => share.querySelector<HTMLElement>('div button')?.focus());
+      return;
+    }
+    if (event.key === 'ArrowRight' && share && inShare) {
+      event.preventDefault();
+      event.stopPropagation();
+      share.open = false;
+      shareMenuOpen = false;
+      share.querySelector<HTMLElement>('summary')?.focus();
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const level = inShare
+      ? share!.querySelectorAll<HTMLElement>('div button:not(:disabled)')
+      : menu.querySelectorAll<HTMLElement>(
+          '.options-menu__panel > button:not(:disabled), .options-menu__panel > details > summary',
+        );
+    const items = [...level];
+    if (items.length === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    closeOptionsMenu(true);
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? items.length - 1
+          : event.key === 'ArrowDown'
+            ? current < 0
+              ? 0
+              : (current + 1) % items.length
+            : current < 0
+              ? items.length - 1
+              : (current - 1 + items.length) % items.length;
+    items[next].focus();
+  }
+  // A click does not focus the Options button in every WebKit (macOS 26 leaves
+  // focus where it was), so keys outside the open menu are its too, taken on
+  // the document before the page; those inside reach its own handlers.
+  function handleKeyOutsideOptions(event: KeyboardEvent) {
+    if (!optionsMenuElement?.contains(event.target as Node)) handleOptionsKey(event);
   }
   function closeOptionsMenu(restoreFocus = false) {
     if (shareMenuElement?.open) shareMenuElement.open = false;
@@ -795,6 +846,7 @@
       }
     };
     document.addEventListener('keydown', handleKeydown);
+    document.addEventListener('keydown', handleKeyOutsideOptions, true);
     // Held open by keyboard navigation of the menu bar (macOS 27), the window
     // passes on the ←/→ it does not use; see menuKeys.
     let navigating = false;
@@ -889,6 +941,7 @@
       document.removeEventListener('visibilitychange', observeFirstFrame);
       cancelAnimationFrame(frame);
       document.removeEventListener('keydown', handleKeydown);
+      document.removeEventListener('keydown', handleKeyOutsideOptions, true);
       document.removeEventListener('keydown', handleMenuKeydown);
       window.clearInterval(clock);
       windowController.dispose();
@@ -1114,6 +1167,7 @@
                 aria-label="Options menu"
                 tabindex="-1"
                 onkeydown={handleOptionsKey}
+                use:menuHighlight
                 onclick={(event) => {
                   if (event.target instanceof Element && event.target.closest('button')) {
                     closeOptionsMenu();
@@ -1491,12 +1545,14 @@
       text-align: left;
     }
 
-    .options-menu button:hover {
+    /* One highlight, which the pointer and the arrows both move (menuHighlight). */
+    .options-menu__panel button:focus {
+      outline: none;
       color: #ffffff;
       background: var(--meter-fill);
     }
 
-    .options-menu .menu-item:hover kbd {
+    .options-menu .menu-item:focus kbd {
       color: inherit;
     }
 

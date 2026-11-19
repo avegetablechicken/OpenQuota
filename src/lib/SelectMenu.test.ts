@@ -64,6 +64,30 @@ describe('SelectMenu', () => {
     await vi.waitFor(() => expect(screen.getByRole('option', { name: 'Tokens' })).toHaveFocus());
   });
 
+  it('takes the arrows while open though focus is outside the list', async () => {
+    render(SelectMenu, { label: 'Metric', value: 'tokens', options, onChange: vi.fn() });
+    const trigger = screen.getByRole('combobox', { name: 'Metric' });
+    await fireEvent.click(trigger);
+    // As in macOS 26's WebKit, focus stays outside the list after the click.
+    await vi.waitFor(() => expect(screen.getByRole('option', { name: 'Tokens' })).toHaveFocus());
+    (document.activeElement as HTMLElement).blur();
+
+    expect(await fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(false);
+    expect(screen.getByRole('option', { name: 'Tokens' })).toHaveFocus();
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(screen.getByRole('option', { name: 'Cost' })).toHaveFocus();
+    (document.activeElement as HTMLElement).blur();
+    await fireEvent.keyDown(document.body, { key: 'Home' });
+    expect(screen.getByRole('option', { name: 'Cost' })).toHaveFocus();
+    (document.activeElement as HTMLElement).blur();
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    // Closed, it leaves the arrows to the page.
+    trigger.blur();
+    expect(await fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(true);
+  });
+
   it('opens above the trigger when the visible area below is too small', async () => {
     vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(200);
     vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (

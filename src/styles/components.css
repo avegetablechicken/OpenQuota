@@ -293,14 +293,16 @@
     background: var(--separator);
   }
 
-  /* Native menus highlight the hovered item, and a submenu's parent, in the accent color. */
-  .share-menu button:hover,
-  .share-menu > summary:hover,
+  /* Native menus highlight one item, which the pointer and the arrows both move
+     (menuHighlight), and a submenu's parent, in the accent color. */
+  .share-menu button:focus,
+  .share-menu > summary:focus,
   .share-menu[open] > summary {
     color: #ffffff;
     background: var(--meter-fill);
   }
 
+  .share-menu button:focus,
   .share-menu > summary:focus,
   .share-menu > summary:focus-visible {
     outline: none;

@@ -16,6 +16,7 @@
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
   import { sub2ApiUpstreamAccountName } from './sub2ApiUpstreams';
+  import { menuHighlight } from './menuHighlight';
   import {
     shouldShowProviderForMode,
     PROVIDER_USAGE_SCOPE_LABELS,
@@ -872,6 +873,7 @@
       role="menu"
       tabindex="-1"
       onkeydown={handleContextMenuKey}
+      use:menuHighlight
     >
       <button
         class="danger"
@@ -920,6 +922,7 @@
       role="menu"
       tabindex="-1"
       onkeydown={handleContextMenuKey}
+      use:menuHighlight
     >
       <button
         class="danger"
@@ -1561,8 +1564,8 @@
       color: var(--meter-critical);
     }
 
-    .context-menu button:not(:disabled):hover,
-    .context-menu button:not(:disabled):focus-visible {
+    /* One highlight, which the pointer and the arrows both move (menuHighlight). */
+    .context-menu button:not(:disabled):focus {
       outline: none;
       color: #ffffff;
       background: var(--meter-fill);

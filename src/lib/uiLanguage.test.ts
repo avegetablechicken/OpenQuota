@@ -118,8 +118,9 @@ describe('native UI language contract', () => {
     );
     expect(providerNameSection).toMatch(/input\s*{[^}]*display: block;/s);
     expect(dashboard).toMatch(
-      /\.context-menu button:not\(:disabled\):hover,[\s\S]*background: var\(--meter-fill\);/,
+      /\.context-menu button:not\(:disabled\):focus\s*{[^}]*background: var\(--meter-fill\);/s,
     );
     expect(sharedComponentCss).not.toContain('.context-menu button:hover');
+    expect(sharedComponentCss).not.toContain('.context-menu button:not(:disabled):focus');
   });
 });
