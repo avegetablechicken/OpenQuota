@@ -2210,7 +2210,8 @@ describe('OpenQuota dashboard', () => {
     const theme = screen.getByRole('combobox', { name: 'Theme' });
 
     await fireEvent.keyDown(theme, { key: 'ArrowDown' });
-    expect(screen.getByRole('listbox', { name: 'Theme' })).toBeInTheDocument();
+    const listbox = screen.getByRole('listbox', { name: 'Theme' });
+    await vi.waitFor(() => expect(listbox).toContainElement(document.activeElement as HTMLElement));
     await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
 
     expect(screen.queryByRole('listbox', { name: 'Theme' })).not.toBeInTheDocument();

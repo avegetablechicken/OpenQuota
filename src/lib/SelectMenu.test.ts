@@ -34,12 +34,34 @@ describe('SelectMenu', () => {
     const trigger = screen.getByRole('combobox', { name: 'Metric' });
 
     await fireEvent.keyDown(trigger, { key: 'ArrowDown' });
-    expect(screen.getByRole('option', { name: 'Cost' })).toHaveFocus();
+    await vi.waitFor(() => expect(screen.getByRole('option', { name: 'Cost' })).toHaveFocus());
     await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(screen.getByRole('option', { name: 'Tokens' })).toHaveFocus();
     await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     expect(trigger).toHaveFocus();
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+
+  it('focuses an option only once the list is shown, as WebKit requires', async () => {
+    // WebKit does not focus an element in a list still hidden for placement.
+    const focus = HTMLElement.prototype.focus;
+    vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      if (!this.closest('.select-menu__list--pending')) focus.call(this, options);
+    });
+    render(SelectMenu, { label: 'Metric', value: 'cost', options, onChange: vi.fn() });
+    const trigger = screen.getByRole('combobox', { name: 'Metric' });
+
+    await fireEvent.click(trigger);
+    await vi.waitFor(() => expect(screen.getByRole('option', { name: 'Cost' })).toHaveFocus());
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(screen.getByRole('option', { name: 'Tokens' })).toHaveFocus();
+    await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+
+    await fireEvent.keyDown(trigger, { key: 'ArrowUp' });
+    await vi.waitFor(() => expect(screen.getByRole('option', { name: 'Tokens' })).toHaveFocus());
   });
 
   it('opens above the trigger when the visible area below is too small', async () => {

@@ -94,6 +94,9 @@
     open = true;
     await tick();
     placeListbox();
+    // The list stays hidden until placed, and WebKit does not focus a hidden
+    // element, which would leave focus and the arrows on the trigger.
+    await tick();
     const items = listbox?.querySelectorAll<HTMLButtonElement>('[role="option"]');
     if (!items?.length) return;
     const selected = options.findIndex((option) => option.value === value);
