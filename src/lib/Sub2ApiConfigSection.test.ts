@@ -92,8 +92,14 @@ describe('Sub2ApiConfigSection', () => {
     await screen.findByText('Not configured');
     const connections = screen.getByRole('list', { name: 'Connection configurations' });
     expect(within(connections).getAllByRole('listitem')).toHaveLength(1);
-    expect(within(connections).getByText('Base URL and administrator login')).toBeInTheDocument();
-    expect(get(sub2ApiUpstreams)['sub2api@2']).toBeUndefined();
+    await waitFor(() => expect(get(sub2ApiUpstreams)['sub2api@2']).toBeUndefined());
+  });
+
+  it('shows the editor without an Edit button', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    expect(screen.getByLabelText('Sub2API administrator email')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^(Add|Edit|Done)$/ })).not.toBeInTheDocument();
   });
 
   it('shows the upstream and email being edited in the header', async () => {
@@ -101,31 +107,22 @@ describe('Sub2ApiConfigSection', () => {
     await screen.findByText('Not configured');
     const upstreamLayer = () =>
       document.querySelector('.sub2api-config-summary [data-icon-layer="upstream"] path');
-    expect(upstreamLayer()).toBeNull();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(upstreamLayer()).toHaveAttribute('d', providerIconPath('codex'));
     expect(screen.getByText('Sub2API · Codex')).toBeInTheDocument();
     await chooseUpstream('Claude');
     expect(upstreamLayer()).toHaveAttribute('d', providerIconPath('claude'));
     expect(screen.getByText('Sub2API · Claude')).toBeInTheDocument();
-    expect(screen.getByText('Base URL and administrator login')).toBeInTheDocument();
     await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
       target: { value: 'draft@example.com' },
     });
     expect(screen.getByText('draft@example.com')).toBeInTheDocument();
     expect(statusDot()).toHaveClass('missing');
-
-    // Closed without saving, the header shows the saved connection again.
-    await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
-    expect(upstreamLayer()).toBeNull();
-    expect(screen.getByText('Not configured')).toBeInTheDocument();
   });
 
   it('saves a Claude upstream login without retaining the password in the UI', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api' });
     expect(await screen.findByRole('region', { name: 'Connection' })).toBeInTheDocument();
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await chooseUpstream('Claude');
     expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
     expect(resolvedBaseUrl()).not.toHaveTextContent('https://');
@@ -180,7 +177,7 @@ describe('Sub2ApiConfigSection', () => {
       };
     });
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
-    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    await screen.findByText('admin@example.com');
     const select = screen.getByRole('combobox', { name: 'Billing method' });
     expect(select).toHaveValue('upstream');
     expect(screen.getByLabelText('Sub2API administrator password')).toAppearBefore(select);
@@ -192,14 +189,14 @@ describe('Sub2ApiConfigSection', () => {
         config: expect.objectContaining({ billingMode: 'server', password: '' }),
       }),
     );
-    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    expect(screen.getByRole('combobox', { name: 'Billing method' })).toHaveValue('server');
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Billing method' })).toHaveValue('server'),
+    );
   });
 
   it('requires a Claude provider or a manually entered custom URL', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await chooseUpstream('Claude');
     await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
       target: { value: 'admin@example.com' },
@@ -235,8 +232,7 @@ describe('Sub2ApiConfigSection', () => {
       upstream: 'claude',
     });
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
-    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    expect(screen.getByLabelText('Base URL')).toBeEnabled();
+    expect(await screen.findByLabelText('Base URL')).toBeEnabled();
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://previous.example.com');
     expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual([
       'get_sub2api_config_state',
@@ -275,7 +271,6 @@ describe('Sub2ApiConfigSection', () => {
     });
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('old@example.com');
-    await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('old@example.com');
     expect(screen.getByLabelText('Sub2API administrator password')).toHaveAttribute(
       'placeholder',
@@ -344,7 +339,6 @@ describe('Sub2ApiConfigSection', () => {
   it('keeps unsaved fields in independent drafts for a new connection', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
     await fireEvent.input(screen.getByLabelText('Base URL'), {
       target: { value: 'https://draft-codex.example.com' },
@@ -392,7 +386,6 @@ describe('Sub2ApiConfigSection', () => {
   it('resolves an exact Codex provider and keeps Base URL read-only by default', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     const provider = screen.getByLabelText('Codex provider or profile');
 
     expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
@@ -417,7 +410,6 @@ describe('Sub2ApiConfigSection', () => {
   it('swaps Provider for an editable Base URL when custom Base URL is enabled', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     const provider = screen.getByLabelText('Codex provider or profile');
     await fireEvent.input(provider, { target: { value: 'ShareCoder' } });
     await waitFor(() =>
@@ -439,7 +431,6 @@ describe('Sub2ApiConfigSection', () => {
   it('registers Enter only while the Save button is enabled', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
 
     const email = screen.getByLabelText('Sub2API administrator email');
     await fireEvent.keyDown(email, { key: 'Enter' });
@@ -480,7 +471,13 @@ describe('Sub2ApiConfigSection', () => {
         },
       }),
     );
-    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue(''),
+    );
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveAttribute(
+      'placeholder',
+      'Unchanged',
+    );
   });
 
   it('confirms a save before backend persistence finishes', async () => {
@@ -518,7 +515,6 @@ describe('Sub2ApiConfigSection', () => {
     });
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
     await fireEvent.input(screen.getByLabelText('Base URL'), {
       target: { value: 'https://pending.example.com' },
@@ -536,8 +532,8 @@ describe('Sub2ApiConfigSection', () => {
       expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', expect.anything()),
     );
     expect(screen.getByText('pending@example.com')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
-    expect(screen.queryByLabelText('Sub2API administrator password')).not.toBeInTheDocument();
+    expect(statusDot()).not.toHaveClass('missing');
+    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('');
 
     resolveSave({
       configured: true,
@@ -571,7 +567,6 @@ describe('Sub2ApiConfigSection', () => {
     });
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
     await fireEvent.input(screen.getByLabelText('Base URL'), {
       target: { value: 'https://failed.example.com' },
@@ -584,7 +579,7 @@ describe('Sub2ApiConfigSection', () => {
     });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await screen.findByRole('button', { name: 'Edit' });
+    await waitFor(() => expect(statusDot()).not.toHaveClass('missing'));
     rejectSave(new Error('Credential store unavailable'));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Credential store unavailable');
@@ -620,7 +615,6 @@ describe('Sub2ApiConfigSection', () => {
     });
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('admin@example.com');
-    await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Clear connection' }));
     expect(screen.getByRole('group', { name: 'Clear connection?' })).toHaveAccessibleDescription(
       'The Base URL and saved login will be removed. This account will remain.',

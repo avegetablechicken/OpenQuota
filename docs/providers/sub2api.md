@@ -31,8 +31,9 @@ See [historical pricing](../pricing-history.md).
 
 ## Setup
 
-Open **Customize**, select **+ Sub2API**, and add the instance Base URL, administrator email, and
-password. Each click creates the next independent Sub2API item. OpenQuota signs in through
+Open **Customize**, select **+ Sub2API**, and enter the instance Base URL, administrator email, and
+password in the connection editor, which is always expanded. Each click creates the next
+independent Sub2API item. OpenQuota signs in through
 `/api/v1/auth/login`, discovers the active OAuth accounts for the selected upstream, and reads Codex quota from
 `/api/v1/admin/openai/accounts/:id/quota` or Claude quota from `/api/v1/admin/accounts/:id/usage`.
 
@@ -56,13 +57,13 @@ The selected file's `env.ANTHROPIC_BASE_URL` supplies the endpoint, with a top-l
 OpenQuota does not fall back to another file or the environment. The resolved Base URL is shown
 under Provider and is resolved again when saving. Enable **Custom Base URL** to enter it manually instead.
 Administrator email and password must still be entered separately. Existing Claude connections
-without a Provider name open in custom-address mode with their saved URL preserved.
+without a Provider name show in custom-address mode with their saved URL preserved.
 
 Each complete connection is stored under its own entry in the operating system's credential store.
 The connection is stored and confirmed as soon as **Save** is selected, without first authenticating
-it or fetching an access token. OpenQuota refreshes its quota in the background after the editor
-closes. The password is not returned to the interface after it is saved, and login or quota response
-bodies are not written to OpenQuota logs. The small clear control beside **Save** removes only the
+it or fetching an access token. OpenQuota refreshes its quota in the background once it is saved.
+The password is not returned to the interface after it is saved, and login or quota response bodies
+are not written to OpenQuota logs. The small clear control beside **Save** removes only the
 Connection fields and keeps the Sub2API item. The **Delete Sub2API** row at the bottom removes the
 whole item, including an empty item whose login has not been saved yet.
 
