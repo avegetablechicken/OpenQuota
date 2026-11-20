@@ -302,7 +302,7 @@ pub fn activate_existing_instance(app: &AppHandle) {
     {
         crate::webview_memory::set_inactive(&window, false);
         let _ = window.unminimize();
-        let _ = window.show();
+        let _ = show_panel(&window);
         let _ = window.set_focus();
     }
 }
@@ -453,8 +453,14 @@ pub(crate) fn show_linux_panel(
         }
     }
     window.unminimize()?;
-    window.show()?;
+    show_panel(window)?;
     window.set_focus()
+}
+
+fn show_panel(window: &WebviewWindow) -> tauri::Result<()> {
+    window.show()?;
+    let _ = window.emit("main-window-shown", ());
+    Ok(())
 }
 
 /// Shows and focuses the window. On macOS 27 this also serves the status
@@ -494,7 +500,7 @@ pub fn show_main_window(window: &WebviewWindow) {
             position_popup(window);
         }
         join_active_space(window, !floating);
-        let _ = window.show();
+        let _ = show_panel(window);
         let _ = window.set_focus();
     }
     crate::app_debug!(
@@ -590,8 +596,7 @@ pub fn apply_window_mode(
         } else {
             position_popup(window);
         }
-        window
-            .show()
+        show_panel(window)
             .and_then(|_| window.set_focus())
             .map_err(|_| "OpenQuota window could not be shown.".to_owned())
     };

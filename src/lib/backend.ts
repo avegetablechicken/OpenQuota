@@ -224,6 +224,10 @@ export function onMainWindowHidden(handler: PayloadHandler<void>) {
   return onEvent('main-window-hidden', handler);
 }
 
+export function onMainWindowShown(handler: PayloadHandler<void>) {
+  return onEvent('main-window-shown', handler);
+}
+
 export function onUpdateProgress(handler: PayloadHandler<UpdateProgress>) {
   return onEvent('update-progress', handler);
 }

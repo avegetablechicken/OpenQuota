@@ -24,6 +24,8 @@ export function createWindowController(options: WindowControllerOptions) {
   let resizeFrame = 0;
   let resizeGeneration = 0;
   let resizeAvailable = true;
+  // Bootstrap may measure cached content before the first native show event.
+  let visible: boolean | undefined;
   let initialFit = true;
   let contentMorphActive = false;
   let contentMorphTimer: ReturnType<typeof setTimeout> | undefined;
@@ -46,7 +48,7 @@ export function createWindowController(options: WindowControllerOptions) {
   }
 
   function beginContentMorph() {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || visible === false) return;
     cancelPendingResize();
     window.clearTimeout(contentMorphTimer);
     contentMorphActive = options.automatic() && !options.reducedMotion();
@@ -62,7 +64,7 @@ export function createWindowController(options: WindowControllerOptions) {
   }
 
   function scheduleFit() {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || visible === false) return;
     if (shouldDefer()) {
       window.cancelAnimationFrame(measureFrame);
       cancelPendingResize();
@@ -73,7 +75,8 @@ export function createWindowController(options: WindowControllerOptions) {
   }
 
   async function fit() {
-    if (shouldDefer()) return;
+    if (visible === false || shouldDefer()) return;
+    const generation = ++resizeGeneration;
     const screen = options.screen();
     const page = document.querySelector<HTMLElement>(`.screen-page[data-screen="${screen}"]`);
     const content = document.querySelector<HTMLElement>('.content');
@@ -103,6 +106,7 @@ export function createWindowController(options: WindowControllerOptions) {
       (dragger?.offsetHeight ?? 0) +
       chromeHeight;
     const monitor = await currentMonitor().catch(() => null);
+    if (generation !== resizeGeneration) return;
     const workAreaHeight = monitor
       ? monitor.workArea.size.height / monitor.scaleFactor
       : window.screen.availHeight;
@@ -114,6 +118,7 @@ export function createWindowController(options: WindowControllerOptions) {
       const appWindow = getCurrentWindow();
       const scale = await appWindow.scaleFactor();
       current = (await appWindow.innerSize()).height / scale;
+      if (generation !== resizeGeneration) return;
     }
     const dashboardTarget = panelTargetHeight(
       (dashboardBodyHeight ?? Math.round(current ?? contentTarget) - chromeHeight) + chromeHeight,
@@ -122,8 +127,6 @@ export function createWindowController(options: WindowControllerOptions) {
     const target = screenPanelHeight(screen, contentTarget, dashboardTarget);
 
     if (initialFit || options.reducedMotion() || contentMorphActive) {
-      initialFit = false;
-      ++resizeGeneration;
       window.cancelAnimationFrame(resizeFrame);
       await resize(target);
       return;
@@ -134,7 +137,7 @@ export function createWindowController(options: WindowControllerOptions) {
       const scale = await appWindow.scaleFactor();
       current = (await appWindow.innerSize()).height / scale;
     }
-    const generation = ++resizeGeneration;
+    if (generation !== resizeGeneration) return;
     window.cancelAnimationFrame(resizeFrame);
     if (Math.abs(current - target) < 1) return;
 
@@ -158,25 +161,35 @@ export function createWindowController(options: WindowControllerOptions) {
       while (pendingResizeHeight !== null && resizeAvailable && options.automatic()) {
         const nextHeight = pendingResizeHeight;
         pendingResizeHeight = null;
-        await fitPanelToContent(nextHeight);
+        initialFit = false;
+        const generation = resizeGeneration;
+        try {
+          await fitPanelToContent(nextHeight);
+        } catch {
+          if (generation !== resizeGeneration) continue;
+          pendingResizeHeight = null;
+          resizeAvailable = false;
+          options.onError('OpenQuota window could not adapt to its content.');
+        }
       }
-    } catch {
-      pendingResizeHeight = null;
-      resizeAvailable = false;
-      options.onError('OpenQuota window could not adapt to its content.');
     } finally {
       resizeInFlight = false;
     }
   }
 
-  return {
-    beginContentMorph,
-    scheduleFit,
-    dispose() {
-      window.clearTimeout(contentMorphTimer);
-      contentMorphActive = false;
-      window.cancelAnimationFrame(measureFrame);
-      cancelPendingResize();
-    },
-  };
+  function setVisible(next: boolean) {
+    if (visible === next) return;
+    visible = next;
+    window.clearTimeout(contentMorphTimer);
+    contentMorphActive = false;
+    window.cancelAnimationFrame(measureFrame);
+    cancelPendingResize();
+    if (visible) {
+      initialFit = true;
+      resizeAvailable = true;
+      scheduleFit();
+    }
+  }
+
+  return { beginContentMorph, scheduleFit, setVisible, dispose: () => setVisible(false) };
 }

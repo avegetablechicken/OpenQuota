@@ -132,6 +132,51 @@ describe('OpenQuota dashboard', () => {
   });
   afterEach(cleanup);
 
+  it('restores the dashboard height when the tray reopens a shorter page during refresh', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} });
+    const rect = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        return new DOMRect(0, 0, 320, this.dataset.screen === 'dashboard' ? 600 : 100);
+      });
+    const emit = (name: string, payload?: unknown) => {
+      const registration = mocks.listen.mock.calls.find(([event]) => event === name);
+      expect(registration, name).toBeDefined();
+      registration![1]({ payload });
+    };
+    try {
+      render(App);
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith('fit_panel_to_content', { height: 595 }),
+      );
+      emit('settings-state', {
+        ...settingsState,
+        settingsRevision: settingsState.settingsRevision + 1,
+        settings: { ...settingsState.settings, reduceAnimations: true },
+      });
+      await fireEvent.keyDown(document, { key: 'Enter' });
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith('fit_panel_to_content', { height: 240 }),
+      );
+      emit('usage-state', { providers: { codex: { ...codexState, refreshing: true } } });
+      emit('main-window-hidden');
+      await waitFor(() =>
+        expect(document.querySelector('.screen-page[data-screen="dashboard"]')).toBeInTheDocument(),
+      );
+      mocks.invoke.mockClear();
+      emit('main-window-shown');
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith('fit_panel_to_content', { height: 595 }),
+      );
+      expect(mocks.invoke.mock.calls.filter(([name]) => name === 'fit_panel_to_content')).toEqual([
+        ['fit_panel_to_content', { height: 595 }],
+      ]);
+    } finally {
+      rect.mockRestore();
+      delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
   it('renders cached usage while live system settings are pending', async () => {
     const original = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation((command, args) =>

@@ -106,6 +106,39 @@ describe('hybrid window controller', () => {
     controller.dispose();
   });
 
+  it('applies the reopened height even if the previous window resize finishes late', async () => {
+    let failPreviousResize!: () => void;
+    mocks.fitPanelToContent.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          failPreviousResize = () => reject(new Error('hidden'));
+        }),
+    );
+    const onError = vi.fn();
+    const controller = createWindowController({
+      screen: () => 'dashboard',
+      refreshing: () => true,
+      reordering: () => false,
+      automatic: () => true,
+      reducedMotion: () => false,
+      onError,
+    });
+    controller.scheduleFit();
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(370));
+    controller.setVisible(false);
+    const page = document.querySelector<HTMLElement>('.screen-page')!;
+    page.getBoundingClientRect = () => new DOMRect(0, 0, 292, 500);
+    controller.setVisible(true);
+    await waitFor(() =>
+      expect(document.querySelector('.screen-stage')).toHaveStyle({ height: '500px' }),
+    );
+    controller.scheduleFit();
+    failPreviousResize();
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(570));
+    expect(onError).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it('keeps measuring layout without resizing while the user owns the height', async () => {
     const controller = createWindowController({
       screen: () => 'dashboard',

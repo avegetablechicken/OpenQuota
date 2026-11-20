@@ -12,6 +12,7 @@
     lockPanelResizeAxis,
     onOpenScreen,
     onMainWindowHidden,
+    onMainWindowShown,
     onMenuBarSession,
     navigateMenuBar,
     onPanelBackdrop,
@@ -868,6 +869,7 @@
     );
     listeners.add(
       onMainWindowHidden(() => {
+        windowController.setVisible(false);
         navigating = false;
         initialFocus.reset();
         resetTransientUi();
@@ -875,6 +877,7 @@
         screen = 'dashboard';
       }),
     );
+    listeners.add(onMainWindowShown(() => windowController.setVisible(true)));
     listeners.add(
       onUpdateProgress((progress) => {
         updates.setProgress(progress);
