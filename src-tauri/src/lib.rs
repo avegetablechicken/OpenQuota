@@ -1010,7 +1010,13 @@ pub fn run() {
                 notifications.clone(),
                 credential_detection_plan,
             );
-            refresh_loop::spawn(app.handle().clone(), service, settings, notifications);
+            refresh_loop::spawn(
+                app.handle().clone(),
+                service,
+                settings,
+                notifications,
+                pricing,
+            );
             app_info!("lifecycle", "OpenQuota startup completed");
 
             Ok(())

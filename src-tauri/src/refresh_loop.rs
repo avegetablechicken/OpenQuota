@@ -7,8 +7,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::{
     commands::settings::emit_settings_if_account_changed, notifications::finish_refresh,
-    pacing::NotificationEvaluator, policy::REFRESH_INTERVAL, service::ProviderService,
-    settings::SettingsService,
+    pacing::NotificationEvaluator, policy::REFRESH_INTERVAL, pricing::PricingStore,
+    service::ProviderService, settings::SettingsService,
 };
 
 pub fn spawn(
@@ -16,9 +16,11 @@ pub fn spawn(
     service: Arc<ProviderService>,
     settings: Arc<SettingsService>,
     notifications: Arc<NotificationEvaluator>,
+    pricing: Arc<PricingStore>,
 ) {
     tauri::async_runtime::spawn(async move {
         loop {
+            pricing.refresh_if_due();
             let provider_ids = settings.enabled_provider_ids();
             let mut interval = REFRESH_INTERVAL;
             if !provider_ids.is_empty() {

@@ -210,6 +210,11 @@ impl PricingStore {
     /// refresh is started for the next call; callers never wait for disk or network I/O.
     pub fn current(self: &Arc<Self>) -> Arc<ModelPricing> {
         let snapshot = self.snapshot();
+        self.refresh_if_due();
+        snapshot
+    }
+
+    pub(crate) fn refresh_if_due(self: &Arc<Self>) {
         if self.has_due_source()
             && self
                 .refresh_in_flight
@@ -222,7 +227,6 @@ impl PricingStore {
                 store.refresh_due();
             });
         }
-        snapshot
     }
 
     fn snapshot(&self) -> Arc<ModelPricing> {
@@ -785,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn current_returns_immediately_and_coalesces_background_refresh() {
+    fn scheduled_checks_refresh_daily_even_without_pricing_reads() {
         let directory = tempdir().unwrap();
         let http = Arc::new(StubHttp::default());
         http.push(response(br#"{"fetched-model":{"input_cost_per_token":0.000005,"output_cost_per_token":0.00001}}"#));
@@ -793,30 +797,39 @@ mod tests {
             br#"{"x":{"models":{"fetched-dev":{"cost":{"input":1,"output":2}}}}}"#,
         ));
         http.push(response(br#"{"pricing":{"auto":{"input_per_million":9,"output_per_million":9}},"fast_multipliers":{},"alias_rules":[]}"#));
-        let now = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
+        let start = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
+        let clock = Arc::new(Mutex::new(start));
         let store = Arc::new(
             PricingStore::with_dependencies(
                 directory.path().to_path_buf(),
                 bundled(),
                 http.clone(),
-                Arc::new(move || now),
+                Arc::new({
+                    let clock = clock.clone();
+                    move || *clock.lock().unwrap()
+                }),
             )
             .unwrap(),
         );
 
         let original = store.current();
+        store.refresh_if_due();
         for _ in 0..10 {
             let _ = store.current();
         }
         assert!(original.resolve("fetched-model").is_none());
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while store.refresh_in_flight.load(Ordering::Acquire)
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(!store.refresh_in_flight.load(Ordering::Acquire));
+        let wait_for_refresh = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while store.refresh_in_flight.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "pricing refresh timed out"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for_refresh();
         assert_eq!(http.request_count(), 3, "only one refresh task may run");
         assert_eq!(
             store
@@ -825,6 +838,28 @@ mod tests {
                 .unwrap()
                 .input_per_million,
             5.0
+        );
+
+        *clock.lock().unwrap() = start + REFRESH_INTERVAL - TimeDelta::seconds(1);
+        store.refresh_if_due();
+        wait_for_refresh();
+        assert_eq!(http.request_count(), 3);
+
+        *clock.lock().unwrap() = start + REFRESH_INTERVAL;
+        for _ in 0..2 {
+            http.push(FetchResponse {
+                status: StatusCode::NOT_MODIFIED,
+                etag: None,
+                body: Vec::new(),
+            });
+        }
+        http.push(response(&supplement(Some("2026-07-16"), 12.0)));
+        store.refresh_if_due();
+        wait_for_refresh();
+        assert_eq!(http.request_count(), 6);
+        assert_eq!(
+            store.snapshot().resolve("auto").unwrap().input_per_million,
+            12.0
         );
     }
 
