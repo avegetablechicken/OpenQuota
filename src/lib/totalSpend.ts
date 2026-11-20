@@ -1,6 +1,7 @@
 import { OTHERS_SPEND_ID, UNPRICED_OTHERS_SPEND_ID } from './providerIconPaths';
 import type {
   AppSettings,
+  OtherModelUsage,
   OtherUsageHistory,
   OtherUsagePeriod,
   UsageHistories,
@@ -16,11 +17,14 @@ export interface SpendProvider {
   usageHistories: UsageHistories;
 }
 
+type BillingRow = OtherModelUsage & ({ model: string } | { providerId: string });
+
 export interface SpendSlice {
   id: string;
   value: number;
   period: UsagePeriod;
   showValue?: boolean;
+  otherBilling?: BillingRow[];
 }
 
 export interface SpendProjection {
@@ -86,7 +90,7 @@ function otherPeriod(
   };
 }
 
-function aggregateOtherPeriod(periods: OtherUsagePeriod[]): OtherUsagePeriod {
+function aggregateOtherUsage(periods: OtherModelUsage[]): OtherModelUsage {
   const pricedPeriods = periods.filter((period) => period.estimatedCostUsd !== null);
   return {
     tokens: periods.reduce((sum, period) => sum + period.tokens, 0),
@@ -96,7 +100,6 @@ function aggregateOtherPeriod(periods: OtherUsagePeriod[]): OtherUsagePeriod {
         ? pricedPeriods.reduce((sum, period) => sum + (period.estimatedCostUsd ?? 0), 0)
         : null,
     costEstimated: pricedPeriods.some((period) => period.costEstimated),
-    estimateComplete: periods.every((period) => period.estimateComplete),
   };
 }
 
@@ -111,30 +114,79 @@ function spendSliceSort(left: SpendSlice, right: SpendSlice) {
   return right.value - left.value || left.id.localeCompare(right.id);
 }
 
+// Use model identity for display. A pricing fallback can point at a different model.
+function otherModelName(raw: string): string {
+  const normalized = raw.trim().toLowerCase();
+  const name = normalized
+    .replace(/^deepseek\/(?=deepseek-)/, '')
+    .replace(/^anthropic\/(?=claude-)/, '')
+    .replace(/^(?:openai|openai-codex)\/(?=(?:gpt-|codex-))/, '')
+    .replace(/^(?:moonshot|moonshotai)\/(?=kimi-)/, '')
+    .replace(/^xai\/(?=grok-)/, '')
+    .replace(/^google\/(?=gemini-)/, '');
+
+  const claude = /^(?:claude[- ])?(haiku|sonnet|opus|fable|mythos)[- ](\d+)[.-](\d+)$/.exec(name);
+  if (claude) return `claude-${claude[1]}-${claude[2]}-${claude[3]}`;
+  const reversedClaude = /^claude-(\d+)\.(\d+)-(haiku|sonnet|opus|fable|mythos)$/.exec(name);
+  if (reversedClaude)
+    return `claude-${reversedClaude[3]}-${reversedClaude[1]}-${reversedClaude[2]}`;
+
+  if (/^kimi-k2[.p]7(?:-code)?$/.test(name)) return 'kimi-k2.7-code';
+  if (name === 'kimi-k2p5') return 'kimi-k2.5';
+  if (name === 'gpt-5.3-spark') return 'gpt-5.3-codex-spark';
+  return name !== normalized ? name : raw.trim();
+}
+
 function otherSpendSlices(
   providers: SpendProvider[],
   periodSelection: AppSettings['totalSpendPeriod'],
   metric: AppSettings['totalSpendMetric'],
 ): SpendSlice[] {
-  const periods = providers
-    .map((provider) =>
-      selectedOtherPeriod(provider.usageHistories.localDevice?.otherUsage, periodSelection),
-    )
-    .filter((period): period is OtherUsagePeriod => period !== null);
+  const periods: OtherUsagePeriod[] = [];
+  const otherBilling: BillingRow[] = [];
+  const usageByModel = new Map<string, { model: string; entries: OtherModelUsage[] }>();
+  for (const provider of providers) {
+    const period = selectedOtherPeriod(
+      provider.usageHistories.localDevice?.otherUsage,
+      periodSelection,
+    );
+    if (!period) continue;
+    periods.push(period);
+    const models = Object.entries(period.models ?? {});
+    if (models.length) {
+      for (const [model, usage] of models) {
+        const displayName = otherModelName(model);
+        const key = displayName.toLowerCase();
+        const group = usageByModel.get(key);
+        if (group) group.entries.push(usage);
+        else usageByModel.set(key, { model: displayName, entries: [usage] });
+      }
+    } else {
+      // Older snapshots kept only the provider subtotal.
+      otherBilling.push({ providerId: provider.id, ...period });
+    }
+  }
+  for (const { model, entries } of usageByModel.values()) {
+    otherBilling.push({ model, ...aggregateOtherUsage(entries) });
+  }
+  otherBilling.sort(
+    (a, b) => (b.estimatedCostUsd ?? 0) - (a.estimatedCostUsd ?? 0) || b.tokens - a.tokens,
+  );
   if (periods.length === 0) return [];
 
-  const aggregate = aggregateOtherPeriod(periods);
+  const aggregate = aggregateOtherUsage(periods);
   if (metric === 'tokens') {
     return aggregate.tokens > 0
       ? [
           {
             id: OTHERS_SPEND_ID,
+            otherBilling,
             value: aggregate.tokens,
             period: otherPeriod(
               aggregate.tokens,
               aggregate.estimatedCostUsd,
               aggregate.costEstimated,
-              aggregate.estimateComplete,
+              periods.every((period) => period.estimateComplete),
             ),
           },
         ]
@@ -152,6 +204,7 @@ function otherSpendSlices(
     if (pricedValue !== null) {
       slices.push({
         id: OTHERS_SPEND_ID,
+        otherBilling,
         value: pricedValue,
         period: otherPeriod(
           aggregate.pricedTokens,
@@ -170,6 +223,7 @@ function otherSpendSlices(
       metric === 'costPerMillion' ? (pseudoValue * unpricedTokens) / 1_000_000 : pseudoValue;
     slices.push({
       id: UNPRICED_OTHERS_SPEND_ID,
+      otherBilling,
       value: pseudoValue,
       showValue: false,
       period: otherPeriod(unpricedTokens, pseudoCost, true, false),

@@ -492,7 +492,13 @@ fn aggregate_into(
             .as_deref()
             .is_some_and(|model| is_model_obviously_foreign_to_card("claude", model))
         {
-            accumulator.add_other(date, tokens.total_tokens(), cost, event.cost_usd.is_none());
+            accumulator.add_other(
+                date,
+                tokens.total_tokens(),
+                cost,
+                event.cost_usd.is_none(),
+                model_name.unwrap_or_default(),
+            );
             continue;
         }
         if let Some(exact) = event.cost_usd {

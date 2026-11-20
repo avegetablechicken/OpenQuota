@@ -78,11 +78,15 @@ export interface DailyUsage {
   estimateComplete: boolean;
 }
 
-export interface OtherUsagePeriod {
+export interface OtherModelUsage {
   tokens: number;
   pricedTokens: number;
   estimatedCostUsd: number | null;
   costEstimated: boolean;
+}
+
+export interface OtherUsagePeriod extends OtherModelUsage {
+  models?: Record<string, OtherModelUsage>;
   estimateComplete: boolean;
 }
 

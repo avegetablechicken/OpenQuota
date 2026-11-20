@@ -330,6 +330,7 @@ fn aggregate_into(
                 event.reported_total_tokens,
                 carried_cost.or(estimated_cost),
                 carried_cost.is_none(),
+                display_model,
             );
             mark_source(&mut contributed, event.source);
             continue;

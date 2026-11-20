@@ -251,29 +251,39 @@ describe('TotalSpend Sub2API labels', () => {
     ).toBeInTheDocument();
   });
 
-  it('hides the pseudo cost for unpriced Others while keeping its legend category', () => {
-    render(TotalSpend, {
-      providers: [
-        {
-          id: 'codex',
-          usageHistories: {
-            localDevice: {
-              ...usage(100),
-              otherUsage: {
-                today: {
-                  tokens: 1_000,
-                  pricedTokens: 400,
-                  estimatedCostUsd: 2,
-                  costEstimated: true,
-                  estimateComplete: false,
-                },
-                yesterday: null,
-                last30Days: null,
-              },
-            },
+  it('combines the same model across agents on the priced and unpriced Others tooltips', async () => {
+    const providers = [
+      {
+        id: 'codex',
+        model: 'deepseek-flash',
+        tokens: 1_000,
+        pricedTokens: 400,
+        estimatedCostUsd: 2,
+        costEstimated: true,
+      },
+      {
+        id: 'claude',
+        model: 'deepseek/DeepSeek-Flash',
+        tokens: 800,
+        pricedTokens: 700,
+        estimatedCostUsd: 1,
+        costEstimated: false,
+      },
+    ].map(({ id, model, ...billing }) => ({
+      id,
+      usageHistories: {
+        localDevice: {
+          ...usage(100),
+          otherUsage: {
+            today: { ...billing, estimateComplete: false, models: { [model]: billing } },
+            yesterday: null,
+            last30Days: null,
           },
         },
-      ],
+      },
+    }));
+    render(TotalSpend, {
+      providers,
       settings: { ...settings, totalSpendMetric: 'cost', totalSpendPeriod: 'today' },
       catalog: new ProviderCatalogIndex(catalog),
       viewMode: 'localDevice',
@@ -286,5 +296,18 @@ describe('TotalSpend Sub2API labels', () => {
     expect(
       label.closest('.spend-legend')?.querySelector('.spend-legend__value--hidden'),
     ).toBeTruthy();
+    const arcs = screen
+      .getByRole('region', { name: 'Local Device Spend' })
+      .querySelectorAll('svg .spend-ring__segment');
+    const [priced, unpriced] = screen.getAllByRole('tooltip', { hidden: true });
+    await fireEvent.pointerEnter(arcs[0]);
+    expect(priced).toHaveClass('spend-billing-tooltip--open');
+    expect(priced).toHaveTextContent(/^deepseek-flash ≈ \$3\.00 · 1,100 tokens$/);
+    await fireEvent.pointerLeave(arcs[0]);
+    await fireEvent.pointerEnter(arcs[1]);
+    expect(priced).not.toHaveClass('spend-billing-tooltip--open');
+    expect(unpriced).toHaveClass('spend-billing-tooltip--open');
+    expect(unpriced).toHaveTextContent(/^deepseek-flash Unpriced · 700 tokens$/);
+    expect(unpriced).not.toHaveTextContent('$');
   });
 });

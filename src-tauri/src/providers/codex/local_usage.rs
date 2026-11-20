@@ -563,7 +563,13 @@ fn aggregate_into(
             continue;
         }
         if !model_belongs_to_card("codex", &event.model) {
-            accumulator.add_other(date, event.total, estimate_cost(&event, pricing), true);
+            accumulator.add_other(
+                date,
+                event.total,
+                estimate_cost(&event, pricing),
+                true,
+                &event.model,
+            );
             continue;
         }
         if let Some(cost) = estimate_cost(&event, pricing) {

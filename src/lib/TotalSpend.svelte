@@ -12,6 +12,7 @@
     projectSpend,
     SPEND_SCOPE_LABELS,
     type SpendProjection,
+    type SpendSlice,
   } from './totalSpend';
   import {
     OTHERS_SPEND_ID,
@@ -72,6 +73,42 @@
     }
     return exact;
   }
+  const billingDollars = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 6,
+  });
+  function billingAmount(value: number) {
+    return value > 0 && value < 0.000001 ? '<$0.000001' : billingDollars.format(value);
+  }
+  function billingLines(slice: SpendSlice) {
+    const lines: string[] = [];
+    for (const row of slice.otherBilling ?? []) {
+      const name = 'model' in row ? row.model : providerDisplayName(row.providerId);
+      const amounts = [];
+      if (slice.id !== UNPRICED_OTHERS_SPEND_ID && row.estimatedCostUsd !== null) {
+        const amount = billingAmount(row.estimatedCostUsd);
+        const rate =
+          settings.totalSpendMetric === 'costPerMillion' && row.pricedTokens > 0
+            ? ` · ${billingAmount((row.estimatedCostUsd * 1_000_000) / row.pricedTokens)}/MTok`
+            : '';
+        amounts.push(
+          `${row.costEstimated ? '≈ ' : ''}${amount} · ${formatSpendValue(row.pricedTokens, 'tokens', 'full')} tokens${rate}`,
+        );
+      }
+      const unpriced = row.tokens - row.pricedTokens;
+      if (
+        unpriced > 0 &&
+        (slice.id === UNPRICED_OTHERS_SPEND_ID || settings.totalSpendMetric === 'tokens')
+      ) {
+        amounts.push(`Unpriced · ${formatSpendValue(unpriced, 'tokens', 'full')} tokens`);
+      }
+      if (amounts.length) lines.push([name, ...amounts].join('\n'));
+    }
+    return lines;
+  }
+  let hoveredBilling = $state<string | null>(null);
+  const chartId = $props.id();
   function patch(patch: Partial<AppSettings>) {
     onChange({ ...settings, ...patch });
   }
@@ -189,7 +226,10 @@
                 >
                   {#each spendRingArcs(projection.slices) as segment (segment.id)}
                     <path
+                      role="presentation"
                       class="spend-ring__segment"
+                      onpointerenter={() => (hoveredBilling = segment.id)}
+                      onpointerleave={() => (hoveredBilling = null)}
                       d={ringSectorPath(segment, TOTAL_SPEND_GEOMETRY)}
                       style={`--segment-color: ${providerSpendColor(segment.id)}`}
                     />
@@ -203,15 +243,36 @@
               </div>
               <div class="spend-legend">
                 {#each projection.slices as provider (provider.id)}
-                  <div class="spend-legend__row">
-                    <span
+                  {@const tooltipId = provider.otherBilling
+                    ? `${chartId}-${projection.scope}-${provider.id}`
+                    : undefined}
+                  <div
+                    class="spend-legend__row"
+                    class:spend-legend__billing={provider.otherBilling}
+                  >
+                    <svelte:element
+                      this={tooltipId ? 'button' : 'span'}
+                      type={tooltipId ? 'button' : undefined}
+                      aria-describedby={tooltipId}
                       ><i style={`background: ${providerSpendColor(provider.id)}`}
-                      ></i>{providerDisplayName(provider.id)}</span
+                      ></i>{providerDisplayName(provider.id)}</svelte:element
                     ><strong
                       class:spend-legend__value--hidden={provider.showValue === false}
                       aria-hidden={provider.showValue === false ? 'true' : undefined}
                       >{display(provider.value)}</strong
                     >
+                    {#if provider.otherBilling}
+                      <div
+                        id={tooltipId}
+                        role="tooltip"
+                        class="spend-billing-tooltip"
+                        class:spend-billing-tooltip--open={hoveredBilling === provider.id}
+                      >
+                        {#each billingLines(provider) as line, index (index)}
+                          <div>{line}</div>
+                        {/each}
+                      </div>
+                    {/if}
                   </div>
                 {/each}
               </div>
@@ -361,7 +422,50 @@
       gap: 8px;
     }
 
-    .spend-legend span i {
+    .spend-legend__billing {
+      position: relative;
+    }
+
+    .spend-legend__billing button {
+      padding: 0;
+      border: 0;
+      color: inherit;
+      background: none;
+      font: inherit;
+      text-align: left;
+      cursor: help;
+    }
+
+    .spend-billing-tooltip {
+      display: none;
+      position: absolute;
+      top: 100%;
+      right: 0;
+      z-index: 50;
+      width: max-content;
+      max-width: min(260px, calc(100vw - 32px));
+      max-height: 35vh;
+      overflow: auto;
+      padding: 6px 8px;
+      border: 1px solid var(--separator);
+      border-radius: 6px;
+      color: var(--text);
+      background: var(--tray);
+      box-shadow: 0 5px 18px rgba(0, 0, 0, 0.24);
+      font-size: 10px;
+      line-height: 1.4;
+      white-space: pre-line;
+      overflow-wrap: anywhere;
+    }
+
+    .spend-billing-tooltip--open,
+    .spend-legend__billing:hover .spend-billing-tooltip,
+    .spend-legend__billing:focus-within .spend-billing-tooltip {
+      display: grid;
+      gap: 5px;
+    }
+
+    .spend-legend__row i {
       display: inline-block;
       width: 7px;
       height: 7px;
@@ -557,7 +661,7 @@
       font-size: var(--total-legend-size);
     }
 
-    .spend-legend span i {
+    .spend-legend__row i {
       width: 8px;
       height: 8px;
       margin-right: 7px;

@@ -30,6 +30,39 @@ function provider(
 }
 
 describe('Total Spend projection', () => {
+  it.each<[string, string, string | null]>([
+    ['moonshotai/kimi-k2p7', 'kimi-k2.7-code', 'kimi-k2.7-code'],
+    ['Sonnet 4.6', 'anthropic/claude-4.6-sonnet', 'claude-sonnet-4-6'],
+    ['gpt-5.3-spark', 'openai/gpt-5.3-codex-spark', 'gpt-5.3-codex-spark'],
+    ['flash', 'deepseek-flash', null],
+    ['gpt-5.1', 'gpt-5', null],
+    ['local/deepseek-flash', 'deepseek-flash', null],
+  ])('groups %s and %s only when their model identity matches', (first, second, canonical) => {
+    const usage = { tokens: 50, pricedTokens: 50, estimatedCostUsd: 1, costEstimated: true };
+    const providers = [first, second].map((model, index) => ({
+      id: index === 0 ? 'codex' : 'claude',
+      usageHistories: {
+        localDevice: {
+          ...empty,
+          otherUsage: {
+            today: { ...usage, estimateComplete: true, models: { [model]: usage } },
+            yesterday: null,
+            last30Days: null,
+          },
+        },
+      },
+    }));
+    const [others] = projectSpend(providers, 'today', 'cost', 'localDevice').slices;
+    expect(others.value).toBe(2);
+    if (canonical) {
+      expect(others.otherBilling).toMatchObject([
+        { model: canonical, tokens: 100, estimatedCostUsd: 2 },
+      ]);
+    } else {
+      expect(others.otherBilling).toMatchObject([{ model: first }, { model: second }]);
+    }
+  });
+
   it('uses dedicated colors for the two Others legend categories', () => {
     expect(providerSpendColorVariable(OTHERS_SPEND_ID)).toBe('--provider-others');
     expect(providerSpendColorVariable(UNPRICED_OTHERS_SPEND_ID)).toBe('--provider-others-unpriced');
@@ -207,7 +240,13 @@ describe('Total Spend projection', () => {
     ];
 
     expect(projectSpend(providers, 'today', 'tokens', 'localDevice').slices).toMatchObject([
-      { id: OTHERS_SPEND_ID, value: 1_000 },
+      {
+        id: OTHERS_SPEND_ID,
+        value: 1_000,
+        otherBilling: [
+          { providerId: 'codex', tokens: 1_000, pricedTokens: 400, estimatedCostUsd: 2 },
+        ],
+      },
     ]);
     expect(projectSpend(providers, 'today', 'tokens', 'account').slices).not.toContainEqual(
       expect.objectContaining({ id: OTHERS_SPEND_ID }),

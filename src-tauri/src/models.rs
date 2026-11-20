@@ -183,7 +183,18 @@ pub struct DailyUsage {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct OtherModelUsage {
+    pub tokens: u64,
+    pub priced_tokens: u64,
+    pub estimated_cost_usd: Option<f64>,
+    pub cost_estimated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct OtherUsagePeriod {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, OtherModelUsage>,
     pub tokens: u64,
     #[serde(default)]
     pub priced_tokens: u64,

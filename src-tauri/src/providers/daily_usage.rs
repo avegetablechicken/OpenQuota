@@ -6,8 +6,8 @@ use std::{
 use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
 use crate::models::{
-    DailyUsage, ModelUsageBreakdown, ModelUsageEntry, ModelUsageVariant, OtherUsageHistory,
-    OtherUsagePeriod, UsageHistory, UsagePeriod,
+    DailyUsage, ModelUsageBreakdown, ModelUsageEntry, ModelUsageVariant, OtherModelUsage,
+    OtherUsageHistory, OtherUsagePeriod, UsageHistory, UsagePeriod,
 };
 
 /// Provider-neutral accumulator for local-log usage. Claude, Codex, and pi keep their own parsing
@@ -17,7 +17,7 @@ use crate::models::{
 pub struct DailyUsageAccumulator {
     days: BTreeMap<NaiveDate, DayAccumulator>,
     unknown_models_by_day: BTreeMap<NaiveDate, HashSet<String>>,
-    other_days: BTreeMap<NaiveDate, OtherDayAccumulator>,
+    other_days: BTreeMap<NaiveDate, BTreeMap<String, OtherModelUsage>>,
 }
 
 #[derive(Default)]
@@ -29,25 +29,14 @@ struct DayAccumulator {
     models: HashMap<String, ModelAccumulator>,
 }
 
-struct OtherDayAccumulator {
-    tokens: u64,
-    priced_tokens: u64,
-    cost: f64,
-    has_cost: bool,
-    cost_estimated: bool,
-    estimate_complete: bool,
-}
-
-impl Default for OtherDayAccumulator {
-    fn default() -> Self {
-        Self {
-            tokens: 0,
-            priced_tokens: 0,
-            cost: 0.0,
-            has_cost: false,
-            cost_estimated: false,
-            estimate_complete: true,
+impl OtherModelUsage {
+    fn merge(&mut self, other: &Self) {
+        self.tokens = self.tokens.saturating_add(other.tokens);
+        self.priced_tokens = self.priced_tokens.saturating_add(other.priced_tokens);
+        if let Some(cost) = other.estimated_cost_usd {
+            *self.estimated_cost_usd.get_or_insert(0.0) += cost;
         }
+        self.cost_estimated |= other.cost_estimated;
     }
 }
 
@@ -232,20 +221,23 @@ impl DailyUsageAccumulator {
         tokens: u64,
         cost: Option<f64>,
         cost_estimated: bool,
+        model: &str,
     ) {
-        if tokens == 0 && cost.is_none_or(|value| value <= 0.0) {
+        let cost = cost.filter(|value| value.is_finite() && *value >= 0.0);
+        if tokens == 0 && cost.is_none_or(|value| value == 0.0) {
             return;
         }
-        let day = self.other_days.entry(date).or_default();
-        day.tokens = day.tokens.saturating_add(tokens);
-        if let Some(cost) = cost.filter(|value| value.is_finite() && *value >= 0.0) {
-            day.priced_tokens = day.priced_tokens.saturating_add(tokens);
-            day.cost += cost;
-            day.has_cost = true;
-            day.cost_estimated |= cost_estimated;
-        } else if tokens > 0 {
-            day.estimate_complete = false;
-        }
+        self.other_days
+            .entry(date)
+            .or_default()
+            .entry(normalized_model_name(model).to_owned())
+            .or_default()
+            .merge(&OtherModelUsage {
+                tokens,
+                priced_tokens: if cost.is_some() { tokens } else { 0 },
+                estimated_cost_usd: cost,
+                cost_estimated: cost.is_some() && cost_estimated,
+            });
     }
 
     /// Builds the three spend periods. Idle or unknown-marker-only periods stay unbacked (`None`),
@@ -326,23 +318,26 @@ impl DailyUsageAccumulator {
     }
 
     fn other_period_for_days(&self, dates: &[NaiveDate]) -> Option<OtherUsagePeriod> {
-        let mut total = OtherDayAccumulator::default();
-        for date in dates {
-            if let Some(day) = self.other_days.get(date) {
-                total.tokens = total.tokens.saturating_add(day.tokens);
-                total.priced_tokens = total.priced_tokens.saturating_add(day.priced_tokens);
-                total.cost += day.cost;
-                total.has_cost |= day.has_cost;
-                total.cost_estimated |= day.cost_estimated;
-                total.estimate_complete &= day.estimate_complete;
+        let mut models = BTreeMap::<String, OtherModelUsage>::new();
+        for day in dates.iter().filter_map(|date| self.other_days.get(date)) {
+            for (model, usage) in day {
+                models.entry(model.clone()).or_default().merge(usage);
             }
         }
-        (total.tokens > 0 || total.has_cost).then(|| OtherUsagePeriod {
+        if models.is_empty() {
+            return None;
+        }
+        let mut total = OtherModelUsage::default();
+        for usage in models.values() {
+            total.merge(usage);
+        }
+        Some(OtherUsagePeriod {
             tokens: total.tokens,
             priced_tokens: total.priced_tokens,
-            estimated_cost_usd: total.has_cost.then_some(total.cost),
+            estimated_cost_usd: total.estimated_cost_usd,
             cost_estimated: total.cost_estimated,
-            estimate_complete: total.estimate_complete,
+            estimate_complete: total.tokens == total.priced_tokens,
+            models,
         })
     }
 
@@ -573,20 +568,21 @@ mod tests {
         for days_ago in [0, 29, 30, -1] {
             let date = today - chrono::Duration::days(days_ago);
             accumulator.add(date, 5, 1.0, "model");
-            accumulator.add_other(date, 3, Some(2.0), true);
+            accumulator.add_other(date, 3, Some(2.0), true, "foreign");
         }
         accumulator.add_unknown_model(today - chrono::Duration::days(30), "outside");
+        accumulator.add_other(today, 7, None, false, "foreign");
+        accumulator.add_other(today, 9, Some(0.0), false, "free");
         let history = accumulator.build(now, "test logs");
         assert_eq!(history.last_30_days.unwrap().estimated_cost_usd, Some(2.0));
-        assert_eq!(
-            history
-                .other_usage
-                .unwrap()
-                .last_30_days
-                .unwrap()
-                .estimated_cost_usd,
-            Some(4.0)
-        );
+        let others = history.other_usage.unwrap().last_30_days.unwrap();
+        assert_eq!(others.estimated_cost_usd, Some(4.0));
+        let foreign = &others.models["foreign"];
+        assert_eq!((foreign.tokens, foreign.priced_tokens), (13, 6));
+        assert_eq!(foreign.estimated_cost_usd, Some(4.0));
+        assert!(foreign.cost_estimated);
+        assert_eq!(others.models["free"].estimated_cost_usd, Some(0.0));
+        assert!(!others.estimate_complete);
         assert!(history.unknown_models.is_empty());
         assert_eq!(history.daily.len(), 2);
     }
