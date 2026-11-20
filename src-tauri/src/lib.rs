@@ -901,6 +901,8 @@ pub fn run() {
                 Arc::new(CursorProvider::new(pricing.clone())?) as Arc<dyn UsageProvider>,
                 Arc::new(AntigravityProvider::new(
                     app_data_dir.join("antigravity").join("auth.json"),
+                    storage.clone(),
+                    pricing.clone(),
                 )?) as Arc<dyn UsageProvider>,
                 Arc::new(CopilotProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(DevinProvider::new()?) as Arc<dyn UsageProvider>,

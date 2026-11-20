@@ -66,7 +66,8 @@ impl ModelPricing {
         let name = match (provider, normalized.split_once('/')) {
             ("codex", Some(("openai" | "openai-codex", id)))
             | ("claude", Some(("anthropic", id)))
-            | ("grok", Some(("xai", id))) => id,
+            | ("grok", Some(("xai", id)))
+            | ("antigravity", Some(("google" | "gemini" | "google-antigravity", id))) => id,
             _ => &normalized,
         };
         let lookup = |candidate: &str| {
@@ -81,7 +82,7 @@ impl ModelPricing {
                 .filter(|(_, effort)| {
                     matches!(
                         *effort,
-                        "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+                        "minimal" | "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
                     )
                 })
                 .map_or(base, |(model, _)| model);

@@ -117,6 +117,10 @@ mod bundled_resource_tests {
         assert_rates("cursor-grok-4.5-high-fast", [4.0, 4.0, 1.0, 12.0]);
         assert_rates("cursor-grok-4.6-medium", [2.0, 2.0, 0.5, 6.0]);
         assert_rates("grok-4.6-fast-high", [4.0, 4.0, 1.0, 12.0]);
+        assert_rates("gemini-4-neon-high", [3.0, 3.0, 0.15, 15.0]);
+        assert_rates("gemini-4-carbon-high", [2.0, 2.0, 0.1, 10.0]);
+        assert_rates("gemini-3.6-flash-medium", [0.75, 0.75, 0.075, 3.75]);
+        assert_rates("gemini-3.1-pro-high", [2.0, 2.0, 0.2, 12.0]);
         assert_eq!(
             pricing.resolve("grok-build-0.1").unwrap().input_per_million,
             1.0

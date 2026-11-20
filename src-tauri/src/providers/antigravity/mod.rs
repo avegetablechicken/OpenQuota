@@ -1,16 +1,23 @@
 mod auth;
 mod client;
 mod discovery;
+mod local_usage;
 mod mapper;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use chrono::Utc;
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::models::{
-    MetricDefinition, MetricSection, ProviderDefinition, ProviderSnapshot, UsageHistories,
+use crate::{
+    models::{
+        MetricDefinition, MetricSection, ProviderDefinition, ProviderSnapshot, UsageHistories,
+        UsagePeriodSelection,
+    },
+    pricing::PricingStore,
+    providers::log_usage::scan_or_cached_usage,
+    storage::Storage,
 };
 
 use self::{
@@ -20,6 +27,7 @@ use self::{
     },
     client::{AntigravityClient, CloudOutcome, CloudUserAgent, RefreshOutcome},
     discovery::discover,
+    local_usage::{scan_local_usage, USAGE_SOURCE_NOTE},
     mapper::{
         build_legacy_quotas, has_gemini_pool, merge_model_pools, parse_cloud_models,
         parse_command_model_configs, parse_plan, parse_quota_buckets, parse_quota_summary,
@@ -38,7 +46,7 @@ pub(crate) fn definition() -> ProviderDefinition {
         display_name: "Antigravity".into(),
         short_name: "A".into(),
         fallback_enabled: false,
-        local_usage_source_note: None,
+        local_usage_source_note: Some(USAGE_SOURCE_NOTE.into()),
         links: vec![],
         // Antigravity reports its available pools explicitly, including idle five-hour pools.
         // Opt every window out of the starts-on-use availability heuristic.
@@ -83,6 +91,28 @@ pub(crate) fn definition() -> ProviderDefinition {
                 false,
                 "CW",
             ),
+            MetricDefinition::trend("antigravity.trend"),
+            MetricDefinition::usage(
+                "antigravity.today",
+                "Today",
+                UsagePeriodSelection::Today,
+                MetricSection::OnDemand,
+                "T",
+            ),
+            MetricDefinition::usage(
+                "antigravity.yesterday",
+                "Yesterday",
+                UsagePeriodSelection::Yesterday,
+                MetricSection::OnDemand,
+                "Y",
+            ),
+            MetricDefinition::usage(
+                "antigravity.last30",
+                "Last 30 Days",
+                UsagePeriodSelection::Last30Days,
+                MetricSection::OnDemand,
+                "M",
+            ),
         ],
     }
 }
@@ -99,24 +129,53 @@ pub enum AntigravityError {
     InvalidCredentialData,
     #[error("Antigravity usage is temporarily unavailable. Try again shortly.")]
     Unavailable,
+    #[error("Local Antigravity usage transcripts could not be processed.")]
+    LocalUsage,
 }
 
 pub struct AntigravityProvider {
     client: AntigravityClient,
     access_token_cache: AccessTokenCache,
     login: Box<dyn SharedLogin>,
+    storage: Arc<Storage>,
+    pricing: Arc<PricingStore>,
 }
 
 impl AntigravityProvider {
-    pub fn new(cache_path: PathBuf) -> Result<Self, AntigravityError> {
+    pub fn new(
+        cache_path: PathBuf,
+        storage: Arc<Storage>,
+        pricing: Arc<PricingStore>,
+    ) -> Result<Self, AntigravityError> {
         Ok(Self {
             client: AntigravityClient::new()?,
             access_token_cache: AccessTokenCache::new(cache_path),
             login: Box::new(SystemLogin),
+            storage,
+            pricing,
         })
     }
 
     fn refresh_inner(&self) -> Result<ProviderSnapshot, AntigravityError> {
+        let mut snapshot = self.refresh_quota()?;
+        let mut warnings = Vec::new();
+        let pricing = self.pricing.current();
+        let now = Utc::now();
+        let usage = scan_or_cached_usage(
+            &self.storage,
+            "antigravity",
+            crate::providers::CacheIdentity::Unscoped,
+            "Antigravity",
+            || scan_local_usage(&self.storage, now, &pricing),
+            &mut warnings,
+        );
+        snapshot.usage_histories = UsageHistories::local_device(usage);
+        snapshot.warnings.extend(warnings);
+        snapshot.refreshed_at = now;
+        Ok(snapshot)
+    }
+
+    fn refresh_quota(&self) -> Result<ProviderSnapshot, AntigravityError> {
         if let Some(server) = discover() {
             if let Some(summary) = self
                 .client
@@ -468,6 +527,7 @@ impl crate::providers::UsageProvider for AntigravityProvider {
                 | AntigravityError::InvalidCredentialData => Kind::Authentication,
                 AntigravityError::CredentialStoreUnreadable => Kind::CredentialStorage,
                 AntigravityError::Unavailable => Kind::Network,
+                AntigravityError::LocalUsage => Kind::Internal,
             };
             crate::providers::ProviderError::from_display(kind, error)
         })
@@ -621,6 +681,11 @@ mod tests {
 
     fn provider(base: &str, login: &Arc<FakeLogin>) -> (AntigravityProvider, TempDir) {
         let directory = tempdir().unwrap();
+        let storage = Arc::new(
+            crate::storage::Storage::open(&directory.path().join("openquota.db")).unwrap(),
+        );
+        let pricing =
+            Arc::new(crate::pricing::PricingStore::new(directory.path().join("pricing")).unwrap());
         let provider = AntigravityProvider {
             client: AntigravityClient::with_endpoints(
                 vec![base.to_owned()],
@@ -630,6 +695,8 @@ mod tests {
             .unwrap(),
             access_token_cache: AccessTokenCache::new(directory.path().join("auth.json")),
             login: Box::new(login.clone()),
+            storage,
+            pricing,
         };
         (provider, directory)
     }

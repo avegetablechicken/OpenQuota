@@ -243,6 +243,19 @@
         {"from": "2026-08-26T00:00:00Z", "input": 0.075, "read": 0.015, "write": 0.075, "output": 0.25, "source": "https://docs.avalai.ir/en/news/2026-08-26-glm-5-3-flash-added"},
         {"from": "2026-09-09T16:00:00Z", "input": 0.15, "read": 0.03, "write": 0.15, "output": 0.5, "source": "https://docs.z.ai/guides/overview/pricing"}
       ]
+    },
+    "antigravity": {
+      "gemini-3.6-flash": [
+        {"from": "2026-07-21T00:00:00Z", "until": "2027-01-01T00:00:00Z", "input": 0.75, "read": 0.075, "write": 0.75, "output": 3.75, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
+        {"from": "2027-01-01T00:00:00Z", "input": 1.5, "read": 0.15, "write": 1.5, "output": 7.5, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
+      ],
+      "gemini-4-carbon": [
+        {"from": "2026-10-28T00:00:00Z", "until": "2026-12-01T00:00:00Z", "input": 2.0, "read": 0.1, "write": 2.0, "output": 10.0, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
+        {"from": "2026-12-01T00:00:00Z", "input": 4.0, "read": 0.2, "write": 4.0, "output": 20.0, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
+      ],
+      "gemini-4-neon": [
+        {"from": "2026-11-18T00:00:00Z", "input": 3.0, "read": 0.15, "write": 3.0, "output": 15.0, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
+      ]
     }
   },
   "pricing": {
@@ -408,6 +421,27 @@
       "cache_write_per_million": 0.25,
       "cache_read_per_million": 0.02,
       "output_per_million": 1.2
+    },
+    "gemini-3.6-flash": {
+      "$comment": "Google Gemini API introductory rate for Gemini 3.6 Flash through 2026-12-31; historical schedule lives under history.antigravity.",
+      "input_per_million": 0.75,
+      "cache_write_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "output_per_million": 3.75
+    },
+    "gemini-4-carbon": {
+      "$comment": "Google Gemini API introductory rate for Gemini 4 Carbon through 2026-11-30; historical schedule lives under history.antigravity.",
+      "input_per_million": 2.0,
+      "cache_write_per_million": 2.0,
+      "cache_read_per_million": 0.1,
+      "output_per_million": 10.0
+    },
+    "gemini-4-neon": {
+      "$comment": "Google Gemini API paid-tier rate for Gemini 4 Neon (implicit caching provides a 95% discount).",
+      "input_per_million": 3.0,
+      "cache_write_per_million": 3.0,
+      "cache_read_per_million": 0.15,
+      "output_per_million": 15.0
     }
   },
   "fast_multipliers": {
@@ -464,11 +498,13 @@
     { "pattern": "^claude-fable-5(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-fable-5" },
     { "pattern": "^claude-sonnet-5(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-sonnet-5" },
     { "pattern": "^gemini-2\\.5-flash$", "canonical": "gemini-2.5-flash" },
-    { "pattern": "^gemini-3-flash(?:-preview)?$", "canonical": "gemini-3-flash-preview" },
-    { "pattern": "^gemini-3\\.5-flash(?:-preview)?$", "canonical": "gemini-3.5-flash" },
-    { "pattern": "^gemini-3-pro-preview$", "canonical": "gemini-3-pro-preview" },
-    { "pattern": "^gemini-3\\.1-pro$", "canonical": "gemini-3.1-pro-preview" },
-    { "pattern": "^gemini-3\\.1-pro-preview$", "canonical": "gemini-3.1-pro-preview" },
+    { "pattern": "^gemini-3-flash(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3-flash-preview" },
+    { "pattern": "^gemini-3\\.5-flash(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.5-flash" },
+    { "pattern": "^gemini-3\\.6-flash(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.6-flash" },
+    { "pattern": "^gemini-3-pro(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3-pro-preview" },
+    { "pattern": "^gemini-3\\.1-pro(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.1-pro-preview" },
+    { "pattern": "^gemini-4-carbon(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-4-carbon" },
+    { "pattern": "^gemini-4-neon(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-4-neon" },
     { "pattern": "^gpt-5(?:-(?:low|high))?-fast$", "canonical": "gpt-5-fast" },
     { "pattern": "^gpt-5(?:-(?:low|high))?$", "canonical": "gpt-5" },
     { "pattern": "^gpt-5\\.1(?:-(?:low|high))?-fast$", "canonical": "gpt-5-fast" },

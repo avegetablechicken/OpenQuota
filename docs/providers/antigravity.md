@@ -1,15 +1,20 @@
 # Antigravity
 
-OpenQuota tracks the shared Gemini and Claude quota pools reported by Antigravity.
+OpenQuota tracks the shared Gemini and Claude quota pools reported by Antigravity, along with
+local token usage and API-equivalent spend estimated from Antigravity's local session transcripts.
 
 ## What it tracks
 
-| Metric        | Meaning                                             |
-| ------------- | --------------------------------------------------- |
-| Session       | Shared Gemini pool in the rolling 5-hour window     |
-| Weekly        | Shared Gemini pool in the weekly window             |
-| Claude        | Shared non-Gemini pool in the rolling 5-hour window |
-| Claude Weekly | Shared non-Gemini pool in the weekly window         |
+| Metric        | Meaning                                                      |
+| ------------- | ------------------------------------------------------------ |
+| Session       | Shared Gemini pool in the rolling 5-hour window              |
+| Weekly        | Shared Gemini pool in the weekly window                      |
+| Claude        | Shared non-Gemini pool in the rolling 5-hour window          |
+| Claude Weekly | Shared non-Gemini pool in the weekly window                  |
+| Trend         | 30-day local usage sparkline from Antigravity transcripts    |
+| Today         | Local tokens and estimated spend recorded today              |
+| Yesterday     | Local tokens and estimated spend recorded yesterday          |
+| Last 30 Days  | Local tokens and estimated spend across the trailing 30 days |
 
 Only the pools available to the signed-in account are shown.
 
@@ -18,6 +23,11 @@ Only the pools available to the signed-in account are shown.
 Sign in through Antigravity or run `agy`. OpenQuota reuses Antigravity's locally stored credentials
 and can also discover a compatible running Antigravity language server. No API key needs to be added
 to OpenQuota.
+
+Local usage is read from Antigravity's conversation transcripts under `~/.gemini/antigravity/brain/`
+and `~/.gemini/antigravity-cli/brain/` (or `ANTIGRAVITY_HOME` / `ANTIGRAVITY_DATA_DIR` when set),
+plus `google-antigravity` sessions logged by `pi` if present. Models without a known API rate still
+appear in token counts and model breakdowns with a missing-price indicator.
 
 When the stored access token is rejected, OpenQuota first rereads the shared sign-in in case
 Antigravity or `agy` renewed it. Access tokens OpenQuota renews itself are saved back to the shared

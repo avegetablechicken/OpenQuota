@@ -131,13 +131,17 @@ export const providerCatalog: ProviderCatalog = {
       displayName: 'Antigravity',
       shortName: 'A',
       fallbackEnabled: false,
-      localUsageSourceNote: null,
+      localUsageSourceNote: 'From your Antigravity transcripts (estimated)',
       links: [],
       metrics: [
         quota('antigravity.geminiPro', 'Session', 'geminiPro'),
         quota('antigravity.geminiWeekly', 'Weekly', 'geminiWeekly'),
         quota('antigravity.claude', 'Claude', 'claude'),
         quota('antigravity.claudeWeekly', 'Claude Weekly', 'claudeWeekly'),
+        trend('antigravity.trend'),
+        usage('antigravity.today', 'Today', 'today'),
+        usage('antigravity.yesterday', 'Yesterday', 'yesterday'),
+        usage('antigravity.last30', 'Last 30 Days', 'last30Days'),
       ],
     },
     {
