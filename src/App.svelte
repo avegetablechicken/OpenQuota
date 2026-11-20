@@ -40,6 +40,7 @@
   import Dashboard from './lib/Dashboard.svelte';
   import Icon from './lib/Icon.svelte';
   import { editsText, handleMenuBarKey } from './lib/menuKeys';
+  import { dropFocusUntilInteraction } from './lib/initialFocus';
   import { createListenerRegistry } from './lib/listenerRegistry';
   import { emptyProviderCatalog, ProviderCatalogIndex } from './lib/metrics';
   import { springMotion } from './lib/motion';
@@ -731,6 +732,7 @@
     updatePanelResizeEdge();
     updatePanelHeightMode();
     window.addEventListener('focus', refreshWindowState);
+    const initialFocus = dropFocusUntilInteraction();
 
     const popover = document.querySelector<HTMLElement>('.popover');
     const resizeObserver =
@@ -851,6 +853,7 @@
     listeners.add(
       onMainWindowHidden(() => {
         navigating = false;
+        initialFocus.reset();
         resetTransientUi();
         slidePageTransition = false;
         screen = 'dashboard';
@@ -902,6 +905,7 @@
       windowController.dispose();
       motionQuery.removeEventListener('change', updateMotionPreference);
       window.removeEventListener('focus', refreshWindowState);
+      initialFocus.dispose();
       document.documentElement.removeAttribute('data-reduced-motion');
       mutationObserver.disconnect();
       resizeObserver?.disconnect();
