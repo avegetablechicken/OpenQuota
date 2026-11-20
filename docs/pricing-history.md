@@ -65,7 +65,7 @@ Claude 的普通输入、5 分钟缓存写入、1 小时缓存写入、缓存读
 | OpenCode | Zen 按路由模型计价，Go 当前为 $10/月，Go Plus 为 $40/月，Go Teams 为 $20/成员/月。模型可有独立的渠道价。[模型费率](https://opencode.ai/docs/console/models/) · [Go 计划](https://opencode.ai/docs/console/go/) | 优先使用消息或步骤金额。OpenAI、Anthropic 直连记录按对应 provider 和时间估算。 |
 | OpenRouter | 推理费用依上游模型和路由。当前 Standard 购入 credits 收取 5.5%，Business 为 8%。[定价](https://openrouter.ai/pricing) | 使用账户返回的日、周、月消费。充值手续费与单次推理金额分别核算。 |
 | Devin | 自助套餐按包含额度和按需 credits 计量。企业使用 ACU，单价由订单决定。[Devin Billing](https://docs.devin.ai/admin/billing) | 展示账号返回的额度和余额。统一的 ACU 美元换算率不可用。 |
-| Sub2API | Codex / Claude 按实际使用的上游模型、请求时间和服务档位匹配对应费率。[管理端用量明细](https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/handler/admin/usage_handler.go) | 用每次请求的输入、输出和缓存 token 在本地估算；汇总到账号和连接，实例自定价及分组、账号倍率均不参与。 |
+| Sub2API | Codex / Claude 按实际使用的上游模型、请求时间和服务档位匹配对应费率。[管理端用量明细](https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/handler/admin/usage_handler.go) | 每个连接可选计费方式。默认「上游价格」按请求的 token 在本地估算；「Sub2API 价格」读取实例的账号统计，优先取 actual_cost（含零），缺失时取 cost。 |
 
 ### 通过其他客户端使用 DeepSeek
 

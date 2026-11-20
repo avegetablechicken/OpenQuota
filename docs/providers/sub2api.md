@@ -11,10 +11,17 @@ OpenQuota shows quota and upstream usage estimates for active Codex or Claude OA
 | Spark             | Spark session window, when reported                     |
 | Spark Weekly      | Spark weekly window, when reported                      |
 | Rate Limit Resets | Available reset credits, shown as read-only information |
-| Today, Yesterday, Last 30 Days | Token counts and estimated cost at upstream model prices |
-| Model breakdown | Token counts and estimated upstream cost per model and account |
+| Today, Yesterday, Last 30 Days | Token counts and cost using the selected billing method |
+| Model breakdown | Token counts and cost per model and account |
 
-OpenQuota reads paginated request records from `/api/v1/admin/usage` for each account. It uses the
+The last field in the connection editor is **Billing method**. **Upstream** is the default,
+including for existing connections. **Sub2API** reads the instance's 30-day account statistics
+from `/api/v1/admin/accounts/:id/stats`. It uses the account's reported `actual_cost`, including
+zero, or `cost` when the actual amount is unavailable. Days with usage but no amount make the
+period cost unknown. The daily buckets follow the server's calendar. Saving a change refreshes
+the account and connection totals.
+
+With **Upstream**, OpenQuota reads paginated request records from `/api/v1/admin/usage` for each account. It uses the
 model reported by the upstream response, then the model forwarded upstream, then the request model
 when no mapping is recorded. Each estimate uses the request timestamp, speed tier, and input,
 output, cache-read and cache-write tokens. An unknown rate or unsupported image charge leaves an

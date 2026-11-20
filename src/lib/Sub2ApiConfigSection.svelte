@@ -18,7 +18,7 @@
     sub2ApiPublicName,
     sub2ApiUpstreamLabel,
   } from './sub2ApiUpstreams';
-  import type { Sub2ApiConfigState, Sub2ApiUpstream } from './types';
+  import type { Sub2ApiBillingMode, Sub2ApiConfigState, Sub2ApiUpstream } from './types';
 
   interface Props {
     providerId: string;
@@ -55,6 +55,7 @@
     customBaseUrl: false,
     email: '',
     upstream: 'codex',
+    billingMode: 'upstream',
   });
   let open = $state(false);
   let baseUrl = $state('');
@@ -63,6 +64,7 @@
   let email = $state('');
   let password = $state('');
   let upstream = $state<Sub2ApiUpstream>('codex');
+  let billingMode = $state<Sub2ApiBillingMode>('upstream');
   let revealPassword = $state(false);
   let upstreamDrafts = $state<Record<Sub2ApiUpstream, ConnectionDraft>>({
     codex: emptyConnectionDraft(),
@@ -134,6 +136,7 @@
       revealPassword: false,
     };
     upstreamDrafts = drafts;
+    billingMode = next.billingMode ?? 'upstream';
     upstream = next.upstream;
     applyDraft(drafts[next.upstream]);
     confirmingClear = false;
@@ -225,6 +228,7 @@
       email: email.trim(),
       password,
       upstream,
+      billingMode,
     };
     const optimisticState: Sub2ApiConfigState = {
       configured: true,
@@ -233,6 +237,7 @@
       customBaseUrl: submitted.customBaseUrl,
       email: submitted.email,
       upstream: submitted.upstream,
+      billingMode: submitted.billingMode,
     };
     saving = true;
     error = null;
@@ -253,6 +258,7 @@
       customBaseUrl = submitted.customBaseUrl;
       email = submitted.email;
       upstream = submitted.upstream;
+      billingMode = submitted.billingMode;
       revealPassword = false;
       confirmingClear = false;
       open = true;
@@ -473,6 +479,18 @@
                 <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
               </button>
             </div>
+          </div>
+          <div class="config-row">
+            <span>Billing method</span>
+            <SelectMenu
+              label="Billing method"
+              value={billingMode}
+              options={[
+                { value: 'upstream', label: 'Upstream' },
+                { value: 'server', label: 'Sub2API' },
+              ]}
+              onChange={(value) => (billingMode = value as Sub2ApiBillingMode)}
+            />
           </div>
 
           <div class="sub2api-config-actions">

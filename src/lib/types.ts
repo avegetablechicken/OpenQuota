@@ -199,7 +199,10 @@ export interface Sub2ApiConfigState {
   customBaseUrl: boolean;
   email: string;
   upstream: Sub2ApiUpstream;
+  billingMode: Sub2ApiBillingMode;
 }
+
+export type Sub2ApiBillingMode = 'upstream' | 'server';
 
 export type Sub2ApiUpstream = 'codex' | 'claude';
 
@@ -210,6 +213,7 @@ export interface Sub2ApiConfigInput {
   email: string;
   password: string;
   upstream: Sub2ApiUpstream;
+  billingMode: Sub2ApiBillingMode;
 }
 
 export interface ProviderDefinition {

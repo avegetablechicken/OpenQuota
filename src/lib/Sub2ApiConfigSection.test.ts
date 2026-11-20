@@ -118,12 +118,44 @@ describe('Sub2ApiConfigSection', () => {
           email: 'admin@example.com',
           password: 'secret-password',
           upstream: 'claude',
+          billingMode: 'upstream',
         },
       }),
     );
     expect(screen.queryByDisplayValue('secret-password')).not.toBeInTheDocument();
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
     expect(screen.getByText('Sub2API · Claude')).toBeInTheDocument();
+  });
+
+  it('saves the billing method per connection and restores the saved selection', async () => {
+    let billingMode = 'upstream';
+    mocks.invoke.mockImplementation(async (command: string, args) => {
+      if (command === 'save_sub2api_config') billingMode = args.config.billingMode;
+      return {
+        configured: true,
+        baseUrl: 'https://sub2api.example.com',
+        codexProvider: '',
+        customBaseUrl: true,
+        email: 'admin@example.com',
+        upstream: 'codex',
+        billingMode,
+      };
+    });
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const select = screen.getByRole('combobox', { name: 'Billing method' });
+    expect(select).toHaveValue('upstream');
+    expect(screen.getByLabelText('Sub2API administrator password')).toAppearBefore(select);
+    await selectOption(select, 'Sub2API');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', {
+        providerId: 'sub2api@2',
+        config: expect.objectContaining({ billingMode: 'server', password: '' }),
+      }),
+    );
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect(screen.getByRole('combobox', { name: 'Billing method' })).toHaveValue('server');
   });
 
   it('requires a Claude provider or a manually entered custom URL', async () => {
@@ -265,6 +297,7 @@ describe('Sub2ApiConfigSection', () => {
           email: 'new@example.com',
           password: 'new-password',
           upstream: 'codex',
+          billingMode: 'upstream',
         },
       }),
     );
@@ -400,6 +433,7 @@ describe('Sub2ApiConfigSection', () => {
           email: 'shortcut@example.com',
           password: 'shortcut-password',
           upstream: 'codex',
+          billingMode: 'upstream',
         },
       }),
     );

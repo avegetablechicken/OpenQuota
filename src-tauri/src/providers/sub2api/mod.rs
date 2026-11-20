@@ -1,4 +1,7 @@
+mod reported;
 mod usage;
+
+use reported::AccountStats;
 
 use crate::{
     pricing::{ModelPricing, PricingStore},
@@ -14,7 +17,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use usage::{PricedUsage, SOURCE};
+use usage::SOURCE;
 
 use chrono::Utc;
 use reqwest::{blocking::Client, StatusCode, Url};
@@ -225,6 +228,23 @@ pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<Metr
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sub2ApiBillingMode {
+    #[default]
+    Upstream,
+    Server,
+}
+
+impl Sub2ApiBillingMode {
+    fn cache_key(self) -> &'static str {
+        match self {
+            Self::Upstream => "sub2api-upstream-price-v1",
+            Self::Server => "sub2api-server-price-v1",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sub2ApiConfigInput {
@@ -238,6 +258,8 @@ pub struct Sub2ApiConfigInput {
     pub password: String,
     #[serde(default)]
     pub upstream: Sub2ApiUpstream,
+    #[serde(default)]
+    pub billing_mode: Sub2ApiBillingMode,
 }
 
 impl Drop for Sub2ApiConfigInput {
@@ -256,6 +278,7 @@ pub struct Sub2ApiConfigState {
     pub custom_base_url: bool,
     pub email: String,
     pub upstream: Sub2ApiUpstream,
+    pub billing_mode: Sub2ApiBillingMode,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -317,6 +340,8 @@ struct StoredConfig {
     #[serde(default)]
     upstream: Sub2ApiUpstream,
     #[serde(default)]
+    billing_mode: Sub2ApiBillingMode,
+    #[serde(default)]
     metric_template_version: u8,
 }
 
@@ -329,6 +354,7 @@ impl Clone for StoredConfig {
             email: self.email.clone(),
             password: self.password.clone(),
             upstream: self.upstream,
+            billing_mode: self.billing_mode,
             metric_template_version: self.metric_template_version,
         }
     }
@@ -355,6 +381,7 @@ impl StoredConfig {
                 || (self.upstream == Sub2ApiUpstream::Claude && self.codex_provider.is_empty()),
             email: self.email.clone(),
             upstream: self.upstream,
+            billing_mode: self.billing_mode,
         }
     }
 }
@@ -657,6 +684,50 @@ fn transport_error(stage: &str, error: &reqwest::Error) -> Sub2ApiError {
     Sub2ApiError::ConnectionFailed
 }
 
+enum ConnectionHistory {
+    Upstream {
+        pricing: Arc<ModelPricing>,
+        total: DailyUsageAccumulator,
+    },
+    Server(AccountStats),
+}
+
+impl ConnectionHistory {
+    fn fetch_account(
+        &mut self,
+        client: &Sub2ApiClient,
+        token: &str,
+        account_id: i64,
+        upstream: Sub2ApiUpstream,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<UsageHistory, Sub2ApiError> {
+        match self {
+            Self::Upstream { pricing, total } => {
+                let rows = client.priced_usage(token, account_id, upstream, now, pricing)?;
+                let mut account = DailyUsageAccumulator::default();
+                for row in rows {
+                    row.add_to(&mut account);
+                    row.add_to(total);
+                }
+                Ok(account.build(now, SOURCE))
+            }
+            Self::Server(total) => {
+                let stats = client.stats(token, account_id)?;
+                let account = stats.clone().into_history(now);
+                total.extend(stats);
+                Ok(account)
+            }
+        }
+    }
+
+    fn finish(self, now: chrono::DateTime<Utc>) -> UsageHistory {
+        match self {
+            Self::Upstream { total, .. } => total.build(now, SOURCE),
+            Self::Server(total) => total.into_history(now),
+        }
+    }
+}
+
 pub struct Sub2ApiProvider {
     pricing: Arc<PricingStore>,
     provider_id: String,
@@ -709,6 +780,7 @@ impl Sub2ApiProvider {
             email: input.email.trim().to_owned(),
             password,
             upstream: input.upstream,
+            billing_mode: input.billing_mode,
             metric_template_version: if apply_metric_template {
                 0
             } else {
@@ -720,7 +792,7 @@ impl Sub2ApiProvider {
         }
 
         self.write_config(&config)?;
-        self.set_configured(true)?;
+        self.set_configuration_marker(Some(config.billing_mode))?;
         if let Ok(mut cached) = self.session.lock() {
             *cached = None;
         }
@@ -739,7 +811,7 @@ impl Sub2ApiProvider {
     pub fn delete_config(&self) -> Result<Sub2ApiConfigState, ProviderError> {
         delete_owned_password(CREDENTIAL_SERVICE, self.credential_account())
             .map_err(|_| Sub2ApiError::CredentialStorage)?;
-        self.set_configured(false)?;
+        self.set_configuration_marker(None)?;
         if let Ok(mut cached) = self.session.lock() {
             *cached = None;
         }
@@ -788,28 +860,33 @@ impl Sub2ApiProvider {
         };
         let mut snapshots = Vec::new();
         let now = Utc::now();
-        let pricing = self.pricing.current();
-        let mut all_usage = DailyUsageAccumulator::default();
+        let mut histories = match config.billing_mode {
+            Sub2ApiBillingMode::Upstream => ConnectionHistory::Upstream {
+                pricing: self.pricing.current(),
+                total: DailyUsageAccumulator::default(),
+            },
+            Sub2ApiBillingMode::Server => ConnectionHistory::Server(AccountStats::default()),
+        };
         for account in accounts {
-            let (mut snapshot, rows) =
-                match self.refresh_account(config, &client, &session, &account, now, &pricing) {
-                    Err(Sub2ApiError::Authentication) => {
-                        session = self.connect(config)?;
-                        if let Ok(mut cached) = self.session.lock() {
-                            *cached = Some(clone_session(&session));
-                        }
-                        self.refresh_account(config, &client, &session, &account, now, &pricing)
+            let snapshot = match self.refresh_account(
+                config,
+                &client,
+                &session,
+                &account,
+                now,
+                &mut histories,
+            ) {
+                Err(Sub2ApiError::Authentication) => {
+                    session = self.connect(config)?;
+                    if let Ok(mut cached) = self.session.lock() {
+                        *cached = Some(clone_session(&session));
                     }
-                    result => result,
-                }?;
+                    self.refresh_account(config, &client, &session, &account, now, &mut histories)
+                }
+                result => result,
+            }?;
             // Publish only complete connection snapshots. The service retains the last successful
             // in-memory and persisted snapshot when any upstream request fails.
-            let mut usage = DailyUsageAccumulator::default();
-            for row in rows {
-                row.add_to(&mut usage);
-                row.add_to(&mut all_usage);
-            }
-            snapshot.usage_histories = UsageHistories::account(usage.build(now, SOURCE));
             snapshots.push(crate::models::AccountSnapshot {
                 id: account.id.to_string(),
                 name: format!("Sub2API · {} · {}", config.upstream, account.name),
@@ -820,7 +897,7 @@ impl Sub2ApiProvider {
             .first()
             .map(|account| account.snapshot.clone())
             .unwrap_or_else(|| self.empty_snapshot(Vec::new()));
-        snapshot.usage_histories = UsageHistories::account(all_usage.build(now, SOURCE));
+        snapshot.usage_histories = UsageHistories::account(histories.finish(now));
         snapshot.accounts = Some(snapshots);
         Ok(snapshot)
     }
@@ -847,8 +924,8 @@ impl Sub2ApiProvider {
         session: &CachedSession,
         account: &Sub2ApiAccount,
         now: chrono::DateTime<Utc>,
-        pricing: &ModelPricing,
-    ) -> Result<(ProviderSnapshot, Vec<PricedUsage>), Sub2ApiError> {
+        histories: &mut ConnectionHistory,
+    ) -> Result<ProviderSnapshot, Sub2ApiError> {
         let body = client.usage(session.token.as_str(), account.id, config.upstream)?;
         let (plan, quotas, value_metrics) = match config.upstream {
             Sub2ApiUpstream::Codex => {
@@ -875,28 +952,25 @@ impl Sub2ApiProvider {
             }
         };
         let quotas = normalize_refreshed_quotas(config.upstream, quotas, now);
-        let rows = client.priced_usage(
+        let history = histories.fetch_account(
+            client,
             session.token.as_str(),
             account.id,
             config.upstream,
             now,
-            pricing,
         )?;
-        Ok((
-            ProviderSnapshot {
-                accounts: None,
-                provider_id: self.provider_id.clone(),
-                plan,
-                quotas,
-                value_metrics,
-                status_metrics: Vec::new(),
-                notices: Vec::new(),
-                usage_histories: UsageHistories::default(),
-                warnings: Vec::new(),
-                refreshed_at: now,
-            },
-            rows,
-        ))
+        Ok(ProviderSnapshot {
+            accounts: None,
+            provider_id: self.provider_id.clone(),
+            plan,
+            quotas,
+            value_metrics,
+            status_metrics: Vec::new(),
+            notices: Vec::new(),
+            usage_histories: UsageHistories::account(history),
+            warnings: Vec::new(),
+            refreshed_at: now,
+        })
     }
 
     fn credential_account(&self) -> &str {
@@ -907,14 +981,17 @@ impl Sub2ApiProvider {
         }
     }
 
-    fn set_configured(&self, configured: bool) -> Result<(), Sub2ApiError> {
-        if configured {
+    fn set_configuration_marker(
+        &self,
+        mode: Option<Sub2ApiBillingMode>,
+    ) -> Result<(), Sub2ApiError> {
+        if let Some(mode) = mode {
             let parent = self
                 .configured_marker
                 .parent()
                 .ok_or(Sub2ApiError::CredentialStorage)?;
             fs::create_dir_all(parent).map_err(|_| Sub2ApiError::CredentialStorage)?;
-            fs::write(&self.configured_marker, b"configured")
+            fs::write(&self.configured_marker, mode.cache_key())
                 .map_err(|_| Sub2ApiError::CredentialStorage)?;
         } else {
             match fs::remove_file(&self.configured_marker) {
@@ -923,7 +1000,7 @@ impl Sub2ApiProvider {
                 Err(_) => return Err(Sub2ApiError::CredentialStorage),
             }
         }
-        self.configured.store(configured, Ordering::SeqCst);
+        self.configured.store(mode.is_some(), Ordering::SeqCst);
         Ok(())
     }
 
@@ -1042,7 +1119,13 @@ impl UsageProvider for Sub2ApiProvider {
 
     fn cache_identity(&self) -> CacheIdentity<'_> {
         if self.configured.load(Ordering::SeqCst) {
-            CacheIdentity::Resolved("sub2api-upstream-price-v1")
+            if fs::read_to_string(&self.configured_marker).ok().as_deref()
+                == Some(Sub2ApiBillingMode::Server.cache_key())
+            {
+                CacheIdentity::Resolved(Sub2ApiBillingMode::Server.cache_key())
+            } else {
+                CacheIdentity::Resolved(Sub2ApiBillingMode::Upstream.cache_key())
+            }
         } else {
             CacheIdentity::Resolved("sub2api-unconfigured")
         }
@@ -1058,6 +1141,15 @@ impl UsageProvider for Sub2ApiProvider {
             .ok()
             .flatten()
             .map(|config| config.upstream.provider_id())
+    }
+
+    fn refresh_for_service(&self) -> Result<super::ProviderRefresh, ProviderError> {
+        let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
+        Ok(super::ProviderRefresh {
+            snapshot: self.refresh_snapshot(&config)?,
+            cache_identity: Some(config.billing_mode.cache_key().to_owned()),
+            account: None,
+        })
     }
 
     fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
@@ -1498,6 +1590,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Codex,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: 0,
         };
 
@@ -1529,6 +1622,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "first-password".into(),
             upstream: super::Sub2ApiUpstream::Codex,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
         let first = session_scope(&config);
@@ -1580,12 +1674,14 @@ mod tests {
         assert!(!provider.has_local_credentials());
         assert!(provider.account_identity().is_none());
 
-        provider.set_configured(true).unwrap();
+        provider
+            .set_configuration_marker(Some(super::Sub2ApiBillingMode::Upstream))
+            .unwrap();
         assert!(provider.has_local_credentials());
         assert!(provider.supports_account_names());
         assert_eq!(provider.account_identity(), Some("sub2api@2"));
 
-        provider.set_configured(false).unwrap();
+        provider.set_configuration_marker(None).unwrap();
         assert!(provider.account_identity().is_none());
     }
 
@@ -1650,7 +1746,9 @@ mod tests {
             .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
             .unwrap()
             .is_none());
-        provider.set_configured(true).unwrap();
+        provider
+            .set_configuration_marker(Some(super::Sub2ApiBillingMode::Upstream))
+            .unwrap();
         assert!(storage
             .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
             .unwrap()
@@ -1679,6 +1777,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "secret-password".into(),
             upstream: super::Sub2ApiUpstream::Codex,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
 
@@ -1724,6 +1823,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Codex,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
 
         let target = connection_target(
@@ -1755,6 +1855,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Codex,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
 
         assert_eq!(
@@ -1787,6 +1888,7 @@ mod tests {
             email: "old@example.com".into(),
             password: "old-password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
         let same_upstream = Sub2ApiConfigInput {
@@ -1796,6 +1898,7 @@ mod tests {
             email: "new@example.com".into(),
             password: String::new(),
             upstream: super::Sub2ApiUpstream::Claude,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
         assert_eq!(
             password_for_save(&same_upstream, Some(&previous)).unwrap(),
@@ -1809,6 +1912,7 @@ mod tests {
             email: "new@example.com".into(),
             password: String::new(),
             upstream: super::Sub2ApiUpstream::Codex,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
         assert_eq!(
             password_for_save(&changed_upstream, Some(&previous)),
@@ -1825,6 +1929,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Claude,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
         assert_eq!(
             connection_target(
@@ -1920,6 +2025,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
         let snapshot = provider.refresh_snapshot(&config).unwrap();
@@ -2036,6 +2142,7 @@ mod tests {
                         email: "admin@example.com".into(),
                         password: "password".into(),
                         upstream: super::Sub2ApiUpstream::Claude,
+                        billing_mode: super::Sub2ApiBillingMode::Upstream,
                         metric_template_version: super::METRIC_TEMPLATE_VERSION,
                     },
                 })])
@@ -2256,6 +2363,7 @@ mod tests {
             email: "admin@example.com".into(),
             password: "secret-password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
 
@@ -2288,6 +2396,43 @@ mod tests {
     }
 
     #[test]
+    fn server_method_uses_account_stats_and_preserves_free_or_missing_costs() {
+        let now = Utc::now();
+        let date = now.with_timezone(&chrono::Local).date_naive();
+        let response = |amount: serde_json::Value, fallback: serde_json::Value| {
+            serde_json::json!({"code":0,"data":{
+                "history":[{"date":date,"tokens":100,"actual_cost":amount,"cost":fallback,"user_cost":99}],
+                "models":[{"model":"unknown-model","total_tokens":100,"actual_cost":amount,"cost":fallback}]
+            }}).to_string()
+        };
+        let (base, requests, worker) = serve_sequence(vec![
+            response(0.into(), 10.into()),
+            response(serde_json::Value::Null, 2.5.into()),
+            response(serde_json::Value::Null, serde_json::Value::Null),
+        ]);
+        let client = Sub2ApiClient::new(&base).unwrap();
+        let mut histories = super::ConnectionHistory::Server(Default::default());
+        for (id, expected) in [(1, Some(0.0)), (2, Some(2.5)), (3, None)] {
+            let history = histories
+                .fetch_account(&client, "token", id, super::Sub2ApiUpstream::Codex, now)
+                .unwrap();
+            let today = history.today.unwrap();
+            assert_eq!(today.estimated_cost_usd, expected);
+            assert!(!today.cost_estimated);
+            assert_eq!(today.estimate_complete, expected.is_some());
+            assert!(requests
+                .recv()
+                .unwrap()
+                .starts_with(&format!("GET /api/v1/admin/accounts/{id}/stats?days=30 ")));
+        }
+        worker.join().unwrap();
+        let monthly = histories.finish(now).last_30_days.unwrap();
+        assert_eq!(monthly.tokens, 300);
+        assert_eq!(monthly.estimated_cost_usd, None);
+        assert_eq!(monthly.model_breakdown.unwrap().models[0].cost_usd, None);
+    }
+
+    #[test]
     fn stored_connections_without_an_upstream_remain_codex_connections() {
         let config: StoredConfig = serde_json::from_str(
             r#"{"base_url":"https://sub2api.example.com","email":"admin@example.com","password":"secret"}"#,
@@ -2295,6 +2440,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.upstream, super::Sub2ApiUpstream::Codex);
+        assert_eq!(
+            config.state().billing_mode,
+            super::Sub2ApiBillingMode::Upstream
+        );
         assert!(config.codex_provider.is_empty());
         assert!(config.custom_base_url);
         assert_eq!(config.metric_template_version, 0);
