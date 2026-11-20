@@ -135,16 +135,17 @@
       >
     </div>
     <div class="total-card__actions">
-      <div class="spend-scope-switcher" role="group" aria-label="Usage Scope">
-        {#each [['all', 'All'], ['localDevice', 'Device'], ['account', 'Accounts']] as option (option[0])}
-          <button
-            class:active={viewMode === option[0]}
-            type="button"
-            aria-pressed={viewMode === option[0]}
-            onclick={() => onViewModeChange(option[0] as UsageViewMode)}>{option[1]}</button
-          >
-        {/each}
-      </div>
+      <SelectMenu
+        label="Usage Scope"
+        value={viewMode}
+        variant="title"
+        options={[
+          { value: 'all', label: 'All' },
+          { value: 'localDevice', label: 'Device' },
+          { value: 'account', label: 'Accounts' },
+        ]}
+        onChange={(value) => onViewModeChange(value as UsageViewMode)}
+      />
     </div>
   </div>
   <div class="total-card">
@@ -430,46 +431,6 @@
       gap: 4px;
     }
 
-    .spend-scope-switcher {
-      display: grid;
-      width: 144px;
-      height: 22px;
-      flex: 0 0 144px;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr);
-      gap: 1px;
-      padding: 2px;
-      border-radius: 6px;
-      background: var(--meter-track);
-    }
-
-    .spend-scope-switcher button {
-      min-width: 0;
-      padding: 0 4px;
-      overflow: hidden;
-      border: 0;
-      border-radius: 4px;
-      color: var(--secondary);
-      background: transparent;
-      font-size: 9px;
-      font-weight: 500;
-      line-height: 18px;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      cursor: pointer;
-    }
-
-    .spend-scope-switcher button.active {
-      color: var(--text);
-      background: var(--control);
-      box-shadow: var(--control-shadow);
-      font-weight: 600;
-    }
-
-    .spend-scope-switcher button:focus-visible {
-      outline: 2px solid color-mix(in srgb, var(--meter-fill) 55%, transparent);
-      outline-offset: 1px;
-    }
-
     .total-card__scope-label {
       max-width: 84px;
       overflow: hidden;
@@ -514,6 +475,20 @@
 
     .select-menu.select-menu--title:hover .select-menu__stepper {
       background: transparent;
+    }
+
+    /* The scope pull-down reads as a quieter companion to the metric title. */
+    .total-card__actions .select-menu.select-menu--title {
+      font-size: 11px;
+    }
+
+    .total-card__actions .select-menu--title .select-menu__trigger {
+      color: var(--secondary);
+      font-weight: 500;
+    }
+
+    .total-card__actions .select-menu.select-menu--title:hover .select-menu__trigger {
+      color: var(--meter-fill);
     }
 
     .total-card__header .icon-button--plain {

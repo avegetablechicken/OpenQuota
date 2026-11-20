@@ -71,6 +71,12 @@ async function openOptions() {
   await fireEvent.contextMenu(page, { clientX: 120, clientY: 160 });
 }
 
+// The usage scope is a pull-down in the Total Spend header.
+async function chooseUsageScope(scope: string) {
+  await fireEvent.click(screen.getByRole('button', { name: 'Usage Scope' }));
+  await chooseMenuItem(scope);
+}
+
 describe('OpenQuota dashboard', () => {
   beforeEach(() => {
     mocks.currentMonitor.mockResolvedValue({
@@ -355,10 +361,10 @@ describe('OpenQuota dashboard', () => {
     render(App);
     expect(await screen.findByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    await chooseUsageScope('Accounts');
     expect(screen.queryByRole('group', { name: 'Codex provider' })).not.toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Device' }));
+    await chooseUsageScope('Device');
     expect(screen.getByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
   });
 
@@ -473,7 +479,7 @@ describe('OpenQuota dashboard', () => {
       ),
     ).toEqual(['Device', 'Yesterday', 'Last 30 Days', 'Account', 'Yesterday', 'Last 30 Days']);
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    await chooseUsageScope('Accounts');
     expect(provider).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Session used' })).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
@@ -481,7 +487,7 @@ describe('OpenQuota dashboard', () => {
     expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
     expect(within(provider).getByText('Today')).toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Device' }));
+    await chooseUsageScope('Device');
     expect(provider).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
     expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
@@ -690,11 +696,11 @@ describe('OpenQuota dashboard', () => {
       }),
     ).toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Device' }));
+    await chooseUsageScope('Device');
     expect(screen.getByRole('group', { name: 'Claude provider' })).toBeInTheDocument();
     expect(screen.queryByRole('group', { name: 'Antigravity provider' })).not.toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    await chooseUsageScope('Accounts');
     expect(screen.queryByRole('group', { name: 'Claude provider' })).not.toBeInTheDocument();
     expect(screen.queryByRole('group', { name: 'Antigravity provider' })).not.toBeInTheDocument();
   });

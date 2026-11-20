@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TotalSpend from './TotalSpend.svelte';
+import { chooseMenuItem, menuLabels } from '../test/nativeMenu';
 import { ProviderCatalogIndex } from './metrics';
 import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
 import type { AppSettings, ProviderCatalog, UsageHistory, UsageScope } from './types';
@@ -229,18 +230,18 @@ describe('TotalSpend Sub2API labels', () => {
     };
     const view = render(TotalSpend, props);
 
-    expect(screen.getByRole('button', { name: 'Device' })).toHaveAttribute('aria-pressed', 'true');
+    const scope = screen.getByRole('button', { name: 'Usage Scope' });
+    expect(scope).toHaveTextContent('Device');
     expect(screen.getByText('Codex')).toBeInTheDocument();
     expect(screen.queryByText('Sub2API')).not.toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
+    await fireEvent.click(scope);
+    expect(menuLabels()).toEqual(['All', '✓ Device', 'Accounts']);
+    await chooseMenuItem('Accounts');
     expect(onViewModeChange).toHaveBeenCalledWith('account');
     await view.rerender({ ...props, viewMode: 'account' });
 
-    expect(screen.getByRole('button', { name: 'Accounts' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    expect(screen.getByRole('button', { name: 'Usage Scope' })).toHaveTextContent('Accounts');
     expect(screen.getByText('Sub2API')).toBeInTheDocument();
     expect(screen.queryByText('Codex')).not.toBeInTheDocument();
     expect(
