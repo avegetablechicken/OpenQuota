@@ -1395,6 +1395,7 @@
     }
 
     .screen-stage {
+      position: relative;
       display: grid;
       width: 100%;
       min-width: 0;
@@ -1410,6 +1411,13 @@
       grid-area: 1 / 1;
       align-self: start;
       transform-origin: 50% 45%;
+    }
+
+    /* Svelte marks the outgoing page inert during its slide. Only the incoming
+       page should determine how far the content can scroll. */
+    .screen-page[inert] {
+      position: absolute;
+      inset: 0 0 auto;
     }
 
     .screen-header {

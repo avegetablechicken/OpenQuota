@@ -102,7 +102,6 @@ describe('hybrid window controller', () => {
 
     await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(370));
     expect(mocks.getCurrentWindow).not.toHaveBeenCalled();
-    expect(document.querySelector<HTMLElement>('.screen-stage')).toHaveStyle({ height: '300px' });
     controller.dispose();
   });
 
@@ -129,9 +128,7 @@ describe('hybrid window controller', () => {
     const page = document.querySelector<HTMLElement>('.screen-page')!;
     page.getBoundingClientRect = () => new DOMRect(0, 0, 292, 500);
     controller.setVisible(true);
-    await waitFor(() =>
-      expect(document.querySelector('.screen-stage')).toHaveStyle({ height: '500px' }),
-    );
+    await waitFor(() => expect(mocks.currentMonitor).toHaveBeenCalledTimes(2));
     controller.scheduleFit();
     failPreviousResize();
     await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(570));
@@ -139,7 +136,7 @@ describe('hybrid window controller', () => {
     controller.dispose();
   });
 
-  it('keeps measuring layout without resizing while the user owns the height', async () => {
+  it('leaves the native height alone while the user owns it', async () => {
     const controller = createWindowController({
       screen: () => 'dashboard',
       refreshing: () => false,
@@ -151,10 +148,34 @@ describe('hybrid window controller', () => {
 
     controller.scheduleFit();
 
-    await waitFor(() =>
-      expect(document.querySelector<HTMLElement>('.screen-stage')).toHaveStyle({ height: '300px' }),
-    );
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     expect(mocks.fitPanelToContent).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it('leaves the scroll area content-sized when returning from Customize during refresh', async () => {
+    let screen: 'customize' | 'dashboard' = 'customize';
+    const page = document.querySelector<HTMLElement>('.screen-page')!;
+    const stage = document.querySelector<HTMLElement>('.screen-stage')!;
+    page.dataset.screen = screen;
+    const controller = createWindowController({
+      screen: () => screen,
+      refreshing: () => true,
+      reordering: () => false,
+      automatic: () => true,
+      reducedMotion: () => true,
+      onError: vi.fn(),
+    });
+    controller.scheduleFit();
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(370));
+
+    screen = 'dashboard';
+    page.dataset.screen = screen;
+    page.getBoundingClientRect = () => new DOMRect(0, 0, 292, 1000);
+    controller.scheduleFit();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(stage.style.height).toBe('');
+    expect(mocks.fitPanelToContent).toHaveBeenCalledTimes(1);
     controller.dispose();
   });
 

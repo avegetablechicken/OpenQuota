@@ -78,23 +78,22 @@ export function createWindowController(options: WindowControllerOptions) {
     if (visible === false || shouldDefer()) return;
     const generation = ++resizeGeneration;
     const screen = options.screen();
-    const page = document.querySelector<HTMLElement>(`.screen-page[data-screen="${screen}"]`);
+    const page = document.querySelector<HTMLElement>(
+      `.screen-page[data-screen="${screen}"]:not([inert])`,
+    );
     const content = document.querySelector<HTMLElement>('.content');
-    const stage = document.querySelector<HTMLElement>('.screen-stage');
     const header = document.querySelector<HTMLElement>('.screen-header');
     const dragger = document.querySelector<HTMLElement>('.panel-resize-dragger');
     const floatingChrome = document.querySelector<HTMLElement>('.floating-chrome');
-    if (!page || !content || !stage) return;
-
-    const renderedHeight = page.getBoundingClientRect().height;
-    const pageHeight = renderedHeight > 0 ? renderedHeight : page.offsetHeight || page.scrollHeight;
-    stage.style.height = `${pageHeight}px`;
+    if (!page || !content) return;
 
     if (!options.automatic() || !('__TAURI_INTERNALS__' in window) || !resizeAvailable) {
       initialFit = false;
       return;
     }
 
+    const renderedHeight = page.getBoundingClientRect().height;
+    const pageHeight = renderedHeight > 0 ? renderedHeight : page.offsetHeight || page.scrollHeight;
     const contentStyle = window.getComputedStyle(content);
     const contentPadding =
       cssPixels(contentStyle.paddingTop) + cssPixels(contentStyle.paddingBottom);
