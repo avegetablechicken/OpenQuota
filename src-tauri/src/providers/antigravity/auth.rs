@@ -4,13 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use crate::providers::credential_store::{decode_go_keyring_value, read_generic_password};
+use crate::providers::credential_store::{
+    decode_go_keyring_value, read_generic_password, write_generic_password,
+};
 
 use super::AntigravityError;
 
@@ -18,6 +21,19 @@ const ACCESS_TOKEN_CACHE_VERSION: u8 = 1;
 const ACCESS_TOKEN_CACHE_LIMIT: u64 = 64 * 1024;
 const ACCESS_TOKEN_EXPIRY_BUFFER_MILLIS: i64 = 60_000;
 const DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS: f64 = 3_600.0;
+const GO_KEYRING_PREFIX: &str = "go-keyring-base64:";
+const ACCESS_TOKEN_KEYS: [&str; 8] = [
+    "access_token",
+    "accessToken",
+    "token",
+    "id_token",
+    "idToken",
+    "bearerToken",
+    "auth_token",
+    "authToken",
+];
+const REFRESH_TOKEN_KEYS: [&str; 2] = ["refresh_token", "refreshToken"];
+const EXPIRY_KEYS: [&str; 3] = ["expiry", "expires_at", "expiresAt"];
 
 #[derive(Debug, Clone)]
 pub struct AntigravityToken {
@@ -122,8 +138,28 @@ impl AccessTokenCache {
     }
 }
 
-pub fn load_token() -> Result<Option<AntigravityToken>, AntigravityError> {
-    let Some(raw) = read_generic_password("gemini", "antigravity")
+/// The login Antigravity and `agy` share; tests substitute an in-memory one.
+pub trait SharedLogin: Send + Sync {
+    fn read(&self) -> Result<Option<Vec<u8>>, String>;
+    fn write(&self, value: &[u8]) -> Result<(), String>;
+}
+
+/// The generic password `gemini`/`antigravity` in the system credential store.
+pub struct SystemLogin;
+
+impl SharedLogin for SystemLogin {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        read_generic_password("gemini", "antigravity")
+    }
+
+    fn write(&self, value: &[u8]) -> Result<(), String> {
+        write_generic_password("gemini", "antigravity", value)
+    }
+}
+
+pub fn load_token(login: &dyn SharedLogin) -> Result<Option<AntigravityToken>, AntigravityError> {
+    let Some(raw) = login
+        .read()
         .map_err(|_| AntigravityError::CredentialStoreUnreadable)?
     else {
         return Ok(None);
@@ -133,8 +169,120 @@ pub fn load_token() -> Result<Option<AntigravityToken>, AntigravityError> {
         .ok_or(AntigravityError::InvalidCredentialData)
 }
 
-pub fn has_local_credentials() -> bool {
-    credential_state_is_actionable(load_token())
+pub fn has_local_credentials(login: &dyn SharedLogin) -> bool {
+    credential_state_is_actionable(load_token(login))
+}
+
+/// Saves an access token renewed from `refresh_token` to the shared login, so Antigravity, `agy`
+/// and other programs reading it present the same token. The login is reread first and left
+/// alone once it holds another refresh token (a different sign-in) or a token that outlives this
+/// one. Only the access token, its expiry and `expires_in` change, in the login's own key names
+/// and formats; the `go-keyring-base64:` wrapper and every other member stay as they are.
+/// Failures are logged only: the private cache still holds the renewal.
+pub fn write_back_renewal(
+    login: &dyn SharedLogin,
+    refresh_token: &str,
+    access_token: &str,
+    expires_in_seconds: f64,
+    now: DateTime<Utc>,
+) {
+    let raw = match login.read() {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
+        Err(_) => {
+            crate::app_warn!(
+                "auth:antigravity",
+                "shared login could not be reread; renewed token kept in the private cache"
+            );
+            return;
+        }
+    };
+    let lifetime = if expires_in_seconds.is_finite() && expires_in_seconds > 0.0 {
+        expires_in_seconds
+    } else {
+        DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS
+    };
+    let expires_at =
+        now + chrono::Duration::milliseconds((lifetime * 1_000.0).min(i64::MAX as f64) as i64);
+    let Some(updated) = renewed_login(&raw, refresh_token, access_token, lifetime, expires_at)
+    else {
+        crate::app_debug!(
+            "auth:antigravity",
+            "shared login holds another sign-in or a newer token; left unchanged"
+        );
+        return;
+    };
+    match login.write(&updated) {
+        Ok(()) => crate::app_info!(
+            "auth:antigravity",
+            "renewed token saved to the shared login"
+        ),
+        Err(_) => crate::app_warn!(
+            "auth:antigravity",
+            "renewed token could not be saved to the shared login; kept in the private cache"
+        ),
+    }
+}
+
+/// The shared login `raw` with the renewal applied, or `None` when it must be left alone.
+fn renewed_login(
+    raw: &[u8],
+    refresh_token: &str,
+    access_token: &str,
+    lifetime_seconds: f64,
+    expires_at: DateTime<Utc>,
+) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(raw)
+        .ok()?
+        .trim()
+        .trim_start_matches('\u{feff}')
+        .trim();
+    let wrapped = text.starts_with(GO_KEYRING_PREFIX);
+    let decoded = if wrapped {
+        decode_go_keyring_value(text.as_bytes())?
+    } else {
+        text.to_owned()
+    };
+    let mut document =
+        serde_json::from_str::<Value>(decoded.trim().trim_start_matches('\u{feff}').trim()).ok()?;
+    let pointer = token_pointer(&document)?;
+    let source = document.pointer_mut(&pointer)?.as_object_mut()?;
+    if credential_fingerprint(first_string(source, &REFRESH_TOKEN_KEYS).as_deref())?
+        != credential_fingerprint(Some(refresh_token))?
+    {
+        return None;
+    }
+    let access_key = ["access_token", "accessToken"]
+        .into_iter()
+        .find(|key| source.get(*key).is_some_and(Value::is_string))?;
+    if let Some(expiry_key) = EXPIRY_KEYS
+        .into_iter()
+        .find(|key| source.contains_key(*key))
+    {
+        let saved = source.get(expiry_key)?.as_str()?;
+        let saved_expiry = DateTime::parse_from_rfc3339(saved.trim()).ok()?;
+        if saved_expiry.to_utc() > expires_at {
+            return None;
+        }
+        let uses_z = saved.trim_end().ends_with(['Z', 'z']);
+        let expiry = expires_at
+            .with_timezone(saved_expiry.offset())
+            .to_rfc3339_opts(SecondsFormat::AutoSi, uses_z);
+        source.insert(expiry_key.into(), expiry.into());
+    }
+    if source.get("expires_in").is_some_and(Value::is_number) {
+        source.insert(
+            "expires_in".into(),
+            (lifetime_seconds.round() as i64).into(),
+        );
+    }
+    source.insert(access_key.into(), access_token.into());
+    let json = serde_json::to_string(&document).ok()?;
+    Some(if wrapped {
+        format!("{GO_KEYRING_PREFIX}{}", STANDARD.encode(json)).into_bytes()
+    } else {
+        json.into_bytes()
+    })
 }
 
 fn credential_state_is_actionable(
@@ -156,7 +304,7 @@ pub fn extract_token(raw: &[u8]) -> Option<AntigravityToken> {
         .trim()
         .trim_start_matches('\u{feff}')
         .trim();
-    let unwrapped = if encoded.starts_with("go-keyring-base64:") {
+    let unwrapped = if encoded.starts_with(GO_KEYRING_PREFIX) {
         decode_go_keyring_value(encoded.as_bytes())?
     } else {
         encoded.to_owned()
@@ -188,44 +336,38 @@ pub fn extract_token(raw: &[u8]) -> Option<AntigravityToken> {
 }
 
 fn token_from_value(value: &Value) -> Option<AntigravityToken> {
-    let object = value.as_object()?;
-    let source = object
-        .get("token")
-        .and_then(Value::as_object)
-        .unwrap_or(object);
-    let access_token = first_string(
-        source,
-        &[
-            "access_token",
-            "accessToken",
-            "token",
-            "id_token",
-            "idToken",
-            "bearerToken",
-            "auth_token",
-            "authToken",
-        ],
-    );
-    let refresh_token = first_string(source, &["refresh_token", "refreshToken"]);
-    if access_token.is_none() && refresh_token.is_none() {
-        for key in ["tokens", "oauth", "oauth2", "credentials", "auth"] {
-            if let Some(token) = object.get(key).and_then(token_from_value) {
-                return Some(token);
-            }
-        }
-        return None;
-    }
-    let expiry = first_string(source, &["expiry", "expires_at", "expiresAt"])
+    let source = value.pointer(&token_pointer(value)?)?.as_object()?;
+    let expiry = first_string(source, &EXPIRY_KEYS)
         .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
         .map(|value| value.to_utc());
     Some(AntigravityToken {
-        access_token,
-        refresh_token,
+        access_token: first_string(source, &ACCESS_TOKEN_KEYS),
+        refresh_token: first_string(source, &REFRESH_TOKEN_KEYS),
         expiry,
     })
 }
 
-fn first_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+/// Where in a login document its tokens are kept, as a JSON pointer.
+fn token_pointer(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    let (pointer, source) = match object.get("token").and_then(Value::as_object) {
+        Some(token) => ("/token", token),
+        None => ("", object),
+    };
+    if first_string(source, &ACCESS_TOKEN_KEYS).is_some()
+        || first_string(source, &REFRESH_TOKEN_KEYS).is_some()
+    {
+        return Some(pointer.into());
+    }
+    ["tokens", "oauth", "oauth2", "credentials", "auth"]
+        .into_iter()
+        .find_map(|key| {
+            let inner = token_pointer(object.get(key)?)?;
+            Some(format!("/{key}{inner}"))
+        })
+}
+
+fn first_string(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(Value::as_str).and_then(non_empty))
         .map(str::to_owned)
@@ -288,10 +430,38 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        credential_fingerprint, credential_state_is_actionable, extract_token, AccessTokenCache,
-        AntigravityToken,
+        credential_fingerprint, credential_state_is_actionable, extract_token, renewed_login,
+        AccessTokenCache, AntigravityToken,
     };
     use crate::providers::antigravity::AntigravityError;
+
+    #[test]
+    fn renewal_keeps_an_unwrapped_login_and_its_own_key_names() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        let login = br#"{"accessToken":"old","refreshToken":"refresh","expiresAt":"2026-07-18T11:00:00Z","account":{"email":"user@example.com"}}"#;
+
+        let renewed = renewed_login(
+            login,
+            "refresh",
+            "renewed",
+            3_600.0,
+            now + chrono::Duration::hours(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&renewed).unwrap(),
+            serde_json::json!({
+                "accessToken": "renewed",
+                "refreshToken": "refresh",
+                "expiresAt": "2026-07-18T13:00:00Z",
+                "account": {"email": "user@example.com"}
+            })
+        );
+        let unreadable_expiry =
+            br#"{"access_token":"old","refresh_token":"refresh","expiry":1784372400}"#;
+        assert!(renewed_login(unreadable_expiry, "refresh", "renewed", 3_600.0, now).is_none());
+    }
 
     #[test]
     fn extracts_nested_go_keyring_token() {

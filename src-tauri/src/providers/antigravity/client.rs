@@ -92,7 +92,7 @@ impl AntigravityClient {
         )
     }
 
-    fn with_endpoints(
+    pub(super) fn with_endpoints(
         cloud_bases: Vec<String>,
         google_token_url: String,
         remote_timeout: std::time::Duration,

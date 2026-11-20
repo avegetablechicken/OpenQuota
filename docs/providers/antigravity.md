@@ -19,6 +19,11 @@ Sign in through Antigravity or run `agy`. OpenQuota reuses Antigravity's locally
 and can also discover a compatible running Antigravity language server. No API key needs to be added
 to OpenQuota.
 
+When the stored access token is rejected, OpenQuota first rereads the shared sign-in in case
+Antigravity or `agy` renewed it. Access tokens OpenQuota renews itself are saved back to the shared
+sign-in when possible, unless it now holds a different account or a newer token, and are also kept
+in OpenQuota's own data folder.
+
 ## Troubleshooting
 
 - **Not signed in** — open Antigravity or run `agy`, complete sign-in, then refresh OpenQuota.
