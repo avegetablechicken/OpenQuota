@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use crate::pricing::{ModelPricing, TokenBreakdown};
+use crate::pricing::{ModelPricing, ServiceTier, TokenBreakdown};
 
 pub(crate) const GO_PROVIDER_ID: &str = "opencode-go";
 pub(super) const EPOCH_MILLISECONDS_THRESHOLD: i64 = 100_000_000_000;
@@ -57,16 +57,25 @@ impl ParsedMessage {
 
         let (cost, cost_provenance, incomplete_cost) = match self.cost {
             StoredCost::Exact(cost) => (Some(cost), CostProvenance::Exact, false),
-            StoredCost::Invalid | StoredCost::Missing if !parts.is_empty() => {
-                cost_from_parts(parts, &self.provider_id, &self.model, pricing)
-            }
+            StoredCost::Invalid | StoredCost::Missing if !parts.is_empty() => cost_from_parts(
+                parts,
+                self.timestamp,
+                &self.provider_id,
+                &self.model,
+                pricing,
+            ),
             StoredCost::Invalid => (None, CostProvenance::Exact, tokens.total > 0),
-            StoredCost::Missing => {
-                estimate_cost(pricing, &self.provider_id, &self.model, tokens.breakdown).map_or(
-                    (None, CostProvenance::Estimated, tokens.total > 0),
-                    |cost| (Some(cost), CostProvenance::Estimated, false),
-                )
-            }
+            StoredCost::Missing => estimate_cost(
+                pricing,
+                self.timestamp,
+                &self.provider_id,
+                &self.model,
+                tokens.breakdown,
+            )
+            .map_or(
+                (None, CostProvenance::Estimated, tokens.total > 0),
+                |cost| (Some(cost), CostProvenance::Estimated, false),
+            ),
         };
 
         UsageRecord {
@@ -100,6 +109,10 @@ impl ParsedTokens {
                     .breakdown
                     .cache_write_1h
                     .saturating_add(other.breakdown.cache_write_1h),
+                cache_write_12h: self
+                    .breakdown
+                    .cache_write_12h
+                    .saturating_add(other.breakdown.cache_write_12h),
                 cache_read: self
                     .breakdown
                     .cache_read
@@ -206,6 +219,7 @@ pub(super) fn timestamp_from_number(value: i64) -> Option<DateTime<Utc>> {
 
 fn cost_from_parts(
     parts: &[ParsedPart],
+    timestamp: DateTime<Utc>,
     provider_id: &str,
     model: &str,
     pricing: &ModelPricing,
@@ -222,7 +236,7 @@ fn cost_from_parts(
             }
             StoredCost::Missing => {
                 let estimate = part.tokens.and_then(|tokens| {
-                    estimate_cost(pricing, provider_id, model, tokens.breakdown)
+                    estimate_cost(pricing, timestamp, provider_id, model, tokens.breakdown)
                 });
                 if let Some(cost) = estimate {
                     total += cost;
@@ -248,6 +262,7 @@ fn cost_from_parts(
 
 fn estimate_cost(
     pricing: &ModelPricing,
+    timestamp: DateTime<Utc>,
     provider_id: &str,
     model: &str,
     tokens: TokenBreakdown,
@@ -255,10 +270,23 @@ fn estimate_cost(
     if tokens.total_tokens() == 0 || model == "Unattributed" {
         return None;
     }
-    pricing
-        .estimated_cost_dollars(model, tokens, true)
-        .or_else(|| pricing.estimated_cost_dollars(&format!("{provider_id}/{model}"), tokens, true))
-        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+    let provider = usage_card(provider_id)?;
+    let cost = if let Some(rates) = pricing.historical_rates(
+        provider,
+        model,
+        timestamp,
+        ServiceTier::Standard,
+        tokens.prompt_tokens(),
+    ) {
+        rates?.cost_dollars(tokens, true)
+    } else {
+        pricing
+            .estimated_cost_dollars(model, tokens, true)
+            .or_else(|| {
+                pricing.estimated_cost_dollars(&format!("{provider_id}/{model}"), tokens, true)
+            })?
+    };
+    Some(cost).filter(|cost| cost.is_finite() && *cost >= 0.0)
 }
 
 fn model_id(value: &Value) -> Option<String> {

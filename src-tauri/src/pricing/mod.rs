@@ -1,11 +1,13 @@
 mod catalog;
 mod codecs;
+mod history;
 mod model_pricing;
 mod rates;
 mod store;
 mod supplement;
 
 pub use catalog::PricingCatalog;
+pub(crate) use history::ServiceTier;
 pub use model_pricing::ModelPricing;
 pub use rates::{ModelRates, TokenBreakdown};
 pub use store::PricingStore;

@@ -20,7 +20,7 @@ use super::{
     model_scope::model_belongs_to_card,
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 4;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 5;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum PiUsageSource {
@@ -66,6 +66,7 @@ struct PiUsageEvent {
     id: Option<String>,
     timestamp: DateTime<Utc>,
     card_id: String,
+    provider: String,
     model: String,
     carried_cost: Option<f64>,
     tokens: PiTokenBreakdown,
@@ -90,7 +91,7 @@ impl PiTokenBreakdown {
             cache_write_1h: self.cache_write_1h,
             cache_read: self.cache_read,
             output: self.output,
-            is_fast: false,
+            ..TokenBreakdown::default()
         }
     }
 }
@@ -240,6 +241,7 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
         id: object.get("id").and_then(Value::as_str).map(str::to_owned),
         timestamp,
         card_id: card_id.to_owned(),
+        provider: provider.to_owned(),
         model,
         carried_cost,
         tokens: PiTokenBreakdown {
@@ -303,6 +305,12 @@ fn aggregate_into(
             continue;
         }
         let model = event.model.trim();
+        let billing_provider = match event.provider.as_str() {
+            "openai" | "openai-codex" => "codex",
+            "anthropic" | "claude-agent-sdk" => "claude",
+            "zhipu" => "zai",
+            other => other,
+        };
         let display_model = if model.is_empty() {
             "Unattributed"
         } else {
@@ -310,8 +318,13 @@ fn aggregate_into(
         };
         if !model_belongs_to_card(card_id, model) {
             let carried_cost = event.carried_cost.filter(|cost| *cost > 0.0);
-            let estimated_cost =
-                pricing.estimated_cost_dollars(model, event.tokens.pricing_tokens(), true);
+            let estimated_cost = pricing.estimated_cost_at(
+                billing_provider,
+                model,
+                event.timestamp,
+                event.tokens.pricing_tokens(),
+                true,
+            );
             accumulator.add_other(
                 date,
                 event.reported_total_tokens,
@@ -325,9 +338,13 @@ fn aggregate_into(
             accumulator.add_exact(date, event.reported_total_tokens, cost, display_model);
             mark_source(&mut contributed, event.source);
         } else if !model.is_empty() {
-            if let Some(cost) =
-                pricing.estimated_cost_dollars(model, event.tokens.pricing_tokens(), true)
-            {
+            if let Some(cost) = pricing.estimated_cost_at(
+                billing_provider,
+                model,
+                event.timestamp,
+                event.tokens.pricing_tokens(),
+                true,
+            ) {
                 accumulator.add(date, event.reported_total_tokens, cost, model);
                 mark_source(&mut contributed, event.source);
             } else if event.reported_total_tokens > 0 {
@@ -518,6 +535,7 @@ mod tests {
             id: Some("mlx".into()),
             timestamp: now(),
             card_id: "codex".into(),
+            provider: "openai".into(),
             model: "qwen3.8:27b - mlx".into(),
             carried_cost: Some(0.0),
             tokens: PiTokenBreakdown {

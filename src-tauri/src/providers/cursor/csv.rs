@@ -9,6 +9,7 @@ pub struct CursorCsvRow {
     pub date: DateTime<Utc>,
     pub model: String,
     pub tokens: TokenBreakdown,
+    pub reported_cost_usd: Option<f64>,
     pub estimated_cost_usd: Option<f64>,
 }
 
@@ -29,11 +30,26 @@ pub fn parse_usage_csv(csv: &str, pricing: &ModelPricing) -> Vec<CursorCsvRow> {
                 output: parse_integer(record.get("Output Tokens")),
                 ..TokenBreakdown::default()
             };
-            let estimated_cost_usd = pricing.estimated_cost_dollars(&model, tokens, false);
+            let reported_cost_usd = record.get("Cost").and_then(|raw| {
+                let value = raw.trim();
+                value
+                    .strip_prefix('$')
+                    .unwrap_or(value)
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|usd| usd.is_finite() && *usd >= 0.0)
+            });
+            let estimated_cost_usd = if reported_cost_usd.is_none() {
+                pricing.estimated_cost_at("cursor", &model, date, tokens, false)
+            } else {
+                None
+            };
             Some(CursorCsvRow {
                 date,
                 model,
                 tokens,
+                reported_cost_usd,
                 estimated_cost_usd,
             })
         })
@@ -167,6 +183,15 @@ mod tests {
         for (row, expected) in rows.iter().zip([30.0, 18.0, 16.0]) {
             assert_eq!(row.estimated_cost_usd, Some(expected), "{}", row.model);
         }
+    }
+
+    #[test]
+    fn numeric_export_cost_including_zero_takes_precedence() {
+        let csv = "Date,Model,Cost,Output Tokens\n2026-11-01T00:00:00Z,unknown,$0.00,123\n2026-11-02T00:00:00Z,composer-1,Included,1000000";
+        let rows = parse_usage_csv(csv, &pricing());
+        assert_eq!(rows[0].reported_cost_usd, Some(0.0));
+        assert_eq!(rows[1].reported_cost_usd, None);
+        assert_eq!(rows[1].estimated_cost_usd, Some(10.0));
     }
 
     #[test]

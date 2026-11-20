@@ -9,6 +9,7 @@ pub struct ModelRates {
     pub cache_write_above_200k_per_million: Option<f64>,
     pub cache_read_above_200k_per_million: Option<f64>,
     pub cache_read_is_explicit: bool,
+    pub one_hour_write_multiplier: f64,
     pub long_context_threshold_tokens: u64,
     pub fast_multiplier: f64,
 }
@@ -25,6 +26,7 @@ impl ModelRates {
             cache_write_above_200k_per_million: None,
             cache_read_above_200k_per_million: None,
             cache_read_is_explicit: true,
+            one_hour_write_multiplier: 2.0,
             long_context_threshold_tokens: 200_000,
             fast_multiplier: 1.0,
         }
@@ -49,6 +51,7 @@ impl ModelRates {
                 .cache_read_above_200k_per_million
                 .map(|rate| rate * factor),
             cache_read_is_explicit: self.cache_read_is_explicit,
+            one_hour_write_multiplier: self.one_hour_write_multiplier,
             long_context_threshold_tokens: self.long_context_threshold_tokens,
             fast_multiplier: 1.0,
         }
@@ -74,11 +77,12 @@ impl ModelRates {
             self.cache_read_per_million,
             self.cache_read_above_200k_per_million,
         );
-        let cache_write_1h_rate = input_rate * 2.0;
+        let cache_write_1h_rate = input_rate * self.one_hour_write_multiplier;
         let cost = tokens.input as f64 * input_rate
             + tokens.output as f64 * output_rate
             + tokens.cache_write_5m as f64 * cache_write_rate
             + tokens.cache_write_1h as f64 * cache_write_1h_rate
+            + tokens.cache_write_12h as f64 * input_rate * 2.5
             + tokens.cache_read as f64 * cache_read_rate;
         cost / 1_000_000.0
             * if tokens.is_fast {
@@ -94,6 +98,7 @@ pub struct TokenBreakdown {
     pub input: u64,
     pub cache_write_5m: u64,
     pub cache_write_1h: u64,
+    pub cache_write_12h: u64,
     pub cache_read: u64,
     pub output: u64,
     pub is_fast: bool,
@@ -104,6 +109,7 @@ impl TokenBreakdown {
         self.input
             .saturating_add(self.cache_write_5m)
             .saturating_add(self.cache_write_1h)
+            .saturating_add(self.cache_write_12h)
             .saturating_add(self.cache_read)
     }
 
@@ -125,6 +131,7 @@ mod tests {
             input: 1_000_000,
             cache_write_5m: 1_000_000,
             cache_write_1h: 1_000_000,
+            cache_write_12h: 0,
             cache_read: 1_000_000,
             output: 1_000_000,
             is_fast: false,

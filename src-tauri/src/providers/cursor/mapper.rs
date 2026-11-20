@@ -500,14 +500,18 @@ pub fn usage_history(
     for row in rows {
         let date = row.date.with_timezone(&chrono::Local).date_naive();
         let tokens = row.tokens.total_tokens();
-        match row.estimated_cost_usd {
+        match row.reported_cost_usd.or(row.estimated_cost_usd) {
             Some(cost) => {
                 let family = if row.model.trim().is_empty() {
                     "Unattributed".to_owned()
                 } else {
                     pricing.display_family(row.model.trim())
                 };
-                accumulator.add_variant(date, tokens, cost, &family, row.model.trim());
+                if row.reported_cost_usd.is_some() {
+                    accumulator.add_exact_variant(date, tokens, cost, &family, row.model.trim());
+                } else {
+                    accumulator.add_variant(date, tokens, cost, &family, row.model.trim());
+                }
             }
             None if tokens > 0 => accumulator.add_unknown_model(date, &row.model),
             None => {}
@@ -849,6 +853,7 @@ mod tests {
                     input: 300,
                     ..TokenBreakdown::default()
                 },
+                reported_cost_usd: None,
                 estimated_cost_usd: Some(3.004),
             },
             CursorCsvRow {
@@ -858,6 +863,7 @@ mod tests {
                     input: 100,
                     ..TokenBreakdown::default()
                 },
+                reported_cost_usd: None,
                 estimated_cost_usd: Some(1.006),
             },
             CursorCsvRow {
@@ -867,6 +873,7 @@ mod tests {
                     input: 50,
                     ..TokenBreakdown::default()
                 },
+                reported_cost_usd: None,
                 estimated_cost_usd: None,
             },
         ];

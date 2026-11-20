@@ -14,6 +14,8 @@ OpenQuota tracks Codex subscription limits and usage recorded by the Codex CLI.
 | Today / Yesterday / Last 30 Days | Tokens, model usage, and estimated spend from local logs     |
 | Usage Trend                      | Recent local usage over time                                 |
 
+See [historical API rates and cost calculations](../pricing-history.md) for dated prices, cache charges, and coverage.
+
 ## Sign-in and local data
 
 Sign in with the Codex CLI by running `codex` and choosing your ChatGPT account. OpenQuota reads the

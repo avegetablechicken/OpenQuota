@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Mutex};
 
-use super::{ModelRates, PricingCatalog, PricingSupplement, TokenBreakdown};
+use super::{ModelRates, PricingCatalog, PricingSupplement, ServiceTier, TokenBreakdown};
 
 pub struct ModelPricing {
     pub supplement: PricingSupplement,
@@ -43,6 +43,108 @@ impl ModelPricing {
             memo.insert(model.to_owned(), resolved);
         }
         resolved
+    }
+
+    /// An empty match for a tracked model means its price is unknown on this date.
+    /// An untracked model can still be estimated from the ordinary catalog.
+    pub(crate) fn historical_rates(
+        &self,
+        provider: &str,
+        model: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        tier: ServiceTier,
+        prompt: u64,
+    ) -> Option<Option<ModelRates>> {
+        let normalized = model.trim().to_ascii_lowercase();
+        // Foreign models in native logs use upstream API-equivalent pricing. A reseller export
+        // keeps its own provider scope.
+        let provider = match provider {
+            "codex" | "claude" if normalized.starts_with("deepseek-") => "deepseek",
+            _ => provider,
+        };
+        let models = self.supplement.history.get(provider)?;
+        let name = match (provider, normalized.split_once('/')) {
+            ("codex", Some(("openai" | "openai-codex", id)))
+            | ("claude", Some(("anthropic", id)))
+            | ("grok", Some(("xai", id))) => id,
+            _ => &normalized,
+        };
+        let lookup = |candidate: &str| {
+            if let Some(rows) = models.get(candidate) {
+                return Some((rows, false));
+            }
+            let (base, suffix_fast) = candidate
+                .strip_suffix("-fast")
+                .map_or((candidate, false), |base| (base, true));
+            let base = base
+                .rsplit_once('-')
+                .filter(|(_, effort)| {
+                    matches!(
+                        *effort,
+                        "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+                    )
+                })
+                .map_or(base, |(model, _)| model);
+            let base = base.strip_suffix("-thinking").unwrap_or(base);
+            let base = base.strip_suffix("[1m]").unwrap_or(base);
+            models
+                .get(super::history::strip_snapshot(base))
+                .map(|rows| (rows, suffix_fast))
+        };
+        let (rows, suffix_fast) =
+            lookup(name).or_else(|| self.supplement.canonical_name(name).and_then(lookup))?;
+        let tier = if suffix_fast && tier == ServiceTier::Standard {
+            ServiceTier::Fast
+        } else {
+            tier
+        };
+        Some(super::history::active(rows, at).and_then(|row| row.rates(tier, prompt, at)))
+    }
+
+    /// Prices a metered upstream request, including an explicitly reported speed tier.
+    pub(crate) fn upstream_cost_at(
+        &self,
+        provider: &str,
+        model: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        tokens: TokenBreakdown,
+        tier: ServiceTier,
+    ) -> Option<f64> {
+        let rates = match self.historical_rates(provider, model, at, tier, tokens.prompt_tokens()) {
+            Some(rates) => rates?,
+            None => match tier {
+                ServiceTier::Standard => self.resolve(model)?,
+                ServiceTier::Fast => {
+                    let canonical = self.supplement.canonical_name(model).unwrap_or(model);
+                    if canonical.ends_with("-fast") {
+                        self.resolve(canonical)?
+                    } else {
+                        self.resolve(&format!("{canonical}-fast"))?
+                    }
+                }
+                _ => return None,
+            },
+        };
+        Some(rates.cost_dollars(tokens, true))
+    }
+
+    pub fn estimated_cost_at(
+        &self,
+        provider: &str,
+        model: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        tokens: TokenBreakdown,
+        apply_long_context_rates: bool,
+    ) -> Option<f64> {
+        let tier = if tokens.is_fast {
+            ServiceTier::Fast
+        } else {
+            ServiceTier::Standard
+        };
+        match self.historical_rates(provider, model, at, tier, tokens.prompt_tokens()) {
+            Some(rates) => Some(rates?.cost_dollars(tokens, apply_long_context_rates)),
+            None => self.estimated_cost_dollars(model, tokens, apply_long_context_rates),
+        }
     }
 
     pub fn estimated_cost_dollars(

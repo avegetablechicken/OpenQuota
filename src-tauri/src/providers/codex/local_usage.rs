@@ -12,7 +12,7 @@ use walkdir::WalkDir;
 
 use crate::{
     models::UsageHistory,
-    pricing::{ModelPricing, ModelRates, TokenBreakdown},
+    pricing::{ModelPricing, ModelRates, ServiceTier, TokenBreakdown},
     storage::Storage,
 };
 
@@ -34,10 +34,13 @@ pub struct TokenEvent {
     pub output: u64,
     pub reasoning: u64,
     pub total: u64,
-    pub is_fast: bool,
+    tier: ServiceTier,
+    chatgpt_plan: bool,
+    pub cache_write: u64,
+    pub cache_write_12h: u64,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 3;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 5;
 
 pub fn scan_local_usage(
     storage: &Storage,
@@ -208,9 +211,10 @@ fn discover_session_files(homes: &[PathBuf]) -> Vec<PathBuf> {
 
 pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
     let mut current_model: Option<String> = None;
-    let mut current_tier_is_fast = false;
+    let mut current_tier = ServiceTier::Standard;
     let mut previous_totals: Option<RawUsage> = None;
     let mut saw_session_meta = false;
+    let mut first_party = false;
     let mut replay_gate: Option<ChildReplayGate> = None;
     let mut events = Vec::new();
 
@@ -234,6 +238,9 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
         let payload = object.get("payload");
 
         if object_type == Some("turn_context") {
+            if let Some(tier) = payload.and_then(service_tier) {
+                current_tier = ServiceTier::parse(tier);
+            }
             if let Some(model) = model_name(object.get("payload")) {
                 current_model = Some(model);
             }
@@ -242,6 +249,10 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
 
         if object_type == Some("session_meta") && !saw_session_meta {
             saw_session_meta = true;
+            first_party = payload
+                .and_then(|p| p.get("model_provider"))
+                .and_then(Value::as_str)
+                == Some("openai");
             if payload.is_some_and(is_child_session_meta) {
                 replay_gate = Some(
                     object
@@ -265,8 +276,15 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
 
         let payload_type = payload.get("type").and_then(Value::as_str);
         if payload_type == Some("thread_settings_applied") {
-            if let Some(tier) = service_tier(payload) {
-                current_tier_is_fast = matches!(tier, "fast" | "priority");
+            if let Some(raw) = payload
+                .pointer("/thread_settings/service_tier")
+                .or_else(|| payload.get("service_tier"))
+            {
+                current_tier = raw
+                    .as_str()
+                    .map(str::trim)
+                    .map(ServiceTier::parse)
+                    .unwrap_or(ServiceTier::Standard);
             }
             continue;
         }
@@ -330,7 +348,21 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
             output: usage.output,
             reasoning: usage.reasoning,
             total: usage.total,
-            is_fast: current_tier_is_fast,
+            chatgpt_plan: first_party
+                && matches!(
+                    payload
+                        .pointer("/rate_limits/plan_type")
+                        .and_then(Value::as_str),
+                    Some(
+                        "free" | "go" | "plus" | "pro" | "team" | "business" | "enterprise" | "edu"
+                    )
+                ),
+            tier: service_tier(payload)
+                .or_else(|| info.and_then(service_tier))
+                .map(ServiceTier::parse)
+                .unwrap_or(current_tier),
+            cache_write: usage.write,
+            cache_write_12h: usage.write_12h,
         });
     }
     events
@@ -393,8 +425,10 @@ fn has_non_null_value(value: Option<&Value>) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct RawUsage {
+    write: u64,
+    write_12h: u64,
     input: u64,
     cached: u64,
     output: u64,
@@ -405,41 +439,47 @@ struct RawUsage {
 impl RawUsage {
     fn from_value(value: &Value) -> Self {
         let input = integer(value, &["input_tokens", "prompt_tokens", "input"]);
-        let cached = integer(
-            value,
-            &[
-                "cached_input_tokens",
-                "cache_read_input_tokens",
-                "cached_tokens",
-            ],
-        );
+        let details = value.get("input_tokens_details");
+        let cached = [
+            "cached_input_tokens",
+            "cache_read_input_tokens",
+            "cached_tokens",
+        ]
+        .iter()
+        .find_map(|key| value.get(*key)?.as_u64())
+        .or_else(|| details?.get("cached_tokens")?.as_u64())
+        .unwrap_or_default();
+        let write = value
+            .get("cache_write_input_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| details?.get("cache_write_tokens")?.as_u64())
+            .unwrap_or_default();
+        let write_12h = details
+            .and_then(|d| d.pointer("/cache_write_tokens_details/ttl_12h_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            .min(write);
         let output = integer(value, &["output_tokens", "completion_tokens", "output"]);
         let reasoning = integer(value, &["reasoning_output_tokens", "reasoning_tokens"]);
         let reported = integer(value, &["total_tokens"]);
-        let recomputed = input + output + reasoning;
+        let recomputed = input.saturating_add(output);
         Self {
             input,
             cached,
+            write,
+            write_12h,
             output,
             reasoning,
-            total: if reported > 0 || recomputed == 0 {
-                reported
-            } else {
-                recomputed
-            },
+            total: if reported > 0 { reported } else { recomputed },
         }
     }
 
     fn subtracting(self, previous: Option<Self>) -> Self {
-        let previous = previous.unwrap_or(Self {
-            input: 0,
-            cached: 0,
-            output: 0,
-            reasoning: 0,
-            total: 0,
-        });
+        let previous = previous.unwrap_or_default();
         Self {
             input: self.input.saturating_sub(previous.input),
+            write: self.write.saturating_sub(previous.write),
+            write_12h: self.write_12h.saturating_sub(previous.write_12h),
             cached: self.cached.saturating_sub(previous.cached),
             output: self.output.saturating_sub(previous.output),
             reasoning: self.reasoning.saturating_sub(previous.reasoning),
@@ -484,25 +524,6 @@ fn resolve_model(parsed: Option<String>, current_model: &mut Option<String>) -> 
     })
 }
 
-fn auto_review_fallback(timestamp: &DateTime<Utc>) -> &'static str {
-    let date = timestamp.date_naive();
-    [
-        ((2026, 4, 23), "gpt-5.5"),
-        ((2026, 3, 5), "gpt-5.4"),
-        ((2026, 2, 5), "gpt-5.3-codex"),
-        ((2025, 12, 11), "gpt-5.2-codex"),
-        ((2025, 11, 13), "gpt-5.1-codex"),
-        ((2025, 9, 15), "gpt-5-codex"),
-        ((2025, 8, 7), "gpt-5"),
-    ]
-    .into_iter()
-    .find(|((year, month, day), _)| {
-        date >= NaiveDate::from_ymd_opt(*year, *month, *day).expect("valid release date")
-    })
-    .map(|(_, model)| model)
-    .unwrap_or("gpt-5")
-}
-
 #[cfg(test)]
 fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
@@ -529,12 +550,16 @@ fn aggregate_into(
             event.output,
             event.reasoning,
             event.total,
+            event.chatgpt_plan,
+            event.tier,
+            event.cache_write,
+            event.cache_write_12h,
         );
         if !seen.insert(key) {
             continue;
         }
         let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since {
+        if date < since || event.timestamp > now {
             continue;
         }
         if !model_belongs_to_card("codex", &event.model) {
@@ -543,6 +568,8 @@ fn aggregate_into(
         }
         if let Some(cost) = estimate_cost(&event, pricing) {
             accumulator.add(date, event.total, cost, event.model.trim());
+        } else if event.model.eq_ignore_ascii_case("codex-auto-review") {
+            accumulator.add_unpriced(date, event.total, &event.model);
         } else if event.total > 0 {
             accumulator.add_unknown_model(date, &event.model);
         }
@@ -552,11 +579,38 @@ fn aggregate_into(
 fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
     let display_model = event.model.trim();
     let normalized_model = display_model.to_ascii_lowercase();
-    let model = if normalized_model == "codex-auto-review" {
-        auto_review_fallback(&event.timestamp)
-    } else {
-        normalized_model.as_str()
-    };
+    let model = normalized_model.as_str();
+    if model == "codex-auto-review" {
+        if !event.chatgpt_plan {
+            return None;
+        }
+        let tokens = event.pricing_tokens();
+        return pricing
+            .historical_rates(
+                "codex-chatgpt",
+                model,
+                event.timestamp,
+                ServiceTier::Standard,
+                tokens.prompt_tokens(),
+            )?
+            .map(|rates| rates.cost_dollars(tokens, true));
+    }
+    if event.tier == ServiceTier::Unknown {
+        return None;
+    }
+    let tokens = event.pricing_tokens();
+    if let Some(rates) = pricing.historical_rates(
+        "codex",
+        model,
+        event.timestamp,
+        event.tier,
+        tokens.prompt_tokens(),
+    ) {
+        return Some(rates?.cost_dollars(tokens, true));
+    }
+    if !matches!(event.tier, ServiceTier::Standard | ServiceTier::Fast) {
+        return None;
+    }
     let canonical = pricing.supplement.canonical_name(model).unwrap_or(model);
     let fast_base = canonical
         .strip_suffix("-fast")
@@ -567,9 +621,25 @@ fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
     let applies_fast_tier = if fast_base.is_some() {
         base_rates.is_some()
     } else {
-        event.is_fast
+        event.tier == ServiceTier::Fast
     };
     Some(codex_cost(rates, event, rate_model, applies_fast_tier))
+}
+
+impl TokenEvent {
+    fn pricing_tokens(&self) -> TokenBreakdown {
+        let uncached = self.input.saturating_sub(self.cached);
+        let write = self.cache_write.min(uncached);
+        let long_write = self.cache_write_12h.min(write);
+        TokenBreakdown {
+            input: uncached - write,
+            cache_read: self.cached,
+            cache_write_5m: write - long_write,
+            cache_write_12h: long_write,
+            output: self.output,
+            ..TokenBreakdown::default()
+        }
+    }
 }
 
 fn codex_cost(mut rates: ModelRates, event: &TokenEvent, model: &str, fast_tier: bool) -> f64 {
@@ -586,11 +656,8 @@ fn codex_cost(mut rates: ModelRates, event: &TokenEvent, model: &str, fast_tier:
     rates.fast_multiplier = codex_priority_multiplier(model, rates);
     rates.cost_dollars(
         TokenBreakdown {
-            input: event.input.saturating_sub(event.cached),
-            cache_read: event.cached,
-            output: event.output,
             is_fast: fast_tier,
-            ..TokenBreakdown::default()
+            ..event.pricing_tokens()
         },
         true,
     )
@@ -654,7 +721,8 @@ mod tests {
 
     use super::{
         aggregate, codex_homes, codex_long_context_rates, codex_priority_multiplier,
-        discover_session_files, estimate_cost, parse_jsonl, scan_codex_events, TokenEvent,
+        discover_session_files, estimate_cost, parse_jsonl, scan_codex_events, ServiceTier,
+        TokenEvent,
     };
     use crate::{
         pricing::{
@@ -730,28 +798,24 @@ mod tests {
     }
 
     #[test]
-    fn auto_review_uses_fallback_rates_but_keeps_its_breakdown_label() {
-        let now = Utc.with_ymd_and_hms(2026, 3, 10, 12, 0, 0).unwrap();
-        let content = r#"{"timestamp":"2026-03-10T08:00:00Z","type":"turn_context","payload":{"model":"codex-auto-review"}}
-{"timestamp":"2026-03-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100000,"output_tokens":100000,"total_tokens":200000}}}}"#;
-        let pricing = ModelPricing::new(
-            PricingSupplement::default(),
-            PricingCatalog {
-                entries: HashMap::from([("gpt-5.4".into(), ModelRates::new(2.0, 8.0))]),
-                retrieved_at: None,
-            },
-            PricingCatalog::default(),
-        );
-
-        let history = aggregate(parse_jsonl(content), now, &pricing);
-        let today = history.today.unwrap();
-        let breakdown = today.model_breakdown.unwrap();
-
-        assert_eq!(today.estimated_cost_usd, Some(1.0));
-        assert!(today.unknown_models.is_empty());
-        assert_eq!(breakdown.models.len(), 1);
-        assert_eq!(breakdown.models[0].model, "codex-auto-review");
-        assert_eq!(breakdown.models[0].cost_usd, Some(1.0));
+    fn auto_review_requires_a_dated_chatgpt_rate_and_session_evidence() {
+        let template = r#"{"type":"session_meta","payload":{"model_provider":"openai"}}
+{"type":"turn_context","payload":{"model":"codex-auto-review"}}
+{"timestamp":"2026-10-07T08:01:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"plan_type":"pro"},"info":{"last_token_usage":{"input_tokens":100,"output_tokens":5}}}}"#;
+        let pricing = test_bundled_pricing();
+        let now = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        for (log, expected) in [
+            (template.to_owned(), Some(0.0)),
+            (template.replace("2026-10-07", "2026-10-05"), None),
+            (template.replace("openai", "custom"), None),
+            (template.replace("pro", "unknown"), None),
+        ] {
+            let history = aggregate(parse_jsonl(&log), now, &pricing);
+            let period = history.last_30_days.unwrap();
+            assert_eq!(period.tokens, 105);
+            assert_eq!(period.estimated_cost_usd, expected);
+            assert_eq!(period.estimate_complete, expected.is_some());
+        }
     }
 
     #[test]
@@ -807,8 +871,8 @@ mod tests {
 {"timestamp":"2026-07-10T08:02:00Z","type":"event_msg","payload":{"type":"thread_settings_applied","service_tier":"default"}}
 {"timestamp":"2026-07-10T08:03:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#;
         let events = parse_jsonl(content);
-        assert!(events[0].is_fast);
-        assert!(!events[1].is_fast);
+        assert_eq!(events[0].tier, ServiceTier::Fast);
+        assert_eq!(events[1].tier, ServiceTier::Standard);
     }
 
     #[test]
@@ -919,7 +983,7 @@ mod tests {
 
         let initial = scan_codex_events(&storage, std::slice::from_ref(&home), since).unwrap();
         assert_eq!(initial.len(), 1);
-        assert!(!initial[0].is_fast);
+        assert_eq!(initial[0].tier, ServiceTier::Standard);
 
         fs::write(
             &first,
@@ -935,7 +999,9 @@ mod tests {
         let refreshed = scan_codex_events(&storage, &[home], since).unwrap();
         assert_eq!(refreshed.len(), 2);
         assert_eq!(refreshed.iter().map(|event| event.total).sum::<u64>(), 195);
-        assert!(refreshed.iter().all(|event| !event.is_fast));
+        assert!(refreshed
+            .iter()
+            .all(|event| event.tier == ServiceTier::Standard));
     }
 
     #[test]
@@ -978,7 +1044,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let cached = serde_json::from_str::<serde_json::Value>(&cached).unwrap();
-        assert_eq!(cached["schema_version"], 3);
+        assert_eq!(cached["schema_version"], super::LOG_CACHE_SCHEMA_VERSION);
         assert_eq!(cached["events"][0]["model"], "codex-auto-review");
         assert!(cached["events"][0].get("pricing_model").is_none());
     }
@@ -1083,6 +1149,22 @@ mod tests {
     }
 
     #[test]
+    fn rollout_ultrafast_and_cache_writes_use_disjoint_token_buckets() {
+        let log = r#"{"type":"turn_context","payload":{"model":"gpt-6.2-sol"}}
+{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"ultrafast"}}}
+{"timestamp":"2026-11-18T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000,"cached_input_tokens":60000,"cache_write_input_tokens":20000,"input_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":5000}},"output_tokens":10000,"reasoning_output_tokens":5000}}}}
+{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":null}}}
+{"timestamp":"2026-11-18T12:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":101000,"cached_input_tokens":60000,"cache_write_input_tokens":21000,"input_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":5000}},"output_tokens":10000,"reasoning_output_tokens":5000}}}}"#;
+        let events = parse_jsonl(log);
+        let pricing = test_bundled_pricing();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].total, 110000);
+        // 20k ordinary, 60k reads, 15k short writes, 5k long writes, 10k output.
+        assert!((estimate_cost(&events[0], &pricing).unwrap() - 0.6255).abs() < 1e-10);
+        assert_eq!(estimate_cost(&events[1], &pricing), Some(0.0025));
+    }
+
+    #[test]
     fn event_fast_tier_defaults_to_two_x_multiplier() {
         let pricing = ModelPricing::new(
             PricingSupplement::default(),
@@ -1100,13 +1182,16 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 1_000_000,
-            is_fast: false,
+            tier: ServiceTier::Standard,
+            cache_write: 0,
+            cache_write_12h: 0,
+            chatgpt_plan: false,
         };
         assert_eq!(estimate_cost(&event, &pricing), Some(2.0));
         assert_eq!(
             estimate_cost(
                 &TokenEvent {
-                    is_fast: true,
+                    tier: ServiceTier::Fast,
                     ..event
                 },
                 &pricing
@@ -1135,7 +1220,10 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 1_000_000,
-            is_fast: false,
+            tier: ServiceTier::Standard,
+            cache_write: 0,
+            cache_write_12h: 0,
+            chatgpt_plan: false,
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(2.0));
@@ -1161,7 +1249,10 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 100_000,
-            is_fast: false,
+            tier: ServiceTier::Standard,
+            cache_write: 0,
+            cache_write_12h: 0,
+            chatgpt_plan: false,
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(0.2));
@@ -1185,7 +1276,10 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: input,
-            is_fast: false,
+            tier: ServiceTier::Standard,
+            cache_write: 0,
+            cache_write_12h: 0,
+            chatgpt_plan: false,
         };
 
         assert!((estimate_cost(&event(272_000), &pricing).unwrap() - 0.68).abs() < 0.000_001);
@@ -1265,7 +1359,10 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 100_000,
-            is_fast: true,
+            tier: ServiceTier::Fast,
+            cache_write: 0,
+            cache_write_12h: 0,
+            chatgpt_plan: false,
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(0.5));
@@ -1289,7 +1386,10 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 100_000,
-            is_fast: true,
+            tier: ServiceTier::Fast,
+            cache_write: 0,
+            cache_write_12h: 0,
+            chatgpt_plan: false,
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(0.6));

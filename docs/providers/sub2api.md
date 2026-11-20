@@ -1,7 +1,6 @@
 # Sub2API
 
-OpenQuota can show Codex quota from self-hosted Sub2API instances as separate providers. The normal
-Codex provider and its authentication flow are unchanged.
+OpenQuota shows quota and upstream usage estimates for active Codex or Claude OAuth accounts on self-hosted Sub2API instances.
 
 ## What it tracks
 
@@ -12,13 +11,23 @@ Codex provider and its authentication flow are unchanged.
 | Spark             | Spark session window, when reported                     |
 | Spark Weekly      | Spark weekly window, when reported                      |
 | Rate Limit Resets | Available reset credits, shown as read-only information |
+| Today, Yesterday, Last 30 Days | Token counts and estimated cost at upstream model prices |
+| Model breakdown | Token counts and estimated upstream cost per model and account |
+
+OpenQuota reads paginated request records from `/api/v1/admin/usage` for each account. It uses the
+model reported by the upstream response, then the model forwarded upstream, then the request model
+when no mapping is recorded. Each estimate uses the request timestamp, speed tier, and input,
+output, cache-read and cache-write tokens. An unknown rate or unsupported image charge leaves an
+incomplete estimate. The 30-day window includes today and the previous 29 local dates.
+Instance markups and account multipliers apply separately to the instance's own billing.
+See [historical pricing](../pricing-history.md).
 
 ## Setup
 
 Open **Customize**, select **+ Sub2API**, and add the instance Base URL, administrator email, and
 password. Each click creates the next independent Sub2API item. OpenQuota signs in through
-`/api/v1/auth/login`, discovers active OpenAI OAuth accounts, and reads quota from
-`/api/v1/admin/openai/accounts/:id/quota`.
+`/api/v1/auth/login`, discovers the active OAuth accounts for the selected upstream, and reads Codex quota from
+`/api/v1/admin/openai/accounts/:id/quota` or Claude quota from `/api/v1/admin/accounts/:id/usage`.
 
 For a Codex upstream, enter a **Provider** that exactly matches the top-level `model_provider` value,
 a name under `[model_providers]` in `~/.codex/config.toml`, or a standalone profile file named
@@ -50,10 +59,8 @@ bodies are not written to OpenQuota logs. The small clear control beside **Save*
 Connection fields and keeps the Sub2API item. The **Delete Sub2API** row at the bottom removes the
 whole item, including an empty item whose login has not been saved yet.
 
-This integration currently supports up to eight independent Sub2API items and Codex upstream
-accounts only. If one instance contains multiple active Codex accounts, OpenQuota shows the first
-account sorted by name and adds a warning to the provider card identifying that account. A valid
-administrator login can be saved even when the instance has no active Codex account.
+Each of the eight Sub2API slots can track multiple active accounts for its selected upstream. Each
+account has its own quota and usage history. The connection total includes all of those accounts.
 
 ## Troubleshooting
 

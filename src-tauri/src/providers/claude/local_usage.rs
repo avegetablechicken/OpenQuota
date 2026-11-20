@@ -43,7 +43,7 @@ pub struct ClaudeTokenEvent {
     pub cost_usd: Option<f64>,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 3;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 4;
 
 impl ClaudeTokenEvent {
     fn total_tokens(&self) -> u64 {
@@ -312,7 +312,10 @@ fn parse_entries(line: &str) -> Option<Vec<ClaudeTokenEvent>> {
         message_id.clone(),
         request_id.clone(),
         sidechain,
-        object.get("costUSD").and_then(number),
+        object
+            .get("costUSD")
+            .and_then(number)
+            .filter(|cost| cost.is_finite() && *cost >= 0.0),
     )?;
     let mut events = vec![parent];
     let mut advisor_index = 0;
@@ -367,19 +370,16 @@ fn usage_event(
     if speed.is_some_and(|speed| !matches!(speed, "fast" | "standard")) {
         return None;
     }
-    let (cache_write_5m, cache_write_1h) = usage
-        .get("cache_creation")
-        .map(|cache| {
-            (
-                integer(cache.get("ephemeral_5m_input_tokens")).unwrap_or_default(),
-                integer(cache.get("ephemeral_1h_input_tokens")).unwrap_or_default(),
-            )
-        })
+    let cache = usage.get("cache_creation");
+    let cache_write_1h = cache
+        .and_then(|c| integer(c.get("ephemeral_1h_input_tokens")))
+        .unwrap_or_default();
+    let cache_write_5m = cache
+        .and_then(|c| integer(c.get("ephemeral_5m_input_tokens")))
         .unwrap_or_else(|| {
-            (
-                integer(usage.get("cache_creation_input_tokens")).unwrap_or_default(),
-                0,
-            )
+            integer(usage.get("cache_creation_input_tokens"))
+                .unwrap_or_default()
+                .saturating_sub(cache_write_1h)
         });
     Some(ClaudeTokenEvent {
         timestamp,
@@ -467,7 +467,7 @@ fn aggregate_into(
         .unwrap_or(NaiveDate::MIN);
     for event in events {
         let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since {
+        if date < since || event.timestamp > now {
             continue;
         }
         let tokens = TokenBreakdown {
@@ -477,15 +477,16 @@ fn aggregate_into(
             cache_read: event.cache_read,
             output: event.output,
             is_fast: event.is_fast,
+            ..TokenBreakdown::default()
         };
         let model_name = event
             .model
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty());
-        let cost = event
-            .cost_usd
-            .or_else(|| pricing.estimated_cost_dollars(model_name?, tokens, true));
+        let cost = event.cost_usd.or_else(|| {
+            pricing.estimated_cost_at("claude", model_name?, event.timestamp, tokens, true)
+        });
         if event
             .model
             .as_deref()
@@ -494,7 +495,14 @@ fn aggregate_into(
             accumulator.add_other(date, tokens.total_tokens(), cost, event.cost_usd.is_none());
             continue;
         }
-        if let Some(cost) = cost {
+        if let Some(exact) = event.cost_usd {
+            accumulator.add_exact(
+                date,
+                tokens.total_tokens(),
+                exact,
+                model_name.unwrap_or("Unattributed"),
+            );
+        } else if let Some(cost) = cost {
             accumulator.add(
                 date,
                 tokens.total_tokens(),

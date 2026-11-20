@@ -253,10 +253,13 @@ impl DailyUsageAccumulator {
     pub fn build(self, now: DateTime<Utc>, source_note: &str) -> UsageHistory {
         let today = now.with_timezone(&Local).date_naive();
         let yesterday = today.checked_sub_days(Days::new(1));
-        let other_usage = self.other_usage(now);
+        let since = today
+            .checked_sub_days(Days::new(29))
+            .unwrap_or(NaiveDate::MIN);
+        let other_usage = self.other_usage(today, since);
         let daily = self
             .days
-            .iter()
+            .range(since..=today)
             .rev()
             .filter(|(_, day)| has_usage(day))
             .map(|(date, day)| DailyUsage {
@@ -275,14 +278,14 @@ impl DailyUsageAccumulator {
             yesterday.and_then(|date| self.period_for_days(&[date], source_note));
         let active_days = self
             .days
-            .iter()
+            .range(since..=today)
             .filter(|(_, day)| has_usage(day))
             .map(|(date, _)| *date)
             .collect::<Vec<_>>();
         let mut unknown_models = self
             .unknown_models_by_day
-            .values()
-            .flat_map(|models| models.iter().cloned())
+            .range(since..=today)
+            .flat_map(|(_, models)| models.iter().cloned())
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -305,18 +308,15 @@ impl DailyUsageAccumulator {
         }
     }
 
-    fn other_usage(&self, now: DateTime<Utc>) -> Option<OtherUsageHistory> {
+    fn other_usage(&self, today: NaiveDate, since: NaiveDate) -> Option<OtherUsageHistory> {
         if self.other_days.is_empty() {
             return None;
         }
-        let today = now.with_timezone(&Local).date_naive();
         let yesterday = today.checked_sub_days(Days::new(1));
-        let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
         let active_days = self
             .other_days
-            .keys()
-            .filter(|date| **date >= since && **date <= today)
-            .copied()
+            .range(since..=today)
+            .map(|(date, _)| *date)
             .collect::<Vec<_>>();
         Some(OtherUsageHistory {
             today: self.other_period_for_days(&[today]),
@@ -563,6 +563,32 @@ mod tests {
 
     fn day(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
         chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    #[test]
+    fn monthly_cost_covers_today_and_the_previous_29_local_dates() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 20, 12, 0, 0).unwrap();
+        let today = now.with_timezone(&chrono::Local).date_naive();
+        let mut accumulator = DailyUsageAccumulator::default();
+        for days_ago in [0, 29, 30, -1] {
+            let date = today - chrono::Duration::days(days_ago);
+            accumulator.add(date, 5, 1.0, "model");
+            accumulator.add_other(date, 3, Some(2.0), true);
+        }
+        accumulator.add_unknown_model(today - chrono::Duration::days(30), "outside");
+        let history = accumulator.build(now, "test logs");
+        assert_eq!(history.last_30_days.unwrap().estimated_cost_usd, Some(2.0));
+        assert_eq!(
+            history
+                .other_usage
+                .unwrap()
+                .last_30_days
+                .unwrap()
+                .estimated_cost_usd,
+            Some(4.0)
+        );
+        assert!(history.unknown_models.is_empty());
+        assert_eq!(history.daily.len(), 2);
     }
 
     #[test]

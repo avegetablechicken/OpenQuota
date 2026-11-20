@@ -256,7 +256,8 @@ fn aggregate_into(
             .prompt
             .saturating_add(event.completion)
             .saturating_add(event.reasoning);
-        if let Some(cost) = pricing.estimated_cost_dollars(model, tokens, true) {
+        if let Some(cost) = pricing.estimated_cost_at("grok", model, event.timestamp, tokens, true)
+        {
             accumulator.add(date, total, cost, model);
         } else if total > 0 {
             accumulator.add_unknown_model(date, model);

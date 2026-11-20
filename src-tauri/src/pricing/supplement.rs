@@ -8,6 +8,7 @@ use super::{catalog::normalized_key, ModelRates};
 
 #[derive(Debug, Default)]
 pub struct PricingSupplement {
+    pub(super) history: super::history::PriceHistory,
     pub pricing: HashMap<String, ModelRates>,
     pub fast_multipliers: HashMap<String, f64>,
     pub alias_rules: Vec<AliasRule>,
@@ -23,6 +24,9 @@ pub struct AliasRule {
 impl PricingSupplement {
     pub fn decode(data: &[u8]) -> Result<Self, SupplementError> {
         let file = serde_json::from_slice::<SupplementFile>(data)?;
+        if !super::history::valid(&file.history) {
+            return Err(SupplementError::InvalidHistory);
+        }
         let pricing = file
             .pricing
             .into_iter()
@@ -54,6 +58,7 @@ impl PricingSupplement {
             })
             .collect();
         Ok(Self {
+            history: file.history,
             pricing,
             fast_multipliers: file.fast_multipliers,
             alias_rules,
@@ -94,12 +99,16 @@ fn matches_model_suffix(part: &str, base: &str) -> bool {
 
 #[derive(Debug, Error)]
 pub enum SupplementError {
+    #[error("Pricing history contains invalid rates or overlapping periods.")]
+    InvalidHistory,
     #[error("Pricing supplement is invalid JSON.")]
     InvalidJson(#[from] serde_json::Error),
 }
 
 #[derive(Deserialize)]
 struct SupplementFile {
+    #[serde(default)]
+    history: super::history::PriceHistory,
     #[serde(default)]
     updated_at: Option<String>,
     pricing: HashMap<String, SupplementEntry>,

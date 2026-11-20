@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     models::UsageHistory,
-    pricing::{ModelPricing, PricingStore, TokenBreakdown},
+    pricing::{ModelPricing, PricingStore, ServiceTier, TokenBreakdown},
     providers::{
         daily_usage::DailyUsageAccumulator, log_usage::scan_or_cached_usage, CacheIdentity,
     },
@@ -149,7 +149,7 @@ impl ZCodeUsageScanner {
                 continue;
             }
             contributed = true;
-            add_event(accumulator, date, &event, pricing);
+            add_event(accumulator, date, &event, pricing, target);
         }
         Ok(contributed)
     }
@@ -296,14 +296,29 @@ fn add_event(
     date: NaiveDate,
     event: &UsageEvent,
     pricing: &ModelPricing,
+    target: ZCodeProvider,
 ) {
+    let provider = match target {
+        ZCodeProvider::Claude => "claude",
+        ZCodeProvider::Codex => "codex",
+        ZCodeProvider::Grok => "grok",
+        ZCodeProvider::Kimi => "kimi",
+        ZCodeProvider::MiniMax => "minimax",
+        ZCodeProvider::OpenRouter => "openrouter",
+        ZCodeProvider::Zai => "zai",
+    };
     let variant_model = event
         .variant
         .as_deref()
         .map(|variant| format!("{}-{variant}", event.model));
     let rate_model = variant_model
         .as_deref()
-        .filter(|model| pricing.resolve(model).is_some())
+        .filter(|model| {
+            pricing
+                .historical_rates(provider, model, event.timestamp, ServiceTier::Standard, 0)
+                .is_some()
+                || pricing.resolve(model).is_some()
+        })
         .unwrap_or(&event.model);
     let categorized_cache = event.cache_read.saturating_add(event.cache_write);
     let tokens = TokenBreakdown {
@@ -314,7 +329,9 @@ fn add_event(
         ..TokenBreakdown::default()
     };
     let display_family = pricing.display_family(rate_model);
-    if let Some(cost) = pricing.estimated_cost_dollars(rate_model, tokens, true) {
+    if let Some(cost) =
+        pricing.estimated_cost_at(provider, rate_model, event.timestamp, tokens, true)
+    {
         if display_family != rate_model {
             accumulator.add_variant(date, event.total, cost, &display_family, rate_model);
         } else {
@@ -580,7 +597,7 @@ mod tests {
             Vec::<String>::new()
         );
         assert!(
-            (zai.today.as_ref().unwrap().estimated_cost_usd.unwrap() - 0.104).abs() < 0.000_001
+            (zai.today.as_ref().unwrap().estimated_cost_usd.unwrap() - 0.052).abs() < 0.000_001
         );
         assert_eq!(zai.daily.len(), 1);
         assert_eq!(codex.today.as_ref().unwrap().tokens, 550_000);

@@ -13,6 +13,8 @@ OpenQuota tracks Claude subscription limits and local Claude usage history.
 | Today / Yesterday / Last 30 Days | Tokens and estimated spend calculated from local usage logs  |
 | Usage Trend                      | Recent local usage over time                                 |
 
+See [historical API rates and cost calculations](../pricing-history.md) for dated prices, cache charges, and coverage.
+
 ## Sign-in and local data
 
 Sign in with Claude Code by running `claude`. OpenQuota reuses the credentials maintained by the
