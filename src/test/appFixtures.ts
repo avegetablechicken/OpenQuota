@@ -134,9 +134,9 @@ export const providerCatalog: ProviderCatalog = {
       localUsageSourceNote: null,
       links: [],
       metrics: [
-        quota('antigravity.geminiPro', 'Session', 'geminiPro', true),
+        quota('antigravity.geminiPro', 'Session', 'geminiPro'),
         quota('antigravity.geminiWeekly', 'Weekly', 'geminiWeekly'),
-        quota('antigravity.claude', 'Claude', 'claude', true),
+        quota('antigravity.claude', 'Claude', 'claude'),
         quota('antigravity.claudeWeekly', 'Claude Weekly', 'claudeWeekly'),
       ],
     },

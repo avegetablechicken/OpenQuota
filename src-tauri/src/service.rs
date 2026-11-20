@@ -1375,6 +1375,36 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_keeps_all_reported_zero_pools_with_active_resets() {
+        let definition = crate::providers::antigravity::definition();
+        let mut snapshot = test_snapshot(&definition.id);
+        for (id, period) in [
+            ("geminiPro", 18_000),
+            ("geminiWeekly", 604_800),
+            ("claude", 18_000),
+            ("claudeWeekly", 604_800),
+        ] {
+            snapshot.quotas.push(QuotaWindow {
+                id: id.into(),
+                label: id.into(),
+                used_percent: 0.0,
+                resets_at: Some(snapshot.refreshed_at + chrono::Duration::seconds(period)),
+                clock_offset_seconds: None,
+                period_seconds: period as u64,
+                format: QuotaFormat::Percent,
+                used_value: None,
+                limit_value: None,
+                unit: None,
+                estimated: false,
+                source_note: None,
+            });
+        }
+        let reported = snapshot.quotas.clone();
+        super::normalize_quota_availability(&definition, &mut snapshot);
+        assert_eq!(snapshot.quotas, reported);
+    }
+
+    #[test]
     fn claude_zero_sessions_without_an_active_reset_are_no_data() {
         let mut definition = crate::providers::claude::definition();
         definition.fallback_enabled = true;

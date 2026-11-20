@@ -37,12 +37,14 @@ pub(crate) fn definition() -> ProviderDefinition {
         fallback_enabled: false,
         local_usage_source_note: None,
         links: vec![],
+        // Antigravity reports its available pools explicitly, including idle five-hour pools.
+        // Opt every window out of the starts-on-use availability heuristic.
         metrics: vec![
             MetricDefinition::quota(
                 "antigravity.geminiPro",
                 "Session",
                 "geminiPro",
-                true,
+                false,
                 true,
                 MetricSection::AlwaysVisible,
                 true,
@@ -62,7 +64,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "antigravity.claude",
                 "Claude",
                 "claude",
-                true,
+                false,
                 true,
                 MetricSection::OnDemand,
                 false,
