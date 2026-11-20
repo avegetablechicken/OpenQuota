@@ -44,7 +44,7 @@
   import { createListenerRegistry } from './lib/listenerRegistry';
   import { emptyProviderCatalog, ProviderCatalogIndex } from './lib/metrics';
   import { springMotion } from './lib/motion';
-  import { below, popupMenu } from './lib/nativeMenu';
+  import { popupMenu } from './lib/nativeMenu';
   import OpenQuotaMark from './lib/OpenQuotaMark.svelte';
   import { horizontalPageTransition, shouldSlideBetweenScreens } from './lib/pageTransition';
   import { desktopPlatform, shortcutLabels } from './lib/platform';
@@ -89,7 +89,6 @@
   let showAbout = $state(false);
   let aboutTrigger: HTMLElement | null = null;
   let aboutCloseButton = $state<HTMLButtonElement>();
-  let optionsButton = $state<HTMLButtonElement>();
   let shareTimer: ReturnType<typeof setTimeout> | undefined;
   const providerStates = $derived(Object.values(viewState.providers));
   const anyRefreshing = $derived(providerStates.some((state) => state.refreshing));
@@ -528,7 +527,7 @@
     return screen === 'settings' ? 'Settings' : 'Customize';
   }
   async function openAbout() {
-    aboutTrigger = optionsButton ?? null;
+    aboutTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     showAbout = true;
     await tick();
     aboutCloseButton?.focus();
@@ -560,16 +559,38 @@
       ) !== null
     );
   }
+  // Right-clicking the dashboard where nothing has a menu of its own opens
+  // Options; elsewhere the page has no context menu.
+  function openPageMenu(event: MouseEvent) {
+    // A card that opened its own menu has already claimed the event.
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    // Total Spend keeps its right click inert.
+    const inTotalSpend =
+      event.target instanceof Element && event.target.closest('[data-total-spend]') !== null;
+    if (settingsState && screen === 'dashboard' && !inTotalSpend) {
+      openOptionsMenu({ x: event.clientX, y: event.clientY });
+    }
+  }
   // The system draws Options, as it does every menu of the platform: it
   // highlights, keys, dismisses and nests Share Screenshot itself.
-  function openOptionsMenu() {
-    if (!optionsButton) return;
+  function openOptionsMenu(at: { x: number; y: number }) {
     const providers =
       settingsState?.settings.providers.filter(
         (provider) => provider.enabled && catalog.provider(provider.id),
       ) ?? [];
     void popupMenu(
       [
+        ...(settingsState?.trayAvailable
+          ? [
+              {
+                text: 'Keep Window Open',
+                checked: floatingWindow,
+                action: toggleFloatingWindow,
+              },
+              'separator' as const,
+            ]
+          : []),
         {
           text: 'Refresh All',
           accelerator: 'CmdOrCtrl+R',
@@ -593,7 +614,7 @@
         { text: 'About OpenQuota', action: () => void openAbout() },
         { text: 'Quit OpenQuota', accelerator: 'CmdOrCtrl+Q', action: quitApp },
       ],
-      below(optionsButton),
+      at,
     ).catch(() => undefined);
   }
   function handleWindowPointerDown(event: PointerEvent) {
@@ -740,9 +761,7 @@
     const observePanelParts = () => {
       resizeObserver?.disconnect();
       document
-        .querySelectorAll<HTMLElement>(
-          '.floating-chrome, .screen-page, .screen-header, .footer, .notice',
-        )
+        .querySelectorAll<HTMLElement>('.floating-chrome, .screen-page, .screen-header, .notice')
         .forEach((element) => resizeObserver?.observe(element));
       scheduleWindowFit();
     };
@@ -922,7 +941,7 @@
   class:popover--floating={floatingWindow}
   class:popover--macos={floatingWindow && platform === 'macos'}
   aria-label="OpenQuota usage dashboard"
-  oncontextmenu={(event) => event.preventDefault()}
+  oncontextmenu={openPageMenu}
 >
   <p id="reorder-instructions" class="sr-only">
     Drag to reorder. With a keyboard, use Alt plus Up Arrow or Alt plus Down Arrow.
@@ -1082,44 +1101,6 @@
       </div>
     </div>
 
-    {#if screen === 'dashboard'}
-      <footer class="footer">
-        {#if renderedResizeEdge === 'bottom'}
-          <div
-            class="panel-resize-dragger panel-resize-dragger--bottom panel-resize-dragger--inline"
-            role="separator"
-            aria-label="Resize panel height"
-            aria-orientation="horizontal"
-            onpointerdown={handlePanelResizePointerDown}
-          ></div>
-        {/if}
-        <div class="footer-actions">
-          {#if settingsState.trayAvailable}
-            <button
-              class="window-mode-toggle"
-              class:window-mode-toggle--active={floatingWindow}
-              type="button"
-              aria-label={floatingWindow ? 'Return to Tray Popup' : 'Keep Window Open'}
-              aria-pressed={floatingWindow}
-              data-tooltip={floatingWindow ? 'Return to Tray Popup' : 'Keep Window Open'}
-              onclick={toggleFloatingWindow}
-            >
-              <Icon name={floatingWindow ? 'pin-filled' : 'pin'} size={13} strokeWidth={1.9} />
-            </button>
-          {/if}
-          <button
-            type="button"
-            class="options-menu"
-            aria-label="Open options"
-            aria-haspopup="menu"
-            bind:this={optionsButton}
-            onclick={openOptionsMenu}
-            ><span>Options</span><Icon name="chevron-down" size={11} strokeWidth={2.2} /></button
-          >
-        </div>
-      </footer>
-    {/if}
-
     {#if confirmationMessage}
       <div class="transient-pill" role="status">
         <Icon name="check" size={15} strokeWidth={2.4} />{confirmationMessage}
@@ -1194,7 +1175,7 @@
       {/if}
     </div>
   {/if}
-  {#if renderedResizeEdge === 'bottom' && !(settingsState && screen === 'dashboard')}
+  {#if renderedResizeEdge === 'bottom'}
     <div
       class="panel-resize-dragger panel-resize-dragger--bottom"
       role="separator"
@@ -1343,25 +1324,8 @@
       box-shadow: 0 10px 18px -20px rgba(0, 0, 0, 0.7);
     }
 
-    /* Overlays the bottom edge instead of taking a row of its own. */
     .panel-resize-dragger--bottom {
-      position: absolute;
-      bottom: 0;
-      left: 50%;
-      width: 72px;
-      height: 8px;
-      transform: translateX(-50%);
-    }
-
-    /* On the dashboard the grip shares the footer row, centred between its ends. */
-    .panel-resize-dragger--inline {
-      position: relative;
-      bottom: auto;
-      left: auto;
-      height: 20px;
-      flex: none;
-      grid-column: 2;
-      transform: none;
+      box-shadow: 0 -10px 18px -20px rgba(0, 0, 0, 0.7);
     }
 
     .content {
@@ -1376,34 +1340,6 @@
     .content::-webkit-scrollbar {
       width: 0;
       height: 0;
-    }
-
-    .footer {
-      display: flex;
-      min-height: 58px;
-      align-items: center;
-      gap: 12px;
-      padding: 10px 14px;
-      border-top: 1px solid var(--separator);
-      background: color-mix(in srgb, var(--tray) 92%, transparent);
-    }
-
-    .options-menu {
-      position: relative;
-      display: grid;
-      width: 30px;
-      height: 30px;
-      border-radius: 50%;
-      color: var(--secondary);
-      cursor: pointer;
-      font-size: 13px;
-      list-style: none;
-      place-items: center;
-    }
-
-    .options-menu:hover {
-      color: var(--text);
-      background: var(--button-hover);
     }
 
     .screen-header {
@@ -1474,96 +1410,6 @@
       grid-area: 1 / 1;
       align-self: start;
       transform-origin: 50% 45%;
-    }
-
-    .footer {
-      display: grid;
-      grid-template-columns: 1fr auto 1fr;
-      min-height: 0;
-      padding: 2px 8px 1px;
-      border-top: 0;
-      background: transparent;
-    }
-
-    .footer-actions {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      grid-column: 3;
-      justify-self: end;
-    }
-
-    .footer-actions .options-menu {
-      margin-left: 0;
-    }
-
-    .window-mode-toggle {
-      display: grid;
-      width: 20px;
-      height: 20px;
-      padding: 0;
-      border: 0;
-      border-radius: 6px;
-      color: var(--secondary);
-      background: transparent;
-      cursor: pointer;
-      place-items: center;
-      transition:
-        color 120ms ease,
-        background-color 120ms ease,
-        transform 80ms ease;
-    }
-
-    .window-mode-toggle:hover {
-      color: var(--text);
-      background: var(--button-hover);
-    }
-
-    .window-mode-toggle--active {
-      color: var(--meter-fill);
-    }
-
-    .window-mode-toggle:active {
-      transform: scale(0.92);
-    }
-
-    .window-mode-toggle:focus-visible {
-      outline: 2px solid color-mix(in srgb, var(--meter-fill) 55%, transparent);
-      outline-offset: 1px;
-    }
-
-    .window-mode-toggle::after {
-      top: auto;
-      bottom: calc(100% + 7px);
-      transform: translate(-50%, 2px) scale(0.97);
-      transform-origin: bottom center;
-    }
-
-    .window-mode-toggle:hover::after,
-    .window-mode-toggle:focus-visible::after {
-      transform: translate(-50%, 0) scale(1);
-    }
-
-    .options-menu {
-      margin-left: auto;
-      display: flex;
-      width: auto;
-      height: 20px;
-      align-items: center;
-      gap: 3px;
-      padding: 0 6px 0 8px;
-      border: 1px solid var(--separator);
-      border-radius: 6px;
-      color: var(--text);
-      background: color-mix(in srgb, var(--card) 72%, transparent);
-      font-size: 11px;
-      font-weight: 550;
-    }
-
-    .options-menu i {
-      margin-top: -2px;
-      font-size: 11px;
-      font-style: normal;
     }
 
     .screen-header {

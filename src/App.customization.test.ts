@@ -35,6 +35,13 @@ function mockInvoke(implementation: InvokeImplementation) {
   });
 }
 
+// Options opens from a right click on the dashboard where nothing has a menu of its own.
+async function openOptions() {
+  const page = document.querySelector('.content')!;
+  await fireEvent.mouseDown(page, { button: 2 });
+  await fireEvent.contextMenu(page, { clientX: 120, clientY: 160 });
+}
+
 describe('OpenQuota customization persistence and reorder', () => {
   beforeEach(() => {
     mocks.currentMonitor.mockResolvedValue({
@@ -75,7 +82,7 @@ describe('OpenQuota customization persistence and reorder', () => {
     const browserConfirm = vi.spyOn(window, 'confirm');
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Customize');
     await fireEvent.click(screen.getByRole('button', { name: 'Reset all customization' }));
 
@@ -101,7 +108,7 @@ describe('OpenQuota customization persistence and reorder', () => {
   it('undoes the latest customization with Ctrl+Z', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Customize');
     const toggle = screen.getByRole('checkbox', { name: 'Enable codex' });
     await fireEvent.click(toggle);
@@ -141,7 +148,7 @@ describe('OpenQuota customization persistence and reorder', () => {
     });
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     const launchAtLogin = screen.getByRole('checkbox', { name: 'Launch at Login' });
 

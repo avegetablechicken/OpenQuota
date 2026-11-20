@@ -36,6 +36,13 @@ function mockInvoke(implementation: InvokeImplementation) {
   });
 }
 
+// Options opens from a right click on the dashboard where nothing has a menu of its own.
+async function openOptions() {
+  const page = document.querySelector('.content')!;
+  await fireEvent.mouseDown(page, { button: 2 });
+  await fireEvent.contextMenu(page, { clientX: 120, clientY: 160 });
+}
+
 describe('OpenQuota update lifecycle', () => {
   beforeEach(() => {
     mocks.currentMonitor.mockResolvedValue({
@@ -75,7 +82,7 @@ describe('OpenQuota update lifecycle', () => {
     );
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     await fireEvent.click(screen.getByRole('button', { name: 'Check for Updates…' }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('check_for_updates'));
@@ -110,7 +117,7 @@ describe('OpenQuota update lifecycle', () => {
     );
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     expect(screen.queryByRole('combobox', { name: 'Icon Style' })).not.toBeInTheDocument();
   });
@@ -137,7 +144,7 @@ describe('OpenQuota update lifecycle', () => {
     });
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Check for Updates…');
     expect(await screen.findByRole('region', { name: 'Update Available' })).toHaveTextContent(
       'OpenQuota 0.2.0 is ready to download.',
@@ -174,7 +181,7 @@ describe('OpenQuota update lifecycle', () => {
     });
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Check for Updates…');
     await fireEvent.click(await screen.findByRole('button', { name: 'Download from GitHub' }));
     expect(mocks.invoke).toHaveBeenCalledWith('open_update_page');
@@ -207,7 +214,7 @@ describe('OpenQuota update lifecycle', () => {
 
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Check for Updates…');
     await fireEvent.click(await screen.findByRole('button', { name: 'Install Update' }));
     expect(mocks.invoke).toHaveBeenCalledWith('install_update');
@@ -259,7 +266,7 @@ describe('OpenQuota update lifecycle', () => {
 
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Check for Updates…');
     await fireEvent.click(await screen.findByRole('button', { name: 'Install Update' }));
 

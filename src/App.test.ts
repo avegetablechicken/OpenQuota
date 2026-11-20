@@ -64,6 +64,13 @@ function mockInvoke(
   });
 }
 
+// Options opens from a right click on the dashboard where nothing has a menu of its own.
+async function openOptions() {
+  const page = document.querySelector('.content')!;
+  await fireEvent.mouseDown(page, { button: 2 });
+  await fireEvent.contextMenu(page, { clientX: 120, clientY: 160 });
+}
+
 describe('OpenQuota dashboard', () => {
   beforeEach(() => {
     mocks.currentMonitor.mockResolvedValue({
@@ -128,7 +135,7 @@ describe('OpenQuota dashboard', () => {
     expect((await screen.findAllByText('Codex', { exact: true }))[0]).toBeVisible();
     await fireEvent.focus(window);
     expect(mocks.invoke).not.toHaveBeenCalledWith('get_app_settings');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     expect(mocks.invoke).toHaveBeenCalledWith('get_app_settings');
   });
@@ -481,14 +488,15 @@ describe('OpenQuota dashboard', () => {
     expect(within(provider).getByText('Today')).toBeInTheDocument();
   });
 
-  it('toggles floating window mode from the footer pin when a tray is available', async () => {
+  it('toggles floating window mode from the Options menu when a tray is available', async () => {
     render(App);
     await screen.findByText('Plus');
 
-    const pin = screen.getByRole('button', { name: 'Keep Window Open' });
-    expect(pin).toHaveAttribute('aria-pressed', 'false');
-    await fireEvent.click(pin);
-
+    await openOptions();
+    expect(openMenu()!.entries[0]).toEqual(
+      expect.objectContaining({ text: 'Keep Window Open', checked: false }),
+    );
+    await chooseMenuItem('Keep Window Open');
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
         'save_app_settings',
@@ -497,12 +505,12 @@ describe('OpenQuota dashboard', () => {
         }),
       ),
     );
-    expect(screen.getByRole('button', { name: 'Return to Tray Popup' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Return to Tray Popup' }));
+    await openOptions();
+    expect(openMenu()!.entries[0]).toEqual(
+      expect.objectContaining({ text: 'Keep Window Open', checked: true }),
+    );
+    await chooseMenuItem('Keep Window Open');
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
         'save_app_settings',
@@ -588,7 +596,7 @@ describe('OpenQuota dashboard', () => {
       expect(screen.getByRole('separator', { name: 'Resize panel height' })).toHaveClass(
         'panel-resize-dragger--bottom',
       );
-      await fireEvent.click(screen.getByLabelText('Open options'));
+      await openOptions();
       await chooseMenuItem('Settings');
       await selectOption(screen.getByRole('combobox', { name: 'Window Mode' }), 'Tray Popup');
 
@@ -1040,7 +1048,7 @@ describe('OpenQuota dashboard', () => {
   it('opens Customize and exposes the two-section metric layout', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Customize');
     expect(screen.getByRole('heading', { name: 'Customize' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Customize codex' }));
@@ -1051,7 +1059,7 @@ describe('OpenQuota dashboard', () => {
   it('resets one provider through the backend metric catalog', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Customize');
     await fireEvent.click(screen.getByRole('button', { name: 'Customize codex' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Reset Codex' }));
@@ -1066,7 +1074,7 @@ describe('OpenQuota dashboard', () => {
   it('enforces the two-pinned-metrics limit in Customize', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Customize');
     await fireEvent.click(screen.getByRole('button', { name: 'Customize codex' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Pin Today' }));
@@ -1088,7 +1096,7 @@ describe('OpenQuota dashboard', () => {
   it('persists compact density from Settings', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     await selectOption(screen.getByRole('combobox', { name: 'Density' }), 'Compact');
     await selectOption(screen.getByRole('combobox', { name: 'Time Format' }), '24-hour');
@@ -1116,7 +1124,7 @@ describe('OpenQuota dashboard', () => {
     });
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     await selectOption(screen.getByRole('combobox', { name: 'Log Level' }), 'Debug');
     await waitFor(() =>
@@ -1193,7 +1201,7 @@ describe('OpenQuota dashboard', () => {
     });
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
 
     mocks.invoke.mockRejectedValueOnce(new Error('log path unavailable'));
@@ -1227,9 +1235,8 @@ describe('OpenQuota dashboard', () => {
     render(App);
     await screen.findByText('Plus');
     expect(screen.getByRole('button', { name: 'Close OpenQuota' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Keep Window Open' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Return to Tray Popup' })).not.toBeInTheDocument();
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
+    expect(menuLabels()).not.toContain('Keep Window Open');
     await chooseMenuItem('Settings');
     expect(screen.getByText('GNOME · Wayland · standalone window')).toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Window Mode' })).not.toBeInTheDocument();
@@ -1238,7 +1245,7 @@ describe('OpenQuota dashboard', () => {
   it('records a global shortcut and requests notification permission', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     const recorder = screen.getByRole('button', { name: 'Record Shortcut' });
     await fireEvent.click(recorder);
@@ -1269,7 +1276,7 @@ describe('OpenQuota dashboard', () => {
   ])('saves the %s notification preference and requests permission', async (label, key) => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     await fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(label) }));
     await waitFor(() => {
@@ -1289,7 +1296,7 @@ describe('OpenQuota dashboard', () => {
   it('confirms a full settings reset without deleting credentials or usage data', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     const trigger = screen.getByRole('button', { name: 'Reset All Settings…' });
     trigger.focus();
@@ -1342,7 +1349,7 @@ describe('OpenQuota dashboard', () => {
     try {
       render(App);
       await screen.findByText('Plus');
-      await fireEvent.click(screen.getByLabelText('Open options'));
+      await openOptions();
       await chooseMenuItem('Settings');
       await fireEvent.click(screen.getByRole('button', { name: 'Reset All Settings…' }));
       await fireEvent.click(screen.getByRole('button', { name: 'Reset All' }));
@@ -1392,7 +1399,7 @@ describe('OpenQuota dashboard', () => {
 
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Settings');
     expect(screen.getByText('Notifications are blocked')).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Open Settings' }));
@@ -1436,9 +1443,12 @@ describe('OpenQuota dashboard', () => {
   it('supports manual refresh and popup close shortcuts', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
-    await chooseMenuItem('Refresh All');
+    await fireEvent.keyDown(document, { key: 'r', metaKey: true });
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('refresh_usage'));
+    await openOptions();
+    expect(openMenu()!.entries).toContainEqual(
+      expect.objectContaining({ text: 'Refresh All', accelerator: 'CmdOrCtrl+R' }),
+    );
     await fireEvent.keyDown(document, { key: 'Escape' });
     expect(mocks.invoke).toHaveBeenCalledWith('dismiss_main_window');
   });
@@ -1446,7 +1456,7 @@ describe('OpenQuota dashboard', () => {
   it('returns from pages with a Back button using the platform back shortcut', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Customize');
     expect(await screen.findByRole('button', { name: 'Back' })).toHaveAttribute(
       'aria-keyshortcuts',
@@ -1619,7 +1629,7 @@ describe('OpenQuota dashboard', () => {
     expect(statusSlot).toBeInTheDocument();
     expect(statusSlot).not.toHaveClass('active');
 
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Refresh All');
     expect(await within(provider).findByLabelText('Refreshing')).toBeInTheDocument();
     expect(statusSlot).toHaveClass('active');
@@ -1818,7 +1828,7 @@ describe('OpenQuota dashboard', () => {
     render(App);
     const provider = await screen.findByRole('group', { name: 'Codex provider' });
     const card = within(provider).getByRole('region', { name: 'Codex usage' });
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     await chooseMenuItem('Refresh All');
     await waitFor(() =>
       expect(within(provider).queryByLabelText('Refreshing')).not.toBeInTheDocument(),
@@ -1831,7 +1841,7 @@ describe('OpenQuota dashboard', () => {
   it('shows the Settings and Quit shortcuts in the Options menu and handles Ctrl+Q', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    await openOptions();
     const entries = openMenu()!.entries;
     expect(entries).toContainEqual(
       expect.objectContaining({ text: 'Settings', accelerator: 'CmdOrCtrl+,' }),
@@ -1844,16 +1854,17 @@ describe('OpenQuota dashboard', () => {
     expect(mocks.invoke).toHaveBeenCalledWith('quit_app');
   });
 
-  it('opens Options as a system menu pulled down from its button', async () => {
+  it('opens Options at the pointer on a right click of the dashboard only', async () => {
     render(App);
     await screen.findByText('Plus');
-    const button = screen.getByLabelText('Open options');
-    vi.spyOn(button, 'getBoundingClientRect').mockReturnValue(
-      DOMRect.fromRect({ x: 240, y: 600, width: 70, height: 26 }),
-    );
-    await fireEvent.click(button);
+    await fireEvent.contextMenu(document.querySelector('.content')!, {
+      clientX: 240,
+      clientY: 600,
+    });
 
     expect(menuLabels()).toEqual([
+      'Keep Window Open',
+      '-',
       'Refresh All',
       '-',
       'Customize',
@@ -1865,7 +1876,7 @@ describe('OpenQuota dashboard', () => {
       'About OpenQuota',
       'Quit OpenQuota',
     ]);
-    expect(openMenu()!.at).toEqual({ x: 240, y: 630 });
+    expect(openMenu()!.at).toEqual({ x: 240, y: 600 });
     // Share Screenshot is a submenu of the enabled providers.
     const share = openMenu()!.entries.find(
       (entry) => entry !== 'separator' && entry.text === 'Share Screenshot',
@@ -1875,6 +1886,16 @@ describe('OpenQuota dashboard', () => {
     ).toContain('Codex');
 
     await chooseMenuItem('Check for Updates…');
+    expect(openMenu()).toBeNull();
+
+    await fireEvent.contextMenu(screen.getByRole('region', { name: 'Total Spend' }));
+    expect(openMenu()).toBeNull();
+    await fireEvent.contextMenu(document.querySelector('.spend-ring__label')!);
+    expect(openMenu()).toBeNull();
+
+    await fireEvent.keyDown(document, { key: ',', ctrlKey: true });
+    await screen.findByRole('heading', { name: 'Settings' });
+    await fireEvent.contextMenu(document.querySelector('.content')!);
     expect(openMenu()).toBeNull();
   });
 
@@ -1903,7 +1924,7 @@ describe('OpenQuota dashboard', () => {
       render(App);
       await waitFor(() => expect(document.documentElement).toHaveAttribute('data-reduced-motion'));
       await screen.findByText('Plus');
-      await fireEvent.click(screen.getByLabelText('Open options'));
+      await openOptions();
       await chooseMenuItem('Settings');
       await waitFor(() =>
         expect(screen.getByRole('combobox', { name: 'Panel Height' })).toHaveDisplayValue('Manual'),
@@ -1953,7 +1974,7 @@ describe('OpenQuota dashboard', () => {
       render(App);
       await waitFor(() => expect(document.documentElement).toHaveAttribute('data-reduced-motion'));
       await screen.findByText('Plus');
-      await fireEvent.click(screen.getByLabelText('Open options'));
+      await openOptions();
       await chooseMenuItem('Settings');
       const toggle = screen.getByRole('checkbox', { name: 'Reduce Animations' });
       expect(toggle).toBeChecked();
@@ -2053,7 +2074,7 @@ describe('OpenQuota dashboard', () => {
     try {
       render(App);
       await screen.findByText('Plus');
-      await fireEvent.click(screen.getByLabelText('Open options'));
+      await openOptions();
       await chooseMenuItem('Settings');
       const windowMode = screen.getByRole('combobox', { name: 'Window Mode' });
       await selectOption(windowMode, 'Floating Window');
@@ -2094,7 +2115,9 @@ describe('OpenQuota dashboard', () => {
   it('opens and dismisses the About panel from Options', async () => {
     render(App);
     await screen.findByText('Plus');
-    await fireEvent.click(screen.getByLabelText('Open options'));
+    const provider = screen.getByRole('group', { name: 'Codex provider' });
+    await openOptions();
+    provider.focus();
     await chooseMenuItem('About OpenQuota');
     expect(screen.getByRole('dialog', { name: 'About OpenQuota' })).toBeInTheDocument();
     const close = screen.getByRole('button', { name: 'Close About' });
@@ -2105,7 +2128,7 @@ describe('OpenQuota dashboard', () => {
     expect(close).toHaveFocus();
     await fireEvent.keyDown(close, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'About OpenQuota' })).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByLabelText('Open options')).toHaveFocus());
+    await waitFor(() => expect(provider).toHaveFocus());
   });
 
   it('matches provider context-menu and Customize to Settings navigation behavior', async () => {

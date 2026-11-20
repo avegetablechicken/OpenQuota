@@ -30,13 +30,11 @@ describe('hybrid window controller', () => {
         <div class="screen-stage">
           <div class="screen-page" data-screen="dashboard"></div>
         </div>
-        <footer class="footer"></footer>
         <div class="panel-resize-dragger"></div>
       </main>
     `;
     const page = document.querySelector<HTMLElement>('.screen-page')!;
     const header = document.querySelector<HTMLElement>('.screen-header')!;
-    const footer = document.querySelector<HTMLElement>('.footer')!;
     const dragger = document.querySelector<HTMLElement>('.panel-resize-dragger')!;
     page.getBoundingClientRect = vi.fn(
       () =>
@@ -52,7 +50,6 @@ describe('hybrid window controller', () => {
         }) as DOMRect,
     );
     Object.defineProperty(header, 'offsetHeight', { configurable: true, value: 40 });
-    Object.defineProperty(footer, 'offsetHeight', { configurable: true, value: 60 });
     Object.defineProperty(dragger, 'offsetHeight', { configurable: true, value: 10 });
 
     mocks.currentMonitor.mockResolvedValue({
@@ -84,7 +81,7 @@ describe('hybrid window controller', () => {
     });
 
     controller.scheduleFit();
-    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(430));
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(370));
     expect(mocks.fitPanelToContent).toHaveBeenCalledTimes(1);
     expect(mocks.getCurrentWindow).not.toHaveBeenCalled();
     controller.dispose();
@@ -103,7 +100,7 @@ describe('hybrid window controller', () => {
     controller.beginContentMorph();
     controller.scheduleFit();
 
-    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(430));
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(370));
     expect(mocks.getCurrentWindow).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLElement>('.screen-stage')).toHaveStyle({ height: '300px' });
     controller.dispose();
@@ -185,7 +182,7 @@ describe('hybrid window controller', () => {
     });
 
     controller.scheduleFit();
-    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(430));
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(370));
 
     activeScreen = 'settings';
     page.dataset.screen = 'settings';
@@ -193,7 +190,7 @@ describe('hybrid window controller', () => {
     controller.scheduleFit();
 
     await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledTimes(2));
-    expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(430);
+    expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(370);
     controller.dispose();
   });
 
@@ -228,19 +225,19 @@ describe('hybrid window controller', () => {
     });
 
     controller.scheduleFit();
-    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(462));
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(402));
 
     activeScreen = 'settings';
     page.dataset.screen = 'settings';
     renderedHeight = 700;
     controller.scheduleFit();
     await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledTimes(2));
-    expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(462);
+    expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(402);
 
     chrome.remove();
     controller.scheduleFit();
     await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledTimes(3));
-    expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(430);
+    expect(mocks.fitPanelToContent).toHaveBeenLastCalledWith(370);
     controller.dispose();
   });
 
@@ -256,7 +253,7 @@ describe('hybrid window controller', () => {
     });
 
     controller.scheduleFit();
-    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(430));
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(370));
     mocks.fitPanelToContent.mockClear();
     controller.scheduleFit();
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -264,7 +261,7 @@ describe('hybrid window controller', () => {
 
     refreshing = false;
     controller.scheduleFit();
-    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(430));
+    await waitFor(() => expect(mocks.fitPanelToContent).toHaveBeenCalledWith(370));
     controller.dispose();
   });
 });
