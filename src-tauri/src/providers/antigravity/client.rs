@@ -36,13 +36,33 @@ pub enum CloudUserAgent {
     Agy,
 }
 
+/// The Antigravity release OpenQuota's Cloud Code requests name.
+const ANTIGRAVITY_CLIENT_VERSION: &str = "3.0.0";
+
 impl CloudUserAgent {
-    fn as_str(self) -> &'static str {
+    fn header(self) -> String {
         match self {
-            Self::Antigravity => "antigravity",
-            Self::Agy => "agy",
+            Self::Antigravity => antigravity_user_agent(),
+            Self::Agy => "agy".into(),
         }
     }
+}
+
+/// Antigravity's own agent, `antigravity/<version> <os>/<arch>` with Go's system names. Cloud Code
+/// answers by it: `retrieveUserQuotaSummary` leaves out the Gemini pools for a client without a
+/// version (or one before 2.6), and `loadCodeAssist` reports no plan to other clients.
+fn antigravity_user_agent() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        "x86" => "386",
+        other => other,
+    };
+    format!("antigravity/{ANTIGRAVITY_CLIENT_VERSION} {os}/{arch}")
 }
 
 pub enum RefreshOutcome {
@@ -152,7 +172,7 @@ impl AntigravityClient {
                 .post(format!("{base}{path}"))
                 .bearer_auth(token)
                 .header("Accept", "application/json")
-                .header("User-Agent", user_agent.as_str())
+                .header("User-Agent", user_agent.header())
                 .json(&body)
                 .send();
             let Ok(response) = response else {
@@ -242,8 +262,20 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{AntigravityClient, CloudOutcome, CloudUserAgent, RefreshOutcome};
+    use super::{
+        antigravity_user_agent, AntigravityClient, CloudOutcome, CloudUserAgent, RefreshOutcome,
+    };
     use crate::providers::test_http;
+
+    #[test]
+    fn antigravity_agent_names_a_versioned_client_on_this_system() {
+        let agent = antigravity_user_agent();
+        assert!(agent.starts_with("antigravity/3.0.0 "), "{agent}");
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(agent, "antigravity/3.0.0 darwin/arm64");
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        assert_eq!(agent, "antigravity/3.0.0 windows/amd64");
+    }
 
     fn client(base: &str) -> AntigravityClient {
         AntigravityClient::with_endpoints(

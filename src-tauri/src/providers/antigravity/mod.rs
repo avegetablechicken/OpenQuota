@@ -18,8 +18,9 @@ use self::{
     client::{AntigravityClient, CloudOutcome, CloudUserAgent, RefreshOutcome},
     discovery::discover,
     mapper::{
-        build_legacy_quotas, parse_cloud_models, parse_command_model_configs, parse_plan,
-        parse_quota_buckets, parse_quota_summary, parse_user_status,
+        build_legacy_quotas, has_gemini_pool, merge_model_pools, parse_cloud_models,
+        parse_command_model_configs, parse_plan, parse_quota_buckets, parse_quota_summary,
+        parse_user_status,
     },
 };
 
@@ -212,42 +213,45 @@ impl AntigravityProvider {
     }
 
     fn fetch_remote(&self, token: &str) -> Result<ProviderSnapshot, AntigravityError> {
-        match self.client.cloud_code(
+        let summary = match self.client.cloud_code(
             QUOTA_SUMMARY_PATH,
             token,
             json!({}),
             CloudUserAgent::Antigravity,
         ) {
-            CloudOutcome::Ok(value) => {
-                if let Some(quotas) = parse_quota_summary(&value) {
-                    return Ok(snapshot(self.load_remote_plan(token), quotas));
-                }
-            }
+            CloudOutcome::Ok(value) => parse_quota_summary(&value),
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
-            CloudOutcome::Unavailable => {}
+            CloudOutcome::Unavailable => None,
+        };
+        // An account whose Gemini models share no pool in the summary (Google AI Pro, say)
+        // reports their five-hour window per model instead.
+        if let Some(quotas) = summary.as_ref().filter(|quotas| has_gemini_pool(quotas)) {
+            return Ok(snapshot(self.load_remote_plan(token), quotas.clone()));
         }
 
-        match self.client.cloud_code(
+        let models = match self.client.cloud_code(
             FETCH_MODELS_PATH,
             token,
             json!({}),
             CloudUserAgent::Antigravity,
         ) {
-            CloudOutcome::Ok(value) => {
-                let quotas = build_legacy_quotas(parse_cloud_models(&value));
-                if !quotas.is_empty() {
-                    return Ok(snapshot(self.load_remote_plan(token), quotas));
-                }
-            }
+            CloudOutcome::Ok(value) => build_legacy_quotas(parse_cloud_models(&value)),
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
-            CloudOutcome::Unavailable => {}
+            CloudOutcome::Unavailable => Vec::new(),
+        };
+        let quotas = match summary {
+            Some(summary) => merge_model_pools(summary, models),
+            None => models,
+        };
+        if !quotas.is_empty() {
+            return Ok(snapshot(self.load_remote_plan(token), quotas));
         }
 
         let (plan, project) = match self.client.cloud_code(
             LOAD_CODE_ASSIST_PATH,
             token,
             json!({}),
-            CloudUserAgent::Agy,
+            CloudUserAgent::Antigravity,
         ) {
             CloudOutcome::Ok(value) => (
                 remote_plan(&value),
@@ -287,10 +291,12 @@ impl AntigravityProvider {
     }
 
     fn load_remote_plan(&self, token: &str) -> Option<String> {
-        match self
-            .client
-            .cloud_code(LOAD_CODE_ASSIST_PATH, token, json!({}), CloudUserAgent::Agy)
-        {
+        match self.client.cloud_code(
+            LOAD_CODE_ASSIST_PATH,
+            token,
+            json!({}),
+            CloudUserAgent::Antigravity,
+        ) {
             CloudOutcome::Ok(value) => remote_plan(&value),
             _ => None,
         }
@@ -349,10 +355,15 @@ fn credential_failure(
 }
 
 fn remote_plan(value: &Value) -> Option<String> {
-    let raw = value
-        .pointer("/paidTier/name")
-        .or_else(|| value.pointer("/currentTier/name"))
-        .and_then(Value::as_str)?;
+    let tier = ["/paidTier", "/currentTier"]
+        .iter()
+        .filter_map(|path| value.pointer(path))
+        .find(|tier| tier.is_object())?;
+    let raw = ["name", "id"]
+        .iter()
+        .find_map(|key| tier.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())?;
     for tier in ["Ultra", "Pro", "Free"] {
         if raw
             .to_ascii_lowercase()
@@ -361,7 +372,7 @@ fn remote_plan(value: &Value) -> Option<String> {
             return Some(tier.into());
         }
     }
-    Some(raw.into())
+    Some(raw.strip_prefix("Google AI ").unwrap_or(raw).into())
 }
 
 fn snapshot(plan: Option<String>, quotas: Vec<crate::models::QuotaWindow>) -> ProviderSnapshot {

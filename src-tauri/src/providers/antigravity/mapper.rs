@@ -86,6 +86,39 @@ pub fn parse_quota_summary(value: &Value) -> Option<Vec<QuotaWindow>> {
     )
 }
 
+/// Whether the summary reports a shared Gemini pool.
+pub fn has_gemini_pool(quotas: &[QuotaWindow]) -> bool {
+    quotas
+        .iter()
+        .any(|quota| matches!(quota.id.as_str(), "geminiPro" | "geminiWeekly"))
+}
+
+/// A summary without a Gemini pool, completed by the per-model pools of `fetchAvailableModels`:
+/// their Gemini five-hour window, and their Claude one when the summary has no Claude pool either.
+pub fn merge_model_pools(summary: Vec<QuotaWindow>, models: Vec<QuotaWindow>) -> Vec<QuotaWindow> {
+    let summary_has_claude = summary
+        .iter()
+        .any(|quota| matches!(quota.id.as_str(), "claude" | "claudeWeekly"));
+    let mut merged: Vec<QuotaWindow> = models
+        .into_iter()
+        .filter(|quota| quota.id == "geminiPro" || (quota.id == "claude" && !summary_has_claude))
+        .collect();
+    let taken: Vec<String> = merged.iter().map(|quota| quota.id.clone()).collect();
+    merged.extend(
+        summary
+            .into_iter()
+            .filter(|quota| !taken.contains(&quota.id)),
+    );
+    let order = |id: &str| {
+        BUCKETS
+            .iter()
+            .position(|spec| spec.1 == id)
+            .unwrap_or(usize::MAX)
+    };
+    merged.sort_by_key(|quota| order(&quota.id));
+    merged
+}
+
 pub fn parse_plan(value: &Value) -> Option<String> {
     let raw = value
         .pointer("/userStatus/userTier/name")
@@ -281,8 +314,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        build_legacy_quotas, parse_cloud_models, parse_command_model_configs, parse_quota_buckets,
-        parse_quota_summary, parse_user_status,
+        build_legacy_quotas, has_gemini_pool, merge_model_pools, parse_cloud_models,
+        parse_command_model_configs, parse_quota_buckets, parse_quota_summary, parse_user_status,
     };
 
     #[test]
@@ -346,5 +379,28 @@ mod tests {
         let quotas = build_legacy_quotas(parse_quota_buckets(&buckets));
         assert_eq!(quotas[0].id, "geminiPro");
         assert_eq!(quotas[0].used_percent, 50.0);
+    }
+
+    #[test]
+    fn summary_without_a_gemini_pool_takes_it_from_the_models() {
+        let summary = parse_quota_summary(&json!({"groups": [{"buckets": [
+            {"bucketId": "3p-weekly", "remainingFraction": 1, "resetTime": "2026-11-27T18:45:34Z"}
+        ]}]}))
+        .unwrap();
+        assert!(!has_gemini_pool(&summary));
+        let models = build_legacy_quotas(parse_cloud_models(&json!({"models": {
+            "gemini-3-flash": {"displayName": "Gemini 3 Flash", "quotaInfo": {"remainingFraction": 0.75}},
+            "claude-sonnet": {"displayName": "Claude Sonnet", "quotaInfo": {"remainingFraction": 0.5}}
+        }})));
+
+        let merged = merge_model_pools(summary.clone(), models.clone());
+        let ids: Vec<_> = merged.iter().map(|quota| quota.id.as_str()).collect();
+        assert_eq!(ids, ["geminiPro", "claudeWeekly"]);
+        assert_eq!(merged[0].used_percent, 25.0);
+
+        let merged = merge_model_pools(Vec::new(), models);
+        let ids: Vec<_> = merged.iter().map(|quota| quota.id.as_str()).collect();
+        assert_eq!(ids, ["geminiPro", "claude"]);
+        assert!(has_gemini_pool(&merged));
     }
 }
