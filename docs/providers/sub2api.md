@@ -39,9 +39,9 @@ password. Each click creates the next independent Sub2API item. OpenQuota signs 
 For a Codex upstream, enter a **Provider** that exactly matches the top-level `model_provider` value,
 a name under `[model_providers]` in `~/.codex/config.toml`, or a standalone profile file named
 `~/.codex/<profile>.config.toml`. OpenQuota reads that configuration's model provider and fills the
-Base URL from `[model_providers.<name>].base_url`; that URL is read-only in the connection editor.
-Enable **Custom Base URL** to enter an endpoint manually. Custom Base URL mode clears and disables
-Provider, so the two sources cannot be combined.
+Base URL from `[model_providers.<name>].base_url`; the editor shows that URL under Provider.
+Enable **Custom Base URL** to enter an endpoint manually. Custom Base URL mode clears Provider and
+puts an editable Base URL in its place, so the two sources cannot be combined.
 
 For a Claude upstream, enter a **Provider** name. OpenQuota searches `$CLAUDE_CONFIG_DIR`
 (default `~/.claude`) and its subdirectories, case-sensitively, without following symlinks.
@@ -53,8 +53,8 @@ Multiple matches at either stage produce an error instead of choosing one or fal
 
 The selected file's `env.ANTHROPIC_BASE_URL` supplies the endpoint, with a top-level
 `ANTHROPIC_BASE_URL` accepted only when `env.ANTHROPIC_BASE_URL` is absent. An empty value is an error;
-OpenQuota does not fall back to another file or the environment. The resolved Base URL is read-only
-and is resolved again when saving. Enable **Custom Base URL** to enter it manually instead.
+OpenQuota does not fall back to another file or the environment. The resolved Base URL is shown
+under Provider and is resolved again when saving. Enable **Custom Base URL** to enter it manually instead.
 Administrator email and password must still be entered separately. Existing Claude connections
 without a Provider name open in custom-address mode with their saved URL preserved.
 

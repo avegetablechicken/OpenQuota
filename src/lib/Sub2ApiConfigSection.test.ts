@@ -16,6 +16,11 @@ async function chooseUpstream(name: 'Codex' | 'Claude') {
   await selectOption(screen.getByRole('combobox', { name: 'Upstream' }), name);
 }
 
+// Without a custom Base URL, the resolved address is shown as a note, not a field.
+function resolvedBaseUrl() {
+  return screen.getByRole('status', { name: 'Resolved Base URL' });
+}
+
 describe('Sub2ApiConfigSection', () => {
   beforeEach(() => {
     mocks.invoke.mockReset().mockImplementation((command: string) => {
@@ -90,13 +95,14 @@ describe('Sub2ApiConfigSection', () => {
     expect(await screen.findByRole('region', { name: 'Connection' })).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await chooseUpstream('Claude');
-    const baseUrl = screen.getByLabelText('Base URL');
-    expect(baseUrl).toBeDisabled();
-    expect(baseUrl).toHaveValue('');
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
+    expect(resolvedBaseUrl()).not.toHaveTextContent('https://');
     await fireEvent.input(screen.getByLabelText('Claude settings provider'), {
       target: { value: 'work' },
     });
-    await waitFor(() => expect(baseUrl).toHaveValue('https://resolved-claude.example.com'));
+    await waitFor(() =>
+      expect(resolvedBaseUrl()).toHaveTextContent('https://resolved-claude.example.com'),
+    );
     expect(mocks.invoke).toHaveBeenCalledWith('resolve_sub2api_claude_provider', {
       provider: 'work',
     });
@@ -171,7 +177,7 @@ describe('Sub2ApiConfigSection', () => {
     });
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
-    expect(screen.getByLabelText('Claude settings provider')).toBeDisabled();
+    expect(screen.queryByLabelText('Claude settings provider')).not.toBeInTheDocument();
     await fireEvent.input(screen.getByLabelText('Base URL'), { target: { value: '   ' } });
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     await fireEvent.input(screen.getByLabelText('Base URL'), {
@@ -253,7 +259,7 @@ describe('Sub2ApiConfigSection', () => {
       'Password',
     );
     expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).not.toBeChecked();
-    expect(screen.getByLabelText('Base URL')).toHaveValue('');
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
 
     await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
@@ -355,10 +361,9 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    const baseUrl = screen.getByLabelText('Base URL');
     const provider = screen.getByLabelText('Codex provider or profile');
 
-    expect(baseUrl).toBeDisabled();
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).not.toBeChecked();
     await fireEvent.input(provider, { target: { value: 'ShareCoder' } });
     expect(mocks.invoke).not.toHaveBeenCalledWith(
@@ -371,26 +376,32 @@ describe('Sub2ApiConfigSection', () => {
         provider: 'ShareCoder',
       }),
     );
-    await waitFor(() => expect(baseUrl).toHaveValue('https://resolved.example.com'));
-    expect(baseUrl).toBeDisabled();
+    await waitFor(() =>
+      expect(resolvedBaseUrl()).toHaveTextContent('https://resolved.example.com'),
+    );
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
   });
 
-  it('clears and disables Provider when custom Base URL is enabled', async () => {
+  it('swaps Provider for an editable Base URL when custom Base URL is enabled', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     const provider = screen.getByLabelText('Codex provider or profile');
     await fireEvent.input(provider, { target: { value: 'ShareCoder' } });
     await waitFor(() =>
-      expect(screen.getByLabelText('Base URL')).toHaveValue('https://resolved.example.com'),
+      expect(resolvedBaseUrl()).toHaveTextContent('https://resolved.example.com'),
     );
 
     await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
 
-    expect(provider).toBeDisabled();
-    expect(provider).toHaveValue('');
+    expect(provider).not.toBeInTheDocument();
+    expect(screen.queryByRole('status', { name: 'Resolved Base URL' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Base URL')).toBeEnabled();
     expect(screen.getByLabelText('Base URL')).toHaveValue('');
+
+    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
+    expect(screen.getByLabelText('Codex provider or profile')).toHaveValue('');
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
   });
 
   it('registers Enter only while the Save button is enabled', async () => {
@@ -406,7 +417,7 @@ describe('Sub2ApiConfigSection', () => {
       target: { value: 'shortcut' },
     });
     await waitFor(() =>
-      expect(screen.getByLabelText('Base URL')).toHaveValue('https://resolved.example.com'),
+      expect(resolvedBaseUrl()).toHaveTextContent('https://resolved.example.com'),
     );
     await fireEvent.input(email, {
       target: { value: 'shortcut@example.com' },

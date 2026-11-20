@@ -392,105 +392,144 @@
         >
       </div>
 
+      {#if !open && error}
+        <div class="config-error summary-error" role="alert">{error}</div>
+      {/if}
       {#if open}
         <div class="sub2api-config-editor">
-          <div class="config-row">
-            <span>Upstream</span>
-            <SelectMenu
-              label="Upstream"
-              value={upstream}
-              options={upstreamOptions.map((option) => ({
-                value: option,
-                label: sub2ApiUpstreamLabel(option),
-              }))}
-              onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
-            />
-          </div>
-          <label class="config-row">
-            <span>Provider</span>
-            <input
-              type="text"
-              value={providerName}
-              autocomplete="off"
-              spellcheck="false"
-              placeholder={upstream === 'claude' ? 'Settings name' : 'Provider or profile'}
-              aria-label={upstream === 'claude'
-                ? 'Claude settings provider'
-                : 'Codex provider or profile'}
-              disabled={saving || customBaseUrl}
-              oninput={(event) => updateProvider(event.currentTarget.value)}
-            />
-          </label>
-          {#if providerError}<div class="config-error" role="alert">{providerError}</div>{/if}
-          <div class="config-row">
-            <span>Custom Base URL</span>
-            <label class="switch custom-base-url-switch">
-              <input
-                type="checkbox"
-                role="switch"
-                aria-label="Use custom Base URL"
-                checked={customBaseUrl}
-                disabled={saving}
-                onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
-              />
-              <span></span>
-            </label>
-          </div>
-          <label class="config-row">
-            <span>Base URL</span>
-            <input
-              type="url"
-              bind:value={baseUrl}
-              autocomplete="url"
-              spellcheck="false"
-              placeholder={customBaseUrl ? 'https://sub2api.example.com' : 'Resolved automatically'}
-              aria-label="Base URL"
-              disabled={saving || !customBaseUrl}
-            />
-          </label>
-          <label class="config-row">
-            <span>Email</span>
-            <input
-              type="email"
-              bind:value={email}
-              autocomplete="username"
-              spellcheck="false"
-              placeholder="admin@example.com"
-              aria-label="Sub2API administrator email"
-              disabled={saving}
-            />
-          </label>
-          <div class="config-row">
-            <span>Password</span>
-            <div class="password-field">
-              <input
-                type={revealPassword ? 'text' : 'password'}
-                bind:value={password}
-                autocomplete="current-password"
-                placeholder={canReuseSavedPassword ? 'Unchanged' : 'Password'}
-                aria-label="Sub2API administrator password"
-                disabled={saving}
-              />
-              <button
-                type="button"
-                aria-label={revealPassword ? 'Hide password' : 'Show password'}
-                onclick={() => (revealPassword = !revealPassword)}
-              >
-                <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
-              </button>
+          <div class="config-group">
+            <div class="config-card">
+              <div class="config-row">
+                <span>Upstream</span>
+                <SelectMenu
+                  label="Upstream"
+                  value={upstream}
+                  options={upstreamOptions.map((option) => ({
+                    value: option,
+                    label: sub2ApiUpstreamLabel(option),
+                  }))}
+                  onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
+                />
+              </div>
             </div>
           </div>
-          <div class="config-row">
-            <span>Billing method</span>
-            <SelectMenu
-              label="Billing method"
-              value={billingMode}
-              options={[
-                { value: 'upstream', label: 'Upstream' },
-                { value: 'server', label: 'Sub2API' },
-              ]}
-              onChange={(value) => (billingMode = value as Sub2ApiBillingMode)}
-            />
+
+          <!-- The address and the administrator login both reach one Sub2API instance. -->
+          <div class="config-group">
+            <div class="config-card">
+              <div class="config-row">
+                <span>Custom Base URL</span>
+                <label class="switch custom-base-url-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-label="Use custom Base URL"
+                    checked={customBaseUrl}
+                    disabled={saving}
+                    onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
+                  />
+                  <span></span>
+                </label>
+              </div>
+              <!-- The address comes from one source: the switch above picks it, and
+               what it governs sits inside it. -->
+              <div class="config-dependent">
+                {#if customBaseUrl}
+                  <label class="config-row">
+                    <span>Base URL</span>
+                    <input
+                      type="url"
+                      bind:value={baseUrl}
+                      autocomplete="url"
+                      spellcheck="false"
+                      placeholder="https://sub2api.example.com"
+                      aria-label="Base URL"
+                      disabled={saving}
+                    />
+                  </label>
+                {:else}
+                  <label class="config-row">
+                    <span>Provider</span>
+                    <input
+                      type="text"
+                      value={providerName}
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder={upstream === 'claude' ? 'Settings name' : 'Provider or profile'}
+                      aria-label={upstream === 'claude'
+                        ? 'Claude settings provider'
+                        : 'Codex provider or profile'}
+                      disabled={saving}
+                      oninput={(event) => updateProvider(event.currentTarget.value)}
+                    />
+                  </label>
+                  {#if providerError}
+                    <div class="config-note config-error" role="alert">
+                      {providerError}
+                    </div>
+                  {:else}
+                    <p
+                      class="config-note config-resolved-url"
+                      role="status"
+                      aria-label="Resolved Base URL"
+                    >
+                      {resolvingProvider
+                        ? 'Looking up the Base URL…'
+                        : baseUrl || 'The Base URL is read from this provider.'}
+                    </p>
+                  {/if}
+                {/if}
+              </div>
+              <label class="config-row">
+                <span>Email</span>
+                <input
+                  type="email"
+                  bind:value={email}
+                  autocomplete="username"
+                  spellcheck="false"
+                  placeholder="admin@example.com"
+                  aria-label="Sub2API administrator email"
+                  disabled={saving}
+                />
+              </label>
+              <div class="config-row">
+                <span>Password</span>
+                <div class="password-field">
+                  <input
+                    type={revealPassword ? 'text' : 'password'}
+                    bind:value={password}
+                    autocomplete="current-password"
+                    placeholder={canReuseSavedPassword ? 'Unchanged' : 'Password'}
+                    aria-label="Sub2API administrator password"
+                    disabled={saving}
+                  />
+                  <button
+                    type="button"
+                    aria-label={revealPassword ? 'Hide password' : 'Show password'}
+                    onclick={() => (revealPassword = !revealPassword)}
+                  >
+                    <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="config-group">
+            <div class="config-card">
+              <div class="config-row">
+                <span>Billing method</span>
+                <SelectMenu
+                  label="Billing method"
+                  value={billingMode}
+                  options={[
+                    { value: 'upstream', label: 'Upstream' },
+                    { value: 'server', label: 'Sub2API' },
+                  ]}
+                  onChange={(value) => (billingMode = value as Sub2ApiBillingMode)}
+                />
+              </div>
+            </div>
           </div>
 
           <div class="sub2api-config-actions">
@@ -543,8 +582,6 @@
           {/if}
           {#if error}<div class="config-error" role="alert">{error}</div>{/if}
         </div>
-      {:else if error}
-        <div class="config-error summary-error" role="alert">{error}</div>
       {/if}
     </div>
   </div>
@@ -679,8 +716,12 @@
     padding: 5px 10px;
   }
 
+  /* Opened, the connection card holds its fields in captioned groups, each a
+     tinted panel inside the card. */
   .sub2api-config-editor {
     display: grid;
+    gap: 10px;
+    padding: 10px 10px 12px;
     border-top: 1px solid var(--separator);
   }
 
@@ -694,12 +735,54 @@
     font-size: 12px;
   }
 
-  .config-row + .config-row {
-    border-top: 1px solid var(--separator);
+  /* Separators start at the content inset, not the card edge. */
+  .config-card > .config-row + .config-row,
+  .config-card > .config-dependent + .config-row {
+    background: linear-gradient(var(--separator), var(--separator)) right top / calc(100% - 10px)
+      1px no-repeat;
   }
 
   .config-row > span {
     flex: 0 0 auto;
+  }
+
+  .config-card {
+    overflow: hidden;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--text) 4%, transparent);
+  }
+
+  .config-card .config-row {
+    padding-inline: 10px;
+  }
+
+  /* What the switch governs hangs under it, one step in along a guide. */
+  .config-dependent {
+    margin: 0 10px 8px 12px;
+    padding-left: 10px;
+    border-left: 2px solid var(--separator);
+  }
+
+  .config-card .config-dependent .config-row {
+    min-height: 34px;
+    padding: 3px 0;
+  }
+
+  .config-note {
+    margin: 0;
+    padding: 0 10px 9px;
+    color: var(--secondary);
+    font-size: 10px;
+    line-height: 14px;
+  }
+
+  .config-dependent .config-note {
+    padding: 0 0 4px;
+  }
+
+  .config-resolved-url {
+    overflow-wrap: anywhere;
+    text-align: right;
   }
 
   .custom-base-url-switch {
@@ -762,6 +845,12 @@
     max-width: 190px;
   }
 
+  /* Fields share one width so their left edges line up down a group. */
+  .config-row > input:not([type='checkbox']),
+  .config-row > .password-field {
+    flex: 0 1 180px;
+  }
+
   .password-field input {
     padding-right: 30px;
   }
@@ -783,8 +872,7 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    padding: 8px 12px 12px;
-    border-top: 1px solid var(--separator);
+    padding: 0 4px;
   }
 
   .sub2api-config-actions .primary {
@@ -800,10 +888,6 @@
   .remove-item-confirm button:disabled,
   .remove-item-row:disabled {
     opacity: 0.5;
-  }
-
-  .clear-confirm {
-    margin: 0 12px 12px;
   }
 
   .clear-confirm,
@@ -868,7 +952,7 @@
   }
 
   .sub2api-config-editor > .config-error {
-    padding: 0 12px 8px;
+    padding: 0 4px;
   }
 
   .summary-error {
