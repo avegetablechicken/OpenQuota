@@ -34,6 +34,13 @@ Antigravity or `agy` renewed it. Access tokens OpenQuota renews itself are saved
 sign-in when possible, unless it now holds a different account or a newer token, and are also kept
 in OpenQuota's own data folder.
 
+On macOS, OpenQuota reads and writes the shared sign-in (Keychain item `gemini`, account
+`antigravity`) through `/usr/bin/security`, as `agy` does. Every write sets the item's partition
+list to the writer's, so writing through the same tool keeps it at `apple-tool:` and Antigravity,
+`agy` and OpenQuota keep access without new Keychain prompts. If another app last wrote the item
+directly, macOS may ask once to allow `security` access until the item is next saved this way. A
+request left unanswered for a minute is abandoned and retried on a later refresh.
+
 ## Troubleshooting
 
 - **Not signed in** — open Antigravity or run `agy`, complete sign-in, then refresh OpenQuota.

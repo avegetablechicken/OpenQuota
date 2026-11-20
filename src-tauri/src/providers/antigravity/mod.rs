@@ -3,6 +3,8 @@ mod client;
 mod discovery;
 mod local_usage;
 mod mapper;
+#[cfg(any(target_os = "macos", test))]
+mod security_cli;
 
 use std::{path::PathBuf, sync::Arc};
 

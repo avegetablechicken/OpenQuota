@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Read},
+    io::{self, Read, Write},
     process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -19,11 +19,35 @@ pub fn background_command(program: &str) -> Command {
 
 /// Captures a background command while enforcing a real child-process deadline.
 pub fn output_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<Output> {
+    output_with_input_and_timeout(command, None, timeout)
+}
+
+/// Like [`output_with_timeout`], feeding `input` (kept out of the command line, where other
+/// processes could see it) on the child's standard input when given.
+pub fn output_with_input_and_timeout(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+) -> io::Result<Output> {
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    let stdin_writer = match (input, child.stdin.take()) {
+        (Some(input), Some(mut stdin)) => {
+            let input = zeroize::Zeroizing::new(input.to_vec());
+            Some(thread::spawn(move || {
+                stdin.write_all(&input)?;
+                stdin.flush()
+            }))
+        }
+        _ => None,
+    };
     let stdout = child
         .stdout
         .take()
@@ -51,6 +75,7 @@ pub fn output_with_timeout(command: &mut Command, timeout: Duration) -> io::Resu
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = join_writer(stdin_writer);
                 let _ = join_reader(stdout_reader);
                 let _ = join_reader(stderr_reader);
                 return Err(io::Error::new(
@@ -61,6 +86,7 @@ pub fn output_with_timeout(command: &mut Command, timeout: Duration) -> io::Resu
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = join_writer(stdin_writer);
                 let _ = join_reader(stdout_reader);
                 let _ = join_reader(stderr_reader);
                 return Err(error);
@@ -68,10 +94,21 @@ pub fn output_with_timeout(command: &mut Command, timeout: Duration) -> io::Resu
         }
     };
 
-    Ok(Output {
+    let written = join_writer(stdin_writer);
+    let output = Output {
         status,
         stdout: join_reader(stdout_reader)?,
         stderr: join_reader(stderr_reader)?,
+    };
+    written?;
+    Ok(output)
+}
+
+fn join_writer(writer: Option<thread::JoinHandle<io::Result<()>>>) -> io::Result<()> {
+    writer.map_or(Ok(()), |writer| {
+        writer
+            .join()
+            .map_err(|_| io::Error::other("background input writer panicked"))?
     })
 }
 
@@ -145,7 +182,7 @@ mod tests {
 mod unix_tests {
     use std::time::{Duration, Instant};
 
-    use super::{background_command, output_with_timeout};
+    use super::{background_command, output_with_input_and_timeout, output_with_timeout};
 
     #[test]
     fn background_command_deadline_terminates_a_slow_process() {
@@ -156,6 +193,28 @@ mod unix_tests {
         )
         .unwrap_err();
 
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn background_command_input_arrives_on_stdin_and_the_deadline_still_holds() {
+        let output = output_with_input_and_timeout(
+            &mut background_command("cat"),
+            Some(b"secret line\n"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"secret line\n");
+
+        let started = Instant::now();
+        let error = output_with_input_and_timeout(
+            background_command("sleep").arg("5"),
+            Some(b"ignored\n"),
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(2));
     }

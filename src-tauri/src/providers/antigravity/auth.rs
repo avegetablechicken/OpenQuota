@@ -11,9 +11,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use crate::providers::credential_store::{
-    decode_go_keyring_value, read_generic_password, write_generic_password,
-};
+use crate::providers::credential_store::decode_go_keyring_value;
+#[cfg(not(target_os = "macos"))]
+use crate::providers::credential_store::{read_generic_password, write_generic_password};
 
 use super::AntigravityError;
 
@@ -144,9 +144,22 @@ pub trait SharedLogin: Send + Sync {
     fn write(&self, value: &[u8]) -> Result<(), String>;
 }
 
-/// The generic password `gemini`/`antigravity` in the system credential store.
+/// The generic password `gemini`/`antigravity` in the system credential store. On macOS it is
+/// kept through `/usr/bin/security`, as `agy` keeps it (see `security_cli`).
 pub struct SystemLogin;
 
+#[cfg(target_os = "macos")]
+impl SharedLogin for SystemLogin {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        super::security_cli::read(&super::security_cli::SystemSecurity)
+    }
+
+    fn write(&self, value: &[u8]) -> Result<(), String> {
+        super::security_cli::write(&super::security_cli::SystemSecurity, value)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 impl SharedLogin for SystemLogin {
     fn read(&self) -> Result<Option<Vec<u8>>, String> {
         read_generic_password("gemini", "antigravity")
