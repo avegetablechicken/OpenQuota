@@ -565,10 +565,7 @@
     // A card that opened its own menu has already claimed the event.
     if (event.defaultPrevented) return;
     event.preventDefault();
-    // Total Spend keeps its right click inert.
-    const inTotalSpend =
-      event.target instanceof Element && event.target.closest('[data-total-spend]') !== null;
-    if (settingsState && screen === 'dashboard' && !inTotalSpend) {
+    if (settingsState && screen === 'dashboard') {
       openOptionsMenu({ x: event.clientX, y: event.clientY });
     }
   }

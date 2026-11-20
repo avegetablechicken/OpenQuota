@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
   import Icon from './Icon.svelte';
   import { sub2ApiUpstreams } from './sub2ApiUpstreams';
   import { formatSpendValue, totalSpendRingCenter } from './metricFormat';
+  import { popupMenu } from './nativeMenu';
   import SelectMenu from './SelectMenu.svelte';
   import type { ProviderCatalogIndex } from './metrics';
   import { TOTAL_SPEND_GEOMETRY } from './shareCard';
@@ -52,13 +52,6 @@
   const periodIndex = $derived(
     settings.totalSpendPeriod === 'today' ? 0 : settings.totalSpendPeriod === 'yesterday' ? 1 : 2,
   );
-  let shareCopied = $state(false);
-  let shareTimer: ReturnType<typeof setTimeout> | undefined;
-
-  onDestroy(() => {
-    if (shareTimer) clearTimeout(shareTimer);
-  });
-
   function display(value: number | null) {
     if (value === null) return '—';
     return formatSpendValue(value, settings.totalSpendMetric);
@@ -78,11 +71,6 @@
       return `${exact} · Estimated locally, so it may be off`;
     }
     return exact;
-  }
-  function metricTitle() {
-    if (settings.totalSpendMetric === 'tokens') return 'Tokens';
-    if (settings.totalSpendMetric === 'costPerMillion') return 'Cost/MTok';
-    return 'Cost';
   }
   function patch(patch: Partial<AppSettings>) {
     onChange({ ...settings, ...patch });
@@ -107,11 +95,15 @@
   function hasScopeHistory(scope: SpendProjection['scope']) {
     return providers.some((provider) => provider.usageHistories[scope]);
   }
-  async function share() {
-    if (!(await onShare(projections))) return;
-    shareCopied = true;
-    if (shareTimer) clearTimeout(shareTimer);
-    shareTimer = setTimeout(() => (shareCopied = false), 1400);
+  // Total Spend's actions live in its context menu, drawn by the system where
+  // the pointer is.
+  function openMenu(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    void popupMenu([{ text: 'Share Screenshot', action: () => void onShare(projections) }], {
+      x: event.clientX,
+      y: event.clientY,
+    }).catch(() => undefined);
   }
 </script>
 
@@ -119,6 +111,7 @@
   class="total-spend-section"
   aria-label="Total Spend"
   data-total-spend
+  oncontextmenu={openMenu}
   style={`--total-card-padding-x:${TOTAL_SPEND_GEOMETRY.cardPaddingX}px;--total-card-padding-y:${TOTAL_SPEND_GEOMETRY.cardPaddingY}px;--total-switcher-height:${TOTAL_SPEND_GEOMETRY.switcherHeight}px;--total-period-size:${TOTAL_SPEND_GEOMETRY.periodFontSize}px;--total-body-gap:${TOTAL_SPEND_GEOMETRY.bodyGap}px;--total-legend-gap:${TOTAL_SPEND_GEOMETRY.legendGap}px;--total-ring-size:${TOTAL_SPEND_GEOMETRY.ringDiameter}px;--total-center-size:${TOTAL_SPEND_GEOMETRY.centerFontSize}px;--total-center-unit-size:${TOTAL_SPEND_GEOMETRY.centerUnitFontSize}px;--total-legend-size:${TOTAL_SPEND_GEOMETRY.legendFontSize}px;`}
 >
   <div class="total-card__header">
@@ -152,14 +145,6 @@
           >
         {/each}
       </div>
-      <button
-        class="icon-button icon-button--plain total-card__share"
-        type="button"
-        aria-label={`Share ${metricTitle()} Screenshot`}
-        data-tooltip="Share Screenshot"
-        onclick={share}
-        ><Icon name={shareCopied ? 'check' : 'share'} size={14} strokeWidth={1.8} /></button
-      >
     </div>
   </div>
   <div class="total-card">

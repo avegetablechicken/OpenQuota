@@ -108,7 +108,6 @@
   }
 
   .provider-warning::after,
-  .total-card__share::after,
   .screen-header > :last-child[data-tooltip]::after {
     right: 0;
     left: auto;
@@ -118,8 +117,6 @@
 
   .provider-warning:hover::after,
   .provider-warning:focus-visible::after,
-  .total-card__share:hover::after,
-  .total-card__share:focus-visible::after,
   .screen-header > :last-child[data-tooltip]:hover::after,
   .screen-header > :last-child[data-tooltip]:focus-visible::after {
     transform: translate(0, 0) scale(1);

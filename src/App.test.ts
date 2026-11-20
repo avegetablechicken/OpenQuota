@@ -1888,10 +1888,19 @@ describe('OpenQuota dashboard', () => {
     await chooseMenuItem('Check for Updates…');
     expect(openMenu()).toBeNull();
 
-    await fireEvent.contextMenu(screen.getByRole('region', { name: 'Total Spend' }));
-    expect(openMenu()).toBeNull();
-    await fireEvent.contextMenu(document.querySelector('.spend-ring__label')!);
-    expect(openMenu()).toBeNull();
+    // Total Spend opens its own menu, wherever on the card.
+    const renderTotal = vi
+      .spyOn(shareCard, 'renderTotalSpendShareCard')
+      .mockReturnValue(document.createElement('canvas'));
+    await fireEvent.contextMenu(document.querySelector('.spend-ring__label')!, {
+      clientX: 80,
+      clientY: 90,
+    });
+    expect(menuLabels()).toEqual(['Share Screenshot']);
+    expect(openMenu()!.at).toEqual({ x: 80, y: 90 });
+    await chooseMenuItem('Share Screenshot');
+    expect(renderTotal).toHaveBeenCalled();
+    renderTotal.mockRestore();
 
     await fireEvent.keyDown(document, { key: ',', ctrlKey: true });
     await screen.findByRole('heading', { name: 'Settings' });
