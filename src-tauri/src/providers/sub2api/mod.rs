@@ -1117,15 +1117,12 @@ impl UsageProvider for Sub2ApiProvider {
         self.display_name.clone()
     }
 
+    // A configured connection shows its last snapshot until the next refresh
+    // reprices it in the chosen billing mode, whichever mode or release wrote
+    // it: an older figure beats an empty card while the instance is unreachable.
     fn cache_identity(&self) -> CacheIdentity<'_> {
         if self.configured.load(Ordering::SeqCst) {
-            if fs::read_to_string(&self.configured_marker).ok().as_deref()
-                == Some(Sub2ApiBillingMode::Server.cache_key())
-            {
-                CacheIdentity::Resolved(Sub2ApiBillingMode::Server.cache_key())
-            } else {
-                CacheIdentity::Resolved(Sub2ApiBillingMode::Upstream.cache_key())
-            }
+            CacheIdentity::Unresolved
         } else {
             CacheIdentity::Resolved("sub2api-unconfigured")
         }
@@ -1717,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn slots_never_load_old_gateway_cost_snapshots() {
+    fn configured_slots_keep_snapshots_from_any_billing_mode() {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         storage
@@ -1746,13 +1743,21 @@ mod tests {
             .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
             .unwrap()
             .is_none());
-        provider
-            .set_configuration_marker(Some(super::Sub2ApiBillingMode::Upstream))
-            .unwrap();
-        assert!(storage
-            .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
-            .unwrap()
-            .is_none());
+        // Written before billing modes, without a mode: kept until the next refresh.
+        for mode in [
+            super::Sub2ApiBillingMode::Upstream,
+            super::Sub2ApiBillingMode::Server,
+        ] {
+            provider.set_configuration_marker(Some(mode)).unwrap();
+            assert_eq!(
+                storage
+                    .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
+                    .unwrap()
+                    .and_then(|snapshot| snapshot.plan)
+                    .as_deref(),
+                Some("Old plan"),
+            );
+        }
     }
 
     #[test]
