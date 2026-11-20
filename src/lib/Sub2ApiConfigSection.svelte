@@ -371,19 +371,27 @@
       <div class="sub2api-config-summary">
         <ProviderIcon
           {providerId}
-          upstreamProvider={connectionState.configured ? connectionState.upstream : null}
+          upstreamProvider={open
+            ? upstream
+            : connectionState.configured
+              ? connectionState.upstream
+              : null}
           size={18}
         />
         <span>
           <b
-            >{connectionState.configured
-              ? sub2ApiPublicName(connectionState.upstream)
-              : 'Not configured'}</b
+            >{open
+              ? sub2ApiPublicName(upstream)
+              : connectionState.configured
+                ? sub2ApiPublicName(connectionState.upstream)
+                : 'Not configured'}</b
           >
           <small
-            >{connectionState.configured
-              ? connectionState.email
-              : 'Base URL and administrator login'}</small
+            >{open
+              ? email.trim() || 'Base URL and administrator login'
+              : connectionState.configured
+                ? connectionState.email
+                : 'Base URL and administrator login'}</small
           >
         </span>
         <i class:missing={!connectionState.configured} aria-hidden="true"></i>

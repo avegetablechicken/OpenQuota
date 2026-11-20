@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import Sub2ApiConfigSection from './Sub2ApiConfigSection.svelte';
+import { providerIconPath } from './providerIconPaths';
 import { selectOption } from '../test/selectOption';
 import {
   forgetSub2ApiUpstream,
@@ -19,6 +20,11 @@ async function chooseUpstream(name: 'Codex' | 'Claude') {
 // Without a custom Base URL, the resolved address is shown as a note, not a field.
 function resolvedBaseUrl() {
   return screen.getByRole('status', { name: 'Resolved Base URL' });
+}
+
+// Whether the saved connection is configured, as the header's status dot shows.
+function statusDot() {
+  return document.querySelector('.sub2api-config-summary i')!;
 }
 
 describe('Sub2ApiConfigSection', () => {
@@ -88,6 +94,32 @@ describe('Sub2ApiConfigSection', () => {
     expect(within(connections).getAllByRole('listitem')).toHaveLength(1);
     expect(within(connections).getByText('Base URL and administrator login')).toBeInTheDocument();
     expect(get(sub2ApiUpstreams)['sub2api@2']).toBeUndefined();
+  });
+
+  it('shows the upstream and email being edited in the header', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    const upstreamLayer = () =>
+      document.querySelector('.sub2api-config-summary [data-icon-layer="upstream"] path');
+    expect(upstreamLayer()).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(upstreamLayer()).toHaveAttribute('d', providerIconPath('codex'));
+    expect(screen.getByText('Sub2API · Codex')).toBeInTheDocument();
+    await chooseUpstream('Claude');
+    expect(upstreamLayer()).toHaveAttribute('d', providerIconPath('claude'));
+    expect(screen.getByText('Sub2API · Claude')).toBeInTheDocument();
+    expect(screen.getByText('Base URL and administrator login')).toBeInTheDocument();
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'draft@example.com' },
+    });
+    expect(screen.getByText('draft@example.com')).toBeInTheDocument();
+    expect(statusDot()).toHaveClass('missing');
+
+    // Closed without saving, the header shows the saved connection again.
+    await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(upstreamLayer()).toBeNull();
+    expect(screen.getByText('Not configured')).toBeInTheDocument();
   });
 
   it('saves a Claude upstream login without retaining the password in the UI', async () => {
@@ -559,7 +591,7 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://failed.example.com');
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('failed@example.com');
     expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('');
-    expect(screen.getByText('Not configured')).toBeInTheDocument();
+    expect(statusDot()).toHaveClass('missing');
   });
 
   it('clears saved connection fields without deleting the Sub2API item', async () => {
@@ -600,7 +632,7 @@ describe('Sub2ApiConfigSection', () => {
       }),
     );
     expect(mocks.invoke).not.toHaveBeenCalledWith('delete_sub2api_config', expect.anything());
-    expect(screen.getByText('Not configured')).toBeInTheDocument();
+    expect(statusDot()).toHaveClass('missing');
   });
 
   it('deletes an item from the separate bottom action row', async () => {
