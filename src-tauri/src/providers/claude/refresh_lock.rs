@@ -724,11 +724,18 @@ mod tests {
         let dir = config_dir(&home);
         let [current, legacy] = lock_paths(&dir);
         let lock = RefreshLock::acquire(&dir, quick(0)).unwrap().unwrap();
-        let before = modified(&current).unwrap();
+        let before_current = modified(&current).unwrap();
+        let before_legacy = modified(&legacy).unwrap();
         // The keeper bumps the locks: a moving mtime marks the holder alive.
-        thread::sleep(UPDATE + Duration::from_millis(500));
-        assert!(modified(&current).unwrap() > before);
-        assert!(modified(&legacy).unwrap() > before);
+        let deadline = Instant::now() + UPDATE * 3;
+        while (modified(&current).unwrap() <= before_current
+            || modified(&legacy).unwrap() <= before_legacy)
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(modified(&current).unwrap() > before_current);
+        assert!(modified(&legacy).unwrap() > before_legacy);
         assert!(!lock.compromised());
     }
 
@@ -957,17 +964,31 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let dir = config_dir(&home);
             let [current, _] = held_by(&dir, dead_pid(), |_| {});
+            let stop = Arc::new(AtomicBool::new(false));
+            let (ready, started) = mpsc::channel();
             let bumper = {
                 let current = current.clone();
+                let stop = stop.clone();
+                let mut next = modified(&current).unwrap();
                 thread::spawn(move || {
-                    for step in 0..20u64 {
-                        thread::sleep(Duration::from_millis(30));
-                        let _ = touch(&current, SystemTime::now() + Duration::from_millis(step));
+                    let _ = ready.send(());
+                    while !stop.load(Ordering::Relaxed) {
+                        next += Duration::from_secs(1);
+                        let _ = touch(&current, next);
+                        thread::sleep(Duration::from_millis(10));
                     }
                 })
             };
-            assert!(RefreshLock::acquire(&dir, quick(500)).unwrap().is_none());
+            started.recv().unwrap();
+            let wait = Wait {
+                total: Duration::from_millis(700),
+                backoff: Duration::from_millis(10),
+                watch: Duration::from_millis(300),
+            };
+            let acquired = RefreshLock::acquire(&dir, wait).unwrap();
+            stop.store(true, Ordering::Relaxed);
             bumper.join().unwrap();
+            assert!(acquired.is_none());
             assert!(current.is_dir());
         }
     }
