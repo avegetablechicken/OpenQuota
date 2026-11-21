@@ -124,9 +124,13 @@ bash scripts/build-macos.sh dmg          # macOS
 For a macOS app bundle only, run `bash scripts/build-macos.sh` (or
 `npm run build:macos`). Add `--check` to run the full quality checks first.
 The script uses the installed dependencies, preserves an explicit
-`APPLE_SIGNING_IDENTITY`, and otherwise signs the bundle ad hoc so notification
-authorization works. DMG builds fall back to packaging without Finder layout if
-Automation permission is unavailable, then verify the image contents and print
+`APPLE_SIGNING_IDENTITY`, and otherwise selects a local Apple Development
+certificate, falling back to ad-hoc signing if none is available. Set
+`APPLE_SIGNING_IDENTITY=-` to explicitly use ad-hoc signing. Reusing the same
+certificate and bundle identifier allows existing Keychain authorization to
+survive rebuilds. The first signed build may still require “Always Allow”.
+Notarization is a separate step. DMG builds fall back to packaging without
+Finder layout if Automation permission is unavailable, then verify the image contents and print
 its SHA-256 checksum. Artifacts are written under `src-tauri/target/release/bundle`.
 
 For a Windows x64 app only, run `corepack pnpm build:windows` (or

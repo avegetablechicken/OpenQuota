@@ -22,9 +22,13 @@ if [[ "$(uname -s)" != Darwin ]]; then
   exit 1
 fi
 export PATH="/tmp/openquota-pnpm-shim:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
-# A linker-only signature breaks native notification authorization. Keep an
-# explicitly configured Developer ID identity; otherwise sign the entire bundle.
-export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+# A stable signing identity preserves Keychain trust across local rebuilds.
+# An explicit '-' still selects ad hoc; no certificate also falls back to it.
+if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  APPLE_SIGNING_IDENTITY="$(python3 scripts/macos_signing.py)"
+fi
+export APPLE_SIGNING_IDENTITY
+printf 'Signing identity: %s\n' "$APPLE_SIGNING_IDENTITY"
 if [[ ! -x node_modules/.bin/tauri || ! -x node_modules/.bin/vite ]]; then
   echo 'Missing node_modules dependencies. Install the project dependencies first.' >&2
   exit 1
