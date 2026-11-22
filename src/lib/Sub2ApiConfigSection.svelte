@@ -415,6 +415,7 @@
                   value: option,
                   label: sub2ApiUpstreamLabel(option),
                 }))}
+                disabled={saving}
                 onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
               />
             </div>
@@ -521,6 +522,7 @@
                 { value: 'upstream', label: 'Upstream' },
                 { value: 'server', label: 'Sub2API' },
               ]}
+              disabled={saving}
               onChange={(value) => (billingMode = value as Sub2ApiBillingMode)}
             />
           </div>

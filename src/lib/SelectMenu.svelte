@@ -13,9 +13,10 @@
     options: SelectOption[];
     onChange: (value: string) => void;
     variant?: 'field' | 'title';
+    disabled?: boolean;
   }
 
-  let { label, value, options, onChange, variant = 'field' }: Props = $props();
+  let { label, value, options, onChange, variant = 'field', disabled = false }: Props = $props();
   let pullDown = $state<HTMLButtonElement>();
   const selectedLabel = $derived(options.find((option) => option.value === value)?.label ?? value);
 
@@ -24,19 +25,19 @@
     const next = select.value;
     // The page owns the value: it shows `value` until the change is applied.
     select.value = value;
-    if (next !== value) onChange(next);
+    if (!disabled && next !== value) onChange(next);
   }
 
   // A title pulls its menu down below it, the chosen option checked, rather
   // than laying the menu over itself and what is above as a pop-up does.
   function openPullDown() {
-    if (!pullDown) return;
+    if (disabled || !pullDown) return;
     void popupMenu(
       options.map((option) => ({
         text: option.label,
         checked: option.value === value,
         action: () => {
-          if (option.value !== value) onChange(option.value);
+          if (!disabled && option.value !== value) onChange(option.value);
         },
       })),
       below(pullDown),
@@ -48,13 +49,18 @@
      highlights, checks and moves with the keys as every other menu does. The
      trigger drawn beneath shows the chosen label and sizes the control to it.
      A title is a pull-down button opening a system menu (nativeMenu). -->
-<div class="select-menu" class:select-menu--title={variant === 'title'}>
+<div
+  class="select-menu"
+  class:select-menu--title={variant === 'title'}
+  class:select-menu--disabled={disabled}
+>
   {#if variant === 'title'}
     <button
       type="button"
       class="select-menu__trigger"
       aria-label={label}
       aria-haspopup="menu"
+      {disabled}
       bind:this={pullDown}
       onclick={openPullDown}
     >
@@ -68,7 +74,7 @@
         ><Icon name="chevron-up-down" size={11} strokeWidth={2.2} /></span
       >
     </span>
-    <select class="select-menu__native" aria-label={label} {value} onchange={change}>
+    <select class="select-menu__native" aria-label={label} {value} {disabled} onchange={change}>
       {#each options as option (option.value)}
         <option value={option.value}>{option.label}</option>
       {/each}
@@ -132,8 +138,13 @@
       transition: background var(--motion-switch);
     }
 
-    .select-menu:hover .select-menu__stepper {
+    .select-menu:not(.select-menu--disabled):hover .select-menu__stepper {
       background: color-mix(in srgb, var(--text) 14%, transparent);
+    }
+
+    .select-menu.select-menu--disabled .select-menu__trigger {
+      opacity: 0.5;
+      cursor: default;
     }
 
     /* Covers the trigger so a click or a key reaches the native control. */
@@ -154,6 +165,10 @@
       opacity: 0;
       font: inherit;
       cursor: pointer;
+    }
+
+    .select-menu__native:disabled {
+      cursor: default;
     }
 
     .select-menu:has(.select-menu__native:focus-visible) .select-menu__stepper {

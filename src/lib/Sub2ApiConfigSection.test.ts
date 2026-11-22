@@ -654,4 +654,102 @@ describe('Sub2ApiConfigSection', () => {
     );
     expect(onRemove).toHaveBeenCalledOnce();
   });
+
+  it('disables Upstream and Billing method selectors while saving and re-enables on settle', async () => {
+    const createDeferredSave = () => {
+      let resolve!: (value: {
+        configured: boolean;
+        baseUrl: string;
+        codexProvider: string;
+        customBaseUrl: boolean;
+        email: string;
+        upstream: string;
+        billingMode: string;
+      }) => void;
+      let reject!: (reason: Error) => void;
+      const promise = new Promise<{
+        configured: boolean;
+        baseUrl: string;
+        codexProvider: string;
+        customBaseUrl: boolean;
+        email: string;
+        upstream: string;
+        billingMode: string;
+      }>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    };
+
+    let currentSave = createDeferredSave();
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === 'get_sub2api_config_state') {
+        return Promise.resolve({
+          configured: false,
+          baseUrl: '',
+          codexProvider: '',
+          customBaseUrl: false,
+          email: '',
+          upstream: 'codex',
+          billingMode: 'upstream',
+        });
+      }
+      if (command === 'save_sub2api_config') return currentSave.promise;
+      return Promise.reject(new Error(`unexpected command ${command}`));
+    });
+
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
+    await fireEvent.input(screen.getByLabelText('Base URL'), {
+      target: { value: 'https://saving.example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'saving@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'saving-password' },
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('save_sub2api_config', expect.anything()),
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const upstreamSelect = screen.getByRole('combobox', { name: 'Upstream' });
+    const billingSelect = screen.getByRole('combobox', { name: 'Billing method' });
+    expect(upstreamSelect).toBeDisabled();
+    expect(billingSelect).toBeDisabled();
+
+    // Attempting to change either selector while saving is in flight is blocked.
+    await chooseUpstream('Claude');
+    await selectOption(billingSelect, 'Sub2API');
+    expect(upstreamSelect).toHaveValue('codex');
+    expect(billingSelect).toHaveValue('upstream');
+
+    currentSave.resolve({
+      configured: true,
+      baseUrl: 'https://saving.example.com',
+      codexProvider: '',
+      customBaseUrl: true,
+      email: 'saving@example.com',
+      upstream: 'codex',
+      billingMode: 'upstream',
+    });
+    await waitFor(() => expect(upstreamSelect).toBeEnabled());
+    expect(billingSelect).toBeEnabled();
+
+    // Verify re-enablement on save rejection as well.
+    currentSave = createDeferredSave();
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.queryByRole('combobox', { name: 'Upstream' })).not.toBeInTheDocument();
+
+    currentSave.reject(new Error('Network timeout'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Network timeout');
+    expect(screen.getByRole('combobox', { name: 'Upstream' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: 'Billing method' })).toBeEnabled();
+  });
 });

@@ -79,4 +79,61 @@ describe('SelectMenu', () => {
     await chooseMenuItem('Tokens');
     expect(onChange).toHaveBeenCalledTimes(1);
   });
+
+  it('disables the field select and ignores changes when disabled', async () => {
+    const onChange = vi.fn();
+    render(SelectMenu, { label: 'Metric', value: 'cost', options, onChange, disabled: true });
+
+    const select = screen.getByRole('combobox', { name: 'Metric' });
+    expect(select).toBeDisabled();
+    expect(select.closest('.select-menu')).toHaveClass('select-menu--disabled');
+
+    await selectOption(select, 'Tokens');
+    expect(onChange).not.toHaveBeenCalled();
+    expect(select).toHaveDisplayValue('Cost');
+  });
+
+  it('disables the title button and guards both click and late menu actions when disabled', async () => {
+    const onChange = vi.fn();
+    const { rerender } = render(SelectMenu, {
+      label: 'Metric',
+      value: 'tokens',
+      options,
+      onChange,
+      variant: 'title',
+      disabled: true,
+    });
+
+    const button = screen.getByRole('button', { name: 'Metric' });
+    expect(button).toBeDisabled();
+    expect(button.closest('.select-menu')).toHaveClass('select-menu--disabled');
+
+    await fireEvent.click(button);
+    expect(openMenu()).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+
+    // If opened while enabled and then disabled before the user picks an item,
+    // the late action callback does not fire onChange.
+    await rerender({
+      label: 'Metric',
+      value: 'tokens',
+      options,
+      onChange,
+      variant: 'title',
+      disabled: false,
+    });
+    await fireEvent.click(button);
+    expect(openMenu()).not.toBeNull();
+
+    await rerender({
+      label: 'Metric',
+      value: 'tokens',
+      options,
+      onChange,
+      variant: 'title',
+      disabled: true,
+    });
+    await chooseMenuItem('Cost');
+    expect(onChange).not.toHaveBeenCalled();
+  });
 });
