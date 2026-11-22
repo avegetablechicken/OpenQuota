@@ -38,24 +38,19 @@ try {
     if ($runningApp) {
         throw "Close the running application before rebuilding: $appPath"
     }
+    $npm = Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1 |
+        ForEach-Object { $_.Source }
+    if (-not $npm) {
+        throw 'Missing npm.cmd on PATH.'
+    }
     $tauri = Join-Path $PWD 'node_modules/.bin/tauri.cmd'
     # Select the x64 compiler itself, including on Windows ARM64 hosts.
     $env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-msvc'
     Invoke-Checked rustc @('-vV')
     if ($Check) {
-        $packageRunner = foreach ($candidate in @('npm.cmd', 'pnpm.exe', 'pnpm.cmd')) {
-            $resolved = Get-Command $candidate -CommandType Application -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($resolved) {
-                $resolved.Source
-                break
-            }
-        }
-        if (-not $packageRunner) {
-            throw 'Missing npm.cmd or pnpm on PATH.'
-        }
         foreach ($script in @('verify:versions', 'verify:contracts', 'lint', 'check', 'test', 'build', 'verify:rust')) {
-            Invoke-Checked $packageRunner @('run', $script)
+            Invoke-Checked $npm @('run', $script)
         }
         Invoke-Checked git @('diff', '--check')
     }
