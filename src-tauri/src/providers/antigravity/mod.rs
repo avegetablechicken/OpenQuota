@@ -183,7 +183,7 @@ impl AntigravityProvider {
                 .client
                 .call_language_server(&server, "RetrieveUserQuotaSummary")
             {
-                if let Some(quotas) = parse_quota_summary(&summary) {
+                if let Some(quotas) = parse_quota_summary(&summary, Utc::now()) {
                     let plan = self
                         .client
                         .call_language_server(&server, "GetUserStatus")
@@ -195,7 +195,7 @@ impl AntigravityProvider {
 
             if let Some(status) = self.client.call_language_server(&server, "GetUserStatus") {
                 if let Some((plan, configs)) = parse_user_status(&status) {
-                    let quotas = build_legacy_quotas(configs);
+                    let quotas = build_legacy_quotas(configs, Utc::now());
                     if !quotas.is_empty() {
                         return Ok(snapshot(plan, quotas));
                     }
@@ -206,7 +206,7 @@ impl AntigravityProvider {
                     .as_ref()
                     .and_then(parse_command_model_configs)
                 {
-                    let quotas = build_legacy_quotas(configs);
+                    let quotas = build_legacy_quotas(configs, Utc::now());
                     if !quotas.is_empty() {
                         return Ok(snapshot(None, quotas));
                     }
@@ -330,7 +330,7 @@ impl AntigravityProvider {
             json!({}),
             CloudUserAgent::Antigravity,
         ) {
-            CloudOutcome::Ok(value) => parse_quota_summary(&value),
+            CloudOutcome::Ok(value) => parse_quota_summary(&value, Utc::now()),
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
             CloudOutcome::Unavailable => None,
         };
@@ -346,7 +346,7 @@ impl AntigravityProvider {
             json!({}),
             CloudUserAgent::Antigravity,
         ) {
-            CloudOutcome::Ok(value) => build_legacy_quotas(parse_cloud_models(&value)),
+            CloudOutcome::Ok(value) => build_legacy_quotas(parse_cloud_models(&value), Utc::now()),
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
             CloudOutcome::Unavailable => Vec::new(),
         };
@@ -390,7 +390,7 @@ impl AntigravityProvider {
         }
         match quota {
             CloudOutcome::Ok(value) => {
-                let quotas = build_legacy_quotas(parse_quota_buckets(&value));
+                let quotas = build_legacy_quotas(parse_quota_buckets(&value), Utc::now());
                 if !quotas.is_empty() {
                     return Ok(snapshot(plan, quotas));
                 }

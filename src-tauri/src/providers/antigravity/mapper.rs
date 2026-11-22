@@ -35,7 +35,30 @@ const BUCKETS: [(&str, &str, &str, u64); 4] = [
     ),
 ];
 
-pub fn parse_quota_summary(value: &Value) -> Option<Vec<QuotaWindow>> {
+/// How far an idle window's reset may fall short of a whole window from now: the request's
+/// time and the two clocks may differ by this much.
+const IDLE_MARGIN_SECONDS: i64 = 90;
+
+/// A window's reset, unless the window is idle. An untouched window reports its reset a whole
+/// window from each request, rolling on; it starts with the first use, its reset then fixed. An
+/// idle window has no reset, so that it does not read as started.
+fn started_reset(
+    remaining: f64,
+    reset: Option<chrono::DateTime<chrono::Utc>>,
+    period_seconds: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let idle = remaining >= 1.0
+        && reset.is_some_and(|at| {
+            (at - now).num_seconds() >= period_seconds as i64 - IDLE_MARGIN_SECONDS
+        });
+    reset.filter(|_| !idle)
+}
+
+pub fn parse_quota_summary(
+    value: &Value,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Vec<QuotaWindow>> {
     let groups = value
         .pointer("/response/groups")
         .or_else(|| value.get("groups"))?
@@ -72,7 +95,7 @@ pub fn parse_quota_summary(value: &Value) -> Option<Vec<QuotaWindow>> {
                     id: (*quota_id).into(),
                     label: (*label).into(),
                     used_percent: ((1.0 - remaining.clamp(0.0, 1.0)) * 100.0).round(),
-                    resets_at: *resets_at,
+                    resets_at: started_reset(*remaining, *resets_at, *period_seconds, now),
                     period_seconds: *period_seconds,
                     format: QuotaFormat::Percent,
                     used_value: None,
@@ -206,7 +229,10 @@ pub fn parse_quota_buckets(value: &Value) -> Vec<ModelConfig> {
         .collect()
 }
 
-pub fn build_legacy_quotas(configs: Vec<ModelConfig>) -> Vec<QuotaWindow> {
+pub fn build_legacy_quotas(
+    configs: Vec<ModelConfig>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<QuotaWindow> {
     let mut gemini: Option<(f64, Option<chrono::DateTime<chrono::Utc>>)> = None;
     let mut claude: Option<(f64, Option<chrono::DateTime<chrono::Utc>>)> = None;
     for config in configs {
@@ -241,7 +267,7 @@ pub fn build_legacy_quotas(configs: Vec<ModelConfig>) -> Vec<QuotaWindow> {
             id: id.into(),
             label: label.into(),
             used_percent: ((1.0 - remaining.clamp(0.0, 1.0)) * 100.0).round(),
-            resets_at,
+            resets_at: started_reset(remaining, resets_at, 5 * 60 * 60, now),
             period_seconds: 5 * 60 * 60,
             format: QuotaFormat::Percent,
             used_value: None,
@@ -313,16 +339,58 @@ fn number(value: &Value) -> Option<f64> {
 mod tests {
     use serde_json::{json, Value};
 
+    use chrono::{DateTime, Duration, Utc};
+
     use super::{
         build_legacy_quotas, has_gemini_pool, merge_model_pools, parse_cloud_models,
         parse_command_model_configs, parse_quota_buckets, parse_quota_summary, parse_user_status,
     };
 
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-22T03:29:26Z")
+            .unwrap()
+            .to_utc()
+    }
+
+    #[test]
+    fn idle_windows_roll_their_reset_and_show_none() {
+        let at = |seconds: i64| (now() + Duration::seconds(seconds)).to_rfc3339();
+        let summary = json!({"groups": [{"buckets": [
+            // Untouched: a whole window from now, give or take the clocks.
+            {"bucketId": "gemini-5h", "remainingFraction": 1, "resetTime": at(5 * 3600 - 1)},
+            {"bucketId": "gemini-weekly", "remainingFraction": 1, "resetTime": at(7 * 86400 + 20)},
+            // Started by a hi that used nothing yet: its reset stays put.
+            {"bucketId": "3p-5h", "remainingFraction": 1, "resetTime": at(5 * 3600 - 291)},
+            // Used a little: started.
+            {"bucketId": "3p-weekly", "remainingFraction": 0.99997, "resetTime": at(7 * 86400)}
+        ]}]});
+        let quotas = parse_quota_summary(&summary, now()).unwrap();
+        let resets: Vec<_> = quotas.iter().map(|quota| quota.resets_at).collect();
+        assert_eq!(
+            resets,
+            [
+                None,
+                None,
+                Some(now() + Duration::seconds(5 * 3600 - 291)),
+                Some(now() + Duration::days(7)),
+            ]
+        );
+        let models = build_legacy_quotas(
+            parse_cloud_models(&json!({"models": {
+                "gemini-3-flash": {"displayName": "Gemini 3 Flash", "quotaInfo": {"remainingFraction": 1, "resetTime": at(5 * 3600)}},
+                "claude-sonnet": {"displayName": "Claude Sonnet", "quotaInfo": {"remainingFraction": 1, "resetTime": at(3600)}}
+            }})),
+            now(),
+        );
+        assert_eq!(models[0].resets_at, None);
+        assert_eq!(models[1].resets_at, Some(now() + Duration::hours(1)));
+    }
+
     #[test]
     fn maps_authoritative_pool_summary_in_fixed_order() {
         let value: Value = serde_json::from_str(include_str!("fixtures/quota_summary.json"))
             .expect("valid fixture");
-        let quotas = parse_quota_summary(&value).unwrap();
+        let quotas = parse_quota_summary(&value, now()).unwrap();
         assert_eq!(quotas.len(), 2);
         assert_eq!(quotas[0].id, "geminiPro");
         assert_eq!(quotas[0].used_percent, 20.0);
@@ -340,7 +408,7 @@ mod tests {
             ]}
         }});
         let (plan, configs) = parse_user_status(&value).unwrap();
-        let quotas = build_legacy_quotas(configs);
+        let quotas = build_legacy_quotas(configs, now());
         assert_eq!(plan.as_deref(), Some("Pro"));
         assert_eq!(
             quotas
@@ -359,7 +427,7 @@ mod tests {
             {"label": "Claude Opus", "quotaInfo": {"remainingFraction": 0.25}}
         ]});
         assert_eq!(
-            build_legacy_quotas(parse_command_model_configs(&command).unwrap())[0].id,
+            build_legacy_quotas(parse_command_model_configs(&command).unwrap(), now())[0].id,
             "claude"
         );
 
@@ -368,7 +436,7 @@ mod tests {
             "internal": {"displayName": "Claude Internal", "isInternal": true},
             "blacklisted": {"model": "MODEL_GOOGLE_GEMINI_2_5_PRO", "displayName": "Gemini 2.5 Pro"}
         }});
-        let quotas = build_legacy_quotas(parse_cloud_models(&cloud));
+        let quotas = build_legacy_quotas(parse_cloud_models(&cloud), now());
         assert_eq!(quotas.len(), 1);
         assert_eq!(quotas[0].used_percent, 60.0);
 
@@ -376,7 +444,7 @@ mod tests {
             {"modelId": "gemini-3-pro", "remainingFraction": 0.5},
             {"modelId": "gemini-3-flash", "remainingFraction": 0.9}
         ]});
-        let quotas = build_legacy_quotas(parse_quota_buckets(&buckets));
+        let quotas = build_legacy_quotas(parse_quota_buckets(&buckets), now());
         assert_eq!(quotas[0].id, "geminiPro");
         assert_eq!(quotas[0].used_percent, 50.0);
     }
@@ -385,13 +453,16 @@ mod tests {
     fn summary_without_a_gemini_pool_takes_it_from_the_models() {
         let summary = parse_quota_summary(&json!({"groups": [{"buckets": [
             {"bucketId": "3p-weekly", "remainingFraction": 1, "resetTime": "2026-11-27T18:45:34Z"}
-        ]}]}))
+        ]}]}), now())
         .unwrap();
         assert!(!has_gemini_pool(&summary));
-        let models = build_legacy_quotas(parse_cloud_models(&json!({"models": {
-            "gemini-3-flash": {"displayName": "Gemini 3 Flash", "quotaInfo": {"remainingFraction": 0.75}},
-            "claude-sonnet": {"displayName": "Claude Sonnet", "quotaInfo": {"remainingFraction": 0.5}}
-        }})));
+        let models = build_legacy_quotas(
+            parse_cloud_models(&json!({"models": {
+                "gemini-3-flash": {"displayName": "Gemini 3 Flash", "quotaInfo": {"remainingFraction": 0.75}},
+                "claude-sonnet": {"displayName": "Claude Sonnet", "quotaInfo": {"remainingFraction": 0.5}}
+            }})),
+            now(),
+        );
 
         let merged = merge_model_pools(summary.clone(), models.clone());
         let ids: Vec<_> = merged.iter().map(|quota| quota.id.as_str()).collect();
