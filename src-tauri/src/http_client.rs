@@ -274,7 +274,7 @@ mod platform {
         io::Read,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
         os::raw::{c_char, c_int},
-        sync::{Mutex, MutexGuard, OnceLock},
+        sync::{Arc, Mutex, MutexGuard, OnceLock},
         time::{Duration, Instant},
     };
 
@@ -439,7 +439,7 @@ mod platform {
     struct SystemProxyCache {
         checked_at: Option<Instant>,
         configuration: Option<SystemProxyConfiguration>,
-        resolver: Option<SystemProxyResolver>,
+        resolver: Option<Arc<SystemProxyResolver>>,
         reload_failed: bool,
     }
 
@@ -484,18 +484,26 @@ mod platform {
 
     impl DynamicSystemProxyResolver {
         fn proxy_for_url(&self, url: &Url) -> Option<String> {
-            let mut cache = self.cache.lock().ok()?;
-            if cache
-                .checked_at
-                .is_none_or(|checked| checked.elapsed() >= SYSTEM_PROXY_REFRESH_INTERVAL)
-            {
-                cache.checked_at = Some(Instant::now());
-                cache.update(SystemProxyConfiguration::from_settings());
-            }
-            cache
-                .resolver
-                .as_ref()
-                .and_then(|resolver| resolver.proxy_for_url(url))
+            self.proxy_for_url_with(url, load_proxy_credentials)
+        }
+
+        fn proxy_for_url_with(
+            &self,
+            url: &Url,
+            load: impl FnOnce(&ProxyEndpoint) -> Option<ProxyCredentials>,
+        ) -> Option<String> {
+            let resolver = {
+                let mut cache = self.cache.lock().ok()?;
+                if cache
+                    .checked_at
+                    .is_none_or(|checked| checked.elapsed() >= SYSTEM_PROXY_REFRESH_INTERVAL)
+                {
+                    cache.checked_at = Some(Instant::now());
+                    cache.update(SystemProxyConfiguration::from_settings());
+                }
+                cache.resolver.clone()
+            };
+            resolver.and_then(|resolver| resolver.proxy_for_url_with(url, load))
         }
     }
 
@@ -512,7 +520,7 @@ mod platform {
             let (resolver, reload_failed) = configuration
                 .map(SystemProxyResolver::from_configuration)
                 .unwrap_or((None, false));
-            self.resolver = resolver;
+            self.resolver = resolver.map(Arc::new);
             self.reload_failed = reload_failed;
         }
     }
@@ -563,7 +571,16 @@ mod platform {
             (resolver, reload_failed)
         }
 
+        #[cfg(test)]
         fn proxy_for_url(&self, url: &Url) -> Option<String> {
+            self.proxy_for_url_with(url, load_proxy_credentials)
+        }
+
+        fn proxy_for_url_with(
+            &self,
+            url: &Url,
+            load: impl FnOnce(&ProxyEndpoint) -> Option<ProxyCredentials>,
+        ) -> Option<String> {
             if self.bypass.matches(url) {
                 return None;
             }
@@ -572,7 +589,7 @@ mod platform {
             } else {
                 self.fallback.as_ref()?.proxy_for_url(url)
             }?;
-            Some(self.proxy_with_credentials(proxy))
+            Some(self.proxy_with_credentials_with(proxy, load))
         }
 
         fn apply_pac_decision(&self, url: &Url, decision: PacDecision) -> Option<String> {
@@ -586,7 +603,16 @@ mod platform {
             }
         }
 
+        #[cfg(test)]
         fn proxy_with_credentials(&self, proxy: String) -> String {
+            self.proxy_with_credentials_with(proxy, load_proxy_credentials)
+        }
+
+        fn proxy_with_credentials_with(
+            &self,
+            proxy: String,
+            load: impl FnOnce(&ProxyEndpoint) -> Option<ProxyCredentials>,
+        ) -> String {
             let Ok(mut url) = Url::parse(&proxy) else {
                 return proxy;
             };
@@ -602,12 +628,20 @@ mod platform {
             let endpoint = ProxyEndpoint { host, port };
             // Look up credentials on the first request to this proxy. Cache misses too,
             // so an unauthenticated proxy only needs one Keychain lookup per configuration.
-            let credentials = self.credentials.lock().ok().and_then(|mut cache| {
-                cache
-                    .entry(endpoint)
-                    .or_insert_with_key(load_proxy_credentials)
-                    .clone()
-            });
+            let cached = match self.credentials.lock() {
+                Ok(cache) => cache.get(&endpoint).cloned(),
+                Err(_) => return proxy,
+            };
+            let credentials = match cached {
+                Some(cached) => cached,
+                None => {
+                    let loaded = load(&endpoint);
+                    match self.credentials.lock() {
+                        Ok(mut cache) => cache.entry(endpoint).or_insert(loaded).clone(),
+                        Err(_) => loaded,
+                    }
+                }
+            };
             let Some(credentials) = credentials else {
                 return proxy;
             };
@@ -1151,7 +1185,11 @@ mod platform {
             SystemProxyResolver,
         };
         use reqwest::Url;
-        use std::{collections::HashMap, sync::Mutex, time::Instant};
+        use std::{
+            collections::HashMap,
+            sync::{mpsc, Arc, Mutex},
+            time::Instant,
+        };
 
         fn url(value: &str) -> Url {
             Url::parse(value).unwrap()
@@ -1161,7 +1199,7 @@ mod platform {
             DynamicSystemProxyResolver {
                 cache: Mutex::new(SystemProxyCache {
                     checked_at: Some(Instant::now()),
-                    resolver: Some(resolver),
+                    resolver: Some(Arc::new(resolver)),
                     ..SystemProxyCache::default()
                 }),
             }
@@ -1292,6 +1330,131 @@ mod platform {
             assert_eq!(
                 resolver.proxy_with_credentials("http://proxy.example:8080".into()),
                 "http://user%40example:p%40ss%2Fword@proxy.example:8080/"
+            );
+        }
+
+        #[test]
+        fn dynamic_resolver_releases_cache_and_credentials_locks_during_lookup() {
+            let resolver = Arc::new(SystemProxyResolver {
+                pac: None,
+                fallback: Some(StaticProxyConfig {
+                    bypass: BypassRules::default(),
+                    http: Some("http://http-proxy.example:8081".into()),
+                    https: Some("http://proxy.example:8080".into()),
+                }),
+                bypass: BypassRules::from_entries(["bypass.example"], false, HostMatch::Exact),
+                credentials: Mutex::new(HashMap::new()),
+            });
+            let dynamic = DynamicSystemProxyResolver {
+                cache: Mutex::new(SystemProxyCache {
+                    checked_at: Some(Instant::now()),
+                    configuration: Some(static_configuration(Some("http://proxy.example:8080"))),
+                    resolver: Some(Arc::clone(&resolver)),
+                    reload_failed: false,
+                }),
+            };
+
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+
+            std::thread::scope(|scope| {
+                let dynamic_ref = &dynamic;
+                let first = scope.spawn(move || {
+                    dynamic_ref.proxy_for_url_with(&url("https://target.example"), |_| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        None
+                    })
+                });
+
+                entered_rx.recv().unwrap();
+
+                assert!(dynamic.cache.try_lock().is_ok());
+                assert!(resolver.credentials.try_lock().is_ok());
+                assert_eq!(
+                    dynamic.proxy_for_url_with(&url("https://bypass.example"), |_| unreachable!()),
+                    None
+                );
+                assert_eq!(
+                    dynamic.proxy_for_url_with(&url("http://other.example"), |_| None),
+                    Some("http://http-proxy.example:8081".into())
+                );
+
+                // Updating the cached resolver while Thread 1 is blocked does not deadlock
+                // and Thread 1 still completes safely on its cloned Arc.
+                dynamic
+                    .cache
+                    .lock()
+                    .unwrap()
+                    .update(Some(static_configuration(Some(
+                        "http://updated.example:8080",
+                    ))));
+
+                release_tx.send(()).unwrap();
+                assert_eq!(
+                    first.join().unwrap(),
+                    Some("http://proxy.example:8080".into())
+                );
+            });
+
+            // Follow-up lookup on the original resolver hits cached `None` without calling `load`.
+            assert_eq!(
+                resolver.proxy_for_url_with(&url("https://target.example"), |_| unreachable!()),
+                Some("http://proxy.example:8080".into())
+            );
+        }
+
+        #[test]
+        fn concurrent_credential_misses_preserve_first_cached_entry() {
+            let resolver = SystemProxyResolver {
+                pac: None,
+                fallback: None,
+                bypass: BypassRules::default(),
+                credentials: Mutex::new(HashMap::new()),
+            };
+            let (b_entered_tx, b_entered_rx) = mpsc::channel();
+            let (b_release_tx, b_release_rx) = mpsc::channel();
+
+            std::thread::scope(|scope| {
+                let resolver_ref = &resolver;
+                let thread_b = scope.spawn(move || {
+                    resolver_ref.proxy_with_credentials_with(
+                        "http://shared-proxy.example:8080".into(),
+                        |_| {
+                            b_entered_tx.send(()).unwrap();
+                            b_release_rx.recv().unwrap();
+                            Some(ProxyCredentials {
+                                username: zeroize::Zeroizing::new("user_b".into()),
+                                password: zeroize::Zeroizing::new("pass_b".into()),
+                            })
+                        },
+                    )
+                });
+
+                b_entered_rx.recv().unwrap();
+
+                let result_a = resolver.proxy_with_credentials_with(
+                    "http://shared-proxy.example:8080".into(),
+                    |_| {
+                        Some(ProxyCredentials {
+                            username: zeroize::Zeroizing::new("user_a".into()),
+                            password: zeroize::Zeroizing::new("pass_a".into()),
+                        })
+                    },
+                );
+                assert_eq!(result_a, "http://user_a:pass_a@shared-proxy.example:8080/");
+
+                b_release_tx.send(()).unwrap();
+                let result_b = thread_b.join().unwrap();
+                assert_eq!(result_b, "http://user_a:pass_a@shared-proxy.example:8080/");
+            });
+
+            assert_eq!(
+                resolver.proxy_with_credentials_with(
+                    "http://shared-proxy.example:8080".into(),
+                    |_| unreachable!(),
+                ),
+                "http://user_a:pass_a@shared-proxy.example:8080/"
             );
         }
 
