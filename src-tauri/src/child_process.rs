@@ -100,8 +100,13 @@ pub fn output_with_input_and_timeout(
         stdout: join_reader(stdout_reader)?,
         stderr: join_reader(stderr_reader)?,
     };
-    written?;
-    Ok(output)
+    match written {
+        Ok(()) => Ok(output),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe && !output.status.success() => {
+            Ok(output)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn join_writer(writer: Option<thread::JoinHandle<io::Result<()>>>) -> io::Result<()> {
@@ -217,5 +222,27 @@ mod unix_tests {
         .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn early_failing_child_preserves_exit_status_and_stderr_on_broken_pipe() {
+        let large_input = vec![b'x'; 256 * 1024];
+        let output = output_with_input_and_timeout(
+            background_command("sh").args(["-c", "printf 'bad input\\n' >&2; exit 23"]),
+            Some(&large_input),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(23));
+        assert_eq!(output.stderr, b"bad input\n");
+        assert!(output.stdout.is_empty());
+
+        let error = output_with_input_and_timeout(
+            background_command("sh").args(["-c", "exit 0"]),
+            Some(&large_input),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
     }
 }
