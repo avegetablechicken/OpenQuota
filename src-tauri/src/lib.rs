@@ -716,15 +716,10 @@ fn spawn_startup_credential_detection(
         if outcome.newly_enabled_provider_ids.is_empty() {
             return;
         }
-        let progress_app = app.clone();
         service
-            .refresh_enabled_with_progress(
-                &outcome.newly_enabled_provider_ids,
-                true,
-                move |state| {
-                    let _ = progress_app.emit("usage-state", state);
-                },
-            )
+            .refresh_enabled_with_progress(&outcome.newly_enabled_provider_ids, true, |state| {
+                commands::usage::publish_refresh_progress(&app, &settings, state);
+            })
             .await;
         let state = service.state();
         let _ = app.emit("usage-state", &state);

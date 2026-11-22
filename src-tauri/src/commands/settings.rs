@@ -12,6 +12,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     apply_shortcut_change, autostart_is_enabled, autostart_needs_approval, child_process,
+    commands::usage::publish_refresh_progress,
     desktop_integration::DesktopIntegration,
     models::{
         AppSettings, MenuBarStyle, SettingsViewState, UpdateFrequency, UsageDisplay, WindowMode,
@@ -274,10 +275,9 @@ async fn save_app_settings_inner(
     let credential_detection_plan = settings_service.reset_detection_plan();
     drop(command_guard);
     if matches!(mode, SettingsSaveMode::Normal) && !newly_enabled.is_empty() {
-        let progress_app = app.clone();
         service
-            .refresh_enabled_with_progress(&newly_enabled, true, move |state| {
-                let _ = progress_app.emit("usage-state", state);
+            .refresh_enabled_with_progress(&newly_enabled, true, |state| {
+                publish_refresh_progress(&app, &settings_service, state);
             })
             .await;
         let state = service.state();
@@ -430,10 +430,9 @@ fn spawn_provider_reseed(
         if refresh_provider_ids.is_empty() {
             return;
         }
-        let progress_app = app.clone();
         let usage_state = service
-            .refresh_enabled_with_progress(&refresh_provider_ids, true, move |state| {
-                let _ = progress_app.emit("usage-state", state);
+            .refresh_enabled_with_progress(&refresh_provider_ids, true, |state| {
+                publish_refresh_progress(&app, &settings, state);
             })
             .await;
         let _ = app.emit("usage-state", &usage_state);

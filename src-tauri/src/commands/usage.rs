@@ -9,7 +9,17 @@ use crate::{
     providers::codex::reset_claim::{CodexResetClaimService, ResetClaimOutcome},
     service::{ProviderService, UsageViewState},
     settings::SettingsService,
+    tray_presentation,
 };
+
+pub(crate) fn publish_refresh_progress(
+    app: &AppHandle,
+    settings: &SettingsService,
+    state: &UsageViewState,
+) {
+    let _ = app.emit("usage-state", state);
+    tray_presentation::update(app, state, &settings.get(), settings.registry());
+}
 
 #[tauri::command]
 pub async fn claim_codex_reset_credit(
@@ -52,18 +62,11 @@ pub async fn refresh_usage(
     settings: State<'_, Arc<SettingsService>>,
     notifications: State<'_, Arc<NotificationEvaluator>>,
 ) -> Result<UsageViewState, ()> {
-    let progress_app = app.clone();
-    let progress_settings = settings.inner().clone();
-    let observed_account_revision = Arc::new(AtomicU64::new(settings.account_revision()));
-    let progress_account_revision = observed_account_revision.clone();
+    let observed_account_revision = AtomicU64::new(settings.account_revision());
     let state = service
-        .refresh_all_with_progress(&settings.enabled_provider_ids(), true, move |state| {
-            emit_settings_if_account_changed(
-                &progress_app,
-                &progress_settings,
-                &progress_account_revision,
-            );
-            let _ = progress_app.emit("usage-state", state);
+        .refresh_all_with_progress(&settings.enabled_provider_ids(), true, |state| {
+            emit_settings_if_account_changed(&app, &settings, &observed_account_revision);
+            publish_refresh_progress(&app, &settings, state);
         })
         .await;
     emit_settings_if_account_changed(&app, &settings, &observed_account_revision);
