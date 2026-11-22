@@ -13,7 +13,7 @@ pub(super) struct AccountStats {
 
 #[derive(Clone, Deserialize)]
 struct AccountStatsDay {
-    date: NaiveDate,
+    date: String,
     #[serde(flatten)]
     usage: ReportedUsage,
 }
@@ -111,13 +111,14 @@ impl AccountStats {
         let mut days = std::collections::BTreeMap::<NaiveDate, Total>::new();
         let mut monthly = Total::default();
         for day in self.history {
+            let Ok(date) = NaiveDate::parse_from_str(day.date.trim(), "%Y-%m-%d") else {
+                continue;
+            };
             let amount = day.usage.amount();
             if day.usage.tokens == 0 && amount.unwrap_or_default() == 0.0 {
                 continue;
             }
-            days.entry(day.date)
-                .or_default()
-                .add(day.usage.tokens, amount);
+            days.entry(date).or_default().add(day.usage.tokens, amount);
             monthly.add(day.usage.tokens, amount);
         }
         let mut models = std::collections::BTreeMap::<String, Total>::new();
@@ -169,5 +170,61 @@ impl AccountStats {
                 .collect(),
             ..UsageHistory::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json::json;
+
+    #[test]
+    fn into_history_trims_valid_dates_and_skips_malformed_rows_consistently() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 22, 12, 0, 0).unwrap();
+        let today_str = now.with_timezone(&Local).date_naive().to_string();
+        let stats: AccountStats = serde_json::from_value(json!({
+            "history": [
+                {"date": format!(" {today_str} "), "tokens": 100, "actual_cost": 1.25},
+                {"date": today_str, "tokens": 50, "actual_cost": 0.25},
+                {"date": "not-a-date", "tokens": 999, "actual_cost": null},
+                {"date": "2026-02-30", "tokens": 500, "cost": 5.0},
+                {"date": "", "tokens": 100, "cost": 1.0}
+            ],
+            "models": []
+        }))
+        .unwrap();
+
+        let history = stats.into_history(now);
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 150);
+        assert_eq!(today.estimated_cost_usd, Some(1.5));
+        assert!(today.estimate_complete);
+
+        let monthly = history.last_30_days.unwrap();
+        assert_eq!(monthly.tokens, 150);
+        assert_eq!(monthly.estimated_cost_usd, Some(1.5));
+        assert!(monthly.estimate_complete);
+
+        assert_eq!(history.daily.len(), 1);
+        assert_eq!(history.daily[0].tokens, 150);
+    }
+
+    #[test]
+    fn all_malformed_history_dates_produce_no_spend_periods() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 22, 12, 0, 0).unwrap();
+        let stats: AccountStats = serde_json::from_value(json!({
+            "history": [
+                {"date": "bad", "tokens": 100, "cost": 1.0}
+            ],
+            "models": []
+        }))
+        .unwrap();
+
+        let history = stats.into_history(now);
+        assert!(history.today.is_none());
+        assert!(history.yesterday.is_none());
+        assert!(history.last_30_days.is_none());
+        assert!(history.daily.is_empty());
     }
 }
