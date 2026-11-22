@@ -526,8 +526,8 @@ fn tray_metric(
                     if let (Some(used), Some(limit)) = (quota.used_value, quota.limit_value) {
                         let used_fraction = (limit > 0.0).then(|| (used / limit).clamp(0.0, 1.0));
                         let value = match display {
-                            UsageDisplay::Used => used,
-                            UsageDisplay::Left => (limit - used).max(0.0),
+                            UsageDisplay::Used => used.max(0.0).floor(),
+                            UsageDisplay::Left => (limit - used).max(0.0).ceil(),
                         };
                         let word = match display {
                             UsageDisplay::Used => "used",
@@ -549,12 +549,17 @@ fn tray_metric(
                         };
                     }
                 }
-                let used_fraction = (quota.used_percent / 100.0).clamp(0.0, 1.0);
+                let used_percent = quota.used_percent.clamp(0.0, 100.0);
+                let used_fraction = used_percent / 100.0;
                 let display_fraction = match display {
                     UsageDisplay::Used => used_fraction,
                     UsageDisplay::Left => 1.0 - used_fraction,
                 };
-                let percent = display_fraction * 100.0;
+                let used_display = used_percent.floor();
+                let percent = match display {
+                    UsageDisplay::Used => used_display,
+                    UsageDisplay::Left => 100.0 - used_display,
+                };
                 let word = match display {
                     UsageDisplay::Used => "used",
                     UsageDisplay::Left => "left",
@@ -1590,5 +1595,62 @@ mod tests {
             metrics: vec![metric],
         }])
         .is_empty());
+    }
+
+    #[test]
+    fn tray_percentages_floor_used_and_ceil_remaining() {
+        let definition = MetricDefinition::quota(
+            "codex.session",
+            "Session",
+            "session",
+            true,
+            true,
+            MetricSection::AlwaysVisible,
+            true,
+            "S",
+        );
+        for (used_percent, want_used, want_left) in [
+            (0.0, "0%", "100%"),
+            (0.1, "0%", "100%"),
+            (25.5, "25%", "75%"),
+            (29.0, "29%", "71%"),
+            (37.5, "37%", "63%"),
+            (99.9, "99%", "1%"),
+            (100.0, "100%", "0%"),
+        ] {
+            let snapshot = ProviderSnapshot {
+                accounts: None,
+                provider_id: "codex".into(),
+                plan: None,
+                quotas: vec![QuotaWindow {
+                    clock_offset_seconds: None,
+                    id: "session".into(),
+                    label: "Session".into(),
+                    used_percent,
+                    resets_at: None,
+                    period_seconds: 18_000,
+                    format: crate::models::QuotaFormat::Percent,
+                    used_value: None,
+                    limit_value: None,
+                    unit: None,
+                    estimated: false,
+                    source_note: None,
+                }],
+                value_metrics: Vec::new(),
+                status_metrics: Vec::new(),
+                notices: Vec::new(),
+                usage_histories: Default::default(),
+                warnings: Vec::new(),
+                refreshed_at: Utc::now(),
+            };
+            let used_metric =
+                super::tray_metric(&definition, &snapshot, crate::models::UsageDisplay::Used)
+                    .unwrap();
+            let left_metric =
+                super::tray_metric(&definition, &snapshot, crate::models::UsageDisplay::Left)
+                    .unwrap();
+            assert_eq!(used_metric.value, want_used, "used for {used_percent}");
+            assert_eq!(left_metric.value, want_left, "left for {used_percent}");
+        }
     }
 }

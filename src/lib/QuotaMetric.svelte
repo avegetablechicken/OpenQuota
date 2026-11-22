@@ -25,7 +25,8 @@
     onToggleReset,
   }: Props = $props();
   const used = $derived(Math.min(100, Math.max(0, quota.usedPercent)));
-  const remaining = $derived(Math.max(0, 100 - used));
+  const usedDisplay = $derived(Math.floor(used));
+  const remainingDisplay = $derived(100 - usedDisplay);
   const countUnit = $derived(quota.unit?.trim() || 'requests');
   const estimateNote = $derived(
     quota.sourceNote?.trim() || 'Estimated from local usage data and may differ from billed usage.',
@@ -33,8 +34,10 @@
   const reading = $derived.by(() => {
     if (quota.format === 'count' && quota.usedValue !== null && quota.limitValue !== null) {
       const value =
-        usageDisplay === 'left' ? Math.max(0, quota.limitValue - quota.usedValue) : quota.usedValue;
-      return `${value.toFixed(0)} ${countUnit} ${usageDisplay}`;
+        usageDisplay === 'left'
+          ? Math.ceil(Math.max(0, quota.limitValue - quota.usedValue))
+          : Math.floor(Math.max(0, quota.usedValue));
+      return `${value} ${countUnit} ${usageDisplay}`;
     }
     if (quota.format === 'dollars' && quota.usedValue !== null) {
       if (usageDisplay === 'left' && quota.limitValue !== null) {
@@ -42,13 +45,15 @@
       }
       return `$${quota.usedValue.toFixed(2)} spent`;
     }
-    return `${(usageDisplay === 'used' ? used : remaining).toFixed(0)}% ${usageDisplay}`;
+    return `${usageDisplay === 'used' ? usedDisplay : remainingDisplay}% ${usageDisplay}`;
   });
   const readingTooltip = $derived.by(() => {
     if (quota.format === 'count' && quota.usedValue !== null && quota.limitValue !== null) {
       const opposite =
-        usageDisplay === 'left' ? quota.usedValue : Math.max(0, quota.limitValue - quota.usedValue);
-      return `${opposite.toFixed(0)} ${countUnit} ${usageDisplay === 'left' ? 'used' : 'left'}`;
+        usageDisplay === 'left'
+          ? Math.floor(Math.max(0, quota.usedValue))
+          : Math.ceil(Math.max(0, quota.limitValue - quota.usedValue));
+      return `${opposite} ${countUnit} ${usageDisplay === 'left' ? 'used' : 'left'}`;
     }
     if (quota.format === 'dollars' && quota.usedValue !== null) {
       if (usageDisplay === 'left') return `$${quota.usedValue.toFixed(2)} spent`;
@@ -56,7 +61,7 @@
         return `$${Math.max(0, quota.limitValue - quota.usedValue).toFixed(2)} left`;
       return null;
     }
-    return usageDisplay === 'left' ? `${used.toFixed(0)}% used` : `${remaining.toFixed(0)}% left`;
+    return usageDisplay === 'left' ? `${usedDisplay}% used` : `${remainingDisplay}% left`;
   });
   const fillPercent = $derived.by(() => {
     if (
@@ -72,12 +77,12 @@
         Math.max(0, ((Math.round(displayed * 100) / 100) * 100) / quota.limitValue),
       );
     }
-    return Math.min(100, Math.max(0, Math.round(usageDisplay === 'used' ? used : remaining)));
+    return usageDisplay === 'used' ? usedDisplay : remainingDisplay;
   });
   const serverNow = $derived(quotaNow(quota, now));
   const pace = $derived(projectPace(quota, now));
   const paceDetail = $derived(paceTooltip(pace));
-  const roundedUsed = $derived(Math.round(used));
+  const roundedUsed = $derived(usedDisplay);
   const severity = $derived(
     pace.severity === 'level'
       ? roundedUsed >= 90

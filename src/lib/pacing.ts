@@ -145,7 +145,7 @@ function isVisiblySpent(window: QuotaWindow, usedPercent: number) {
   ) {
     return Math.round((window.limitValue - window.usedValue) * 100) / 100 <= 0;
   }
-  return Math.round(100 - usedPercent) <= 0;
+  return 100 - Math.floor(usedPercent) <= 0;
 }
 
 function clamp(value: number, minimum: number, maximum: number) {

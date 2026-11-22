@@ -365,14 +365,16 @@ export function renderTotalSpendShareCard(
 function quotaShareRow(quota: QuotaWindow, settings: AppSettings, now: number): ShareRow {
   const used = clamp(quota.usedPercent, 0, 100);
   const remaining = Math.max(0, 100 - used);
-  let reading = `${(settings.usageDisplay === 'used' ? used : remaining).toFixed(0)}% ${settings.usageDisplay}`;
+  const usedDisplay = Math.floor(used);
+  const remainingDisplay = 100 - usedDisplay;
+  let reading = `${settings.usageDisplay === 'used' ? usedDisplay : remainingDisplay}% ${settings.usageDisplay}`;
   let fillPercent = settings.usageDisplay === 'used' ? used : remaining;
   if (quota.format === 'count' && quota.usedValue !== null && quota.limitValue !== null) {
     const displayed =
       settings.usageDisplay === 'left'
-        ? Math.max(0, quota.limitValue - quota.usedValue)
-        : quota.usedValue;
-    reading = `${displayed.toFixed(0)} ${quota.unit?.trim() || 'requests'} ${settings.usageDisplay}`;
+        ? Math.ceil(Math.max(0, quota.limitValue - quota.usedValue))
+        : Math.floor(Math.max(0, quota.usedValue));
+    reading = `${displayed} ${quota.unit?.trim() || 'requests'} ${settings.usageDisplay}`;
   }
   if (quota.format === 'dollars' && quota.usedValue !== null) {
     const displayed =

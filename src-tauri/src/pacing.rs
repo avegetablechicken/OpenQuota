@@ -102,7 +102,7 @@ fn is_visibly_spent(window: &QuotaWindow, used_percent: f64) -> bool {
             }
         }
     }
-    (100.0 - used_percent).round() <= 0.0
+    100.0 - used_percent.floor() <= 0.0
 }
 
 fn level_projection(_used: f64) -> PaceProjection {
@@ -566,8 +566,12 @@ mod tests {
             project(&window(99.5, 0.5), now).severity,
             PaceSeverity::Spent
         );
+        assert_ne!(
+            project(&window(99.9, 0.5), now).severity,
+            PaceSeverity::Spent
+        );
         assert_eq!(
-            project(&window(99.51, 0.5), now).severity,
+            project(&window(100.0, 0.5), now).severity,
             PaceSeverity::Spent
         );
 

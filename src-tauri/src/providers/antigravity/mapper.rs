@@ -55,6 +55,10 @@ fn started_reset(
     reset.filter(|_| !idle)
 }
 
+fn used_percent_from_remaining(remaining: f64) -> f64 {
+    ((1.0 - remaining.clamp(0.0, 1.0)) * 1_000_000.0).round() / 10_000.0
+}
+
 pub fn parse_quota_summary(
     value: &Value,
     now: chrono::DateTime<chrono::Utc>,
@@ -94,7 +98,7 @@ pub fn parse_quota_summary(
                     clock_offset_seconds: None,
                     id: (*quota_id).into(),
                     label: (*label).into(),
-                    used_percent: ((1.0 - remaining.clamp(0.0, 1.0)) * 100.0).round(),
+                    used_percent: used_percent_from_remaining(*remaining),
                     resets_at: started_reset(*remaining, *resets_at, *period_seconds, now),
                     period_seconds: *period_seconds,
                     format: QuotaFormat::Percent,
@@ -266,7 +270,7 @@ pub fn build_legacy_quotas(
             clock_offset_seconds: None,
             id: id.into(),
             label: label.into(),
-            used_percent: ((1.0 - remaining.clamp(0.0, 1.0)) * 100.0).round(),
+            used_percent: used_percent_from_remaining(remaining),
             resets_at: started_reset(remaining, resets_at, 5 * 60 * 60, now),
             period_seconds: 5 * 60 * 60,
             format: QuotaFormat::Percent,
@@ -473,5 +477,19 @@ mod tests {
         let ids: Vec<_> = merged.iter().map(|quota| quota.id.as_str()).collect();
         assert_eq!(ids, ["geminiPro", "claude"]);
         assert!(has_gemini_pool(&merged));
+    }
+
+    #[test]
+    fn preserves_fractional_used_percent_instead_of_rounding_early() {
+        let summary = parse_quota_summary(
+            &json!({"groups": [{"buckets": [
+                {"bucketId": "gemini-5h", "remainingFraction": 0.745},
+                {"bucketId": "gemini-weekly", "remainingFraction": 0.004}
+            ]}]}),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(summary[0].used_percent, 25.5);
+        assert_eq!(summary[1].used_percent, 99.6);
     }
 }

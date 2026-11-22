@@ -162,3 +162,46 @@ it('uses the server clock for the rendered reset countdown', () => {
   show(value);
   expect(screen.getByRole('button', { name: 'Resets in 4h 48m' })).toBeInTheDocument();
 });
+
+it.each([
+  [0.1, '0% used', '100% left', 0, 100],
+  [25.5, '25% used', '75% left', 25, 75],
+  [29, '29% used', '71% left', 29, 71],
+  [99.9, '99% used', '1% left', 99, 1],
+  [100, '100% used', '0% left', 100, 0],
+])(
+  'floors used and ceils remaining for %s percent',
+  (usedPercent, usedLabel, leftLabel, usedFill, leftFill) => {
+    const usedView = show(quota(usedPercent), vi.fn(), 'used');
+    expect(screen.getByRole('button', { name: usedLabel })).toHaveAttribute(
+      'data-tooltip',
+      leftLabel,
+    );
+    expect(usedView.container.querySelector('.meter__fill')).toHaveStyle(
+      `--fill-percent: ${usedFill}%`,
+    );
+    usedView.unmount();
+
+    const leftView = show(quota(usedPercent), vi.fn(), 'left');
+    expect(screen.getByRole('button', { name: leftLabel })).toHaveAttribute(
+      'data-tooltip',
+      usedLabel,
+    );
+    expect(leftView.container.querySelector('.meter__fill')).toHaveStyle(
+      `--fill-percent: ${leftFill}%`,
+    );
+  },
+);
+
+it('uses floored used percent for fallback meter severity thresholds', () => {
+  for (const [usedPercent, tone] of [
+    [79.9, 'normal'],
+    [80, 'warning'],
+    [89.9, 'warning'],
+    [90, 'critical'],
+  ] as const) {
+    const { container, unmount } = show({ ...quota(usedPercent), resetsAt: null }, vi.fn(), 'used');
+    expect(container.querySelector(`.meter--${tone}`)).toBeInTheDocument();
+    unmount();
+  }
+});

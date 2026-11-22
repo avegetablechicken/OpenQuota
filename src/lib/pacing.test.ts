@@ -73,7 +73,8 @@ describe('quota pacing', () => {
 
   it('uses the displayed precision to decide when the limit is reached', () => {
     expect(projectPace(quota(99.5, 0.5, { resetsAt: null }), now).severity).toBe('level');
-    expect(projectPace(quota(99.51, 0.5, { resetsAt: null }), now).severity).toBe('spent');
+    expect(projectPace(quota(99.9, 0.5, { resetsAt: null }), now).severity).toBe('level');
+    expect(projectPace(quota(100, 0.5, { resetsAt: null }), now).severity).toBe('spent');
     expect(
       projectPace(
         quota(99, 0.5, {

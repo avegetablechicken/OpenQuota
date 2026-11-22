@@ -167,6 +167,35 @@ describe('share card layout', () => {
     expect(rows[0]).toMatchObject({ kind: 'quota', reading: '75 searches left' });
   });
 
+  it('floors used and ceils remaining percentages in exported quota rows', () => {
+    const snapshot = structuredClone(codexState.snapshot!);
+    snapshot.quotas[0] = {
+      ...snapshot.quotas[0],
+      format: 'percent',
+      usedPercent: 25.5,
+      usedValue: null,
+      limitValue: null,
+    };
+
+    const usedRows = buildProviderShareRows(
+      'codex',
+      snapshot,
+      settingsState.settings.providers[0],
+      { ...settingsState.settings, usageDisplay: 'used' },
+      Date.now(),
+    );
+    const leftRows = buildProviderShareRows(
+      'codex',
+      snapshot,
+      settingsState.settings.providers[0],
+      { ...settingsState.settings, usageDisplay: 'left' },
+      Date.now(),
+    );
+
+    expect(usedRows[0]).toMatchObject({ kind: 'quota', reading: '25% used' });
+    expect(leftRows[0]).toMatchObject({ kind: 'quota', reading: '75% left' });
+  });
+
   it('omits pacing copy for an unused non-session quota', () => {
     const now = Date.parse('2026-08-12T12:00:00Z');
     const snapshot = structuredClone(codexState.snapshot!);
