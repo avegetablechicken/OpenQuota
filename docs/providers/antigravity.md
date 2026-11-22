@@ -45,5 +45,6 @@ request left unanswered for a minute is abandoned and retried on a later refresh
 
 - **Not signed in** — open Antigravity or run `agy`, complete sign-in, then refresh OpenQuota.
 - **Sign-in expired** — authenticate again in Antigravity or with `agy`.
+- **Quota permission denied (HTTP 403)** — Google rejected the quota request. `SUBSCRIPTION_REQUIRED` means Google did not recognize a valid license for that request. OpenQuota shows the reason and numeric reference when available.
 - **Credentials could not be read** — reopen Antigravity so its local sign-in state can be restored.
 - **Usage temporarily unavailable** — wait briefly and refresh again.

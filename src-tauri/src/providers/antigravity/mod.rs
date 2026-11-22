@@ -125,6 +125,8 @@ pub enum AntigravityError {
     NotSignedIn,
     #[error("Antigravity sign-in expired. Open Antigravity or run `agy` to refresh.")]
     AuthExpired,
+    #[error("{0}")]
+    PermissionDenied(String),
     #[error("Antigravity credentials could not be read from secure storage.")]
     CredentialStoreUnreadable,
     #[error("Antigravity credentials are invalid. Sign in again in Antigravity or `agy`.")]
@@ -336,10 +338,7 @@ impl AntigravityProvider {
             CloudUserAgent::Antigravity,
         ) {
             CloudOutcome::Ok(value) => parse_quota_summary(&value, Utc::now()),
-            CloudOutcome::CertificateFailed(hint) => {
-                return Err(AntigravityError::CertificateFailed(hint))
-            }
-            CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
+            CloudOutcome::Failed(error) => return Err(error),
             CloudOutcome::Unavailable => None,
         };
         // An account whose Gemini models share no pool in the summary (Google AI Pro, say)
@@ -355,10 +354,7 @@ impl AntigravityProvider {
             CloudUserAgent::Antigravity,
         ) {
             CloudOutcome::Ok(value) => build_legacy_quotas(parse_cloud_models(&value), Utc::now()),
-            CloudOutcome::CertificateFailed(hint) => {
-                return Err(AntigravityError::CertificateFailed(hint))
-            }
-            CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
+            CloudOutcome::Failed(error) => return Err(error),
             CloudOutcome::Unavailable => Vec::new(),
         };
         let quotas = match summary {
@@ -383,10 +379,7 @@ impl AntigravityProvider {
                     .filter(|value| !value.trim().is_empty())
                     .map(str::to_owned),
             ),
-            CloudOutcome::CertificateFailed(hint) => {
-                return Err(AntigravityError::CertificateFailed(hint))
-            }
-            CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
+            CloudOutcome::Failed(error) => return Err(error),
             CloudOutcome::Unavailable => (None, None),
         };
 
@@ -409,10 +402,7 @@ impl AntigravityProvider {
                     return Ok(snapshot(plan, quotas));
                 }
             }
-            CloudOutcome::CertificateFailed(hint) => {
-                return Err(AntigravityError::CertificateFailed(hint))
-            }
-            CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
+            CloudOutcome::Failed(error) => return Err(error),
             CloudOutcome::Unavailable => {}
         }
         Err(AntigravityError::Unavailable)
@@ -544,6 +534,7 @@ impl crate::providers::UsageProvider for AntigravityProvider {
                 AntigravityError::NotSignedIn
                 | AntigravityError::AuthExpired
                 | AntigravityError::InvalidCredentialData => Kind::Authentication,
+                AntigravityError::PermissionDenied(_) => Kind::Permission,
                 AntigravityError::CredentialStoreUnreadable => Kind::CredentialStorage,
                 AntigravityError::Unavailable | AntigravityError::CertificateFailed(_) => {
                     Kind::Network
@@ -756,6 +747,25 @@ mod tests {
             .iter()
             .filter(|request| request.starts_with("/token "))
             .count()
+    }
+
+    #[test]
+    fn a_license_denial_reaches_the_card_without_renewing_the_login() {
+        let valid = (Utc::now() + Duration::hours(1)).fixed_offset();
+        let login = FakeLogin::new(vec![agy_login("current", "refresh", valid)], false);
+        let base = crate::providers::test_http::serve_once(
+            403,
+            &[],
+            r#"{"error":{
+            "status":"PERMISSION_DENIED","details":[{"reason":"SUBSCRIPTION_REQUIRED"}],
+            "message":"You do not have a valid license of this product. (#3501)"}}"#,
+        );
+        let (provider, _dir) = provider(&base, &login);
+        let error = provider.refresh_from_login().unwrap_err();
+        assert!(matches!(error, AntigravityError::PermissionDenied(_)));
+        assert!(error.to_string().contains("SUBSCRIPTION_REQUIRED"));
+        assert!(error.to_string().contains("(#3501)"));
+        assert!(login.writes().is_empty());
     }
 
     #[test]

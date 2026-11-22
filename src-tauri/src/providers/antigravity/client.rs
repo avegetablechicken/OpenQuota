@@ -26,8 +26,7 @@ pub struct AntigravityClient {
 
 pub enum CloudOutcome {
     Ok(Value),
-    AuthFailed,
-    CertificateFailed(String),
+    Failed(AntigravityError),
     Unavailable,
 }
 
@@ -64,6 +63,34 @@ fn antigravity_user_agent() -> String {
         other => other,
     };
     format!("antigravity/{ANTIGRAVITY_CLIENT_VERSION} {os}/{arch}")
+}
+
+// Provider errors are logged. Keep only the reason and numeric reference, never the raw body.
+fn forbidden_error(body: &Value) -> AntigravityError {
+    let error = &body["error"];
+    let reason = error["details"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|detail| detail["reason"].as_str());
+    if error["status"] == "UNAUTHENTICATED" || reason == Some("ACCESS_TOKEN_EXPIRED") {
+        return AntigravityError::AuthExpired;
+    }
+    let mut message = match reason {
+        Some("SUBSCRIPTION_REQUIRED") => "Google did not recognize a valid Antigravity license for this quota request (HTTP 403, SUBSCRIPTION_REQUIRED).".to_owned(),
+        Some(code) if !code.is_empty() && code.len() <= 80 && code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') => format!("Google denied the Antigravity quota request (HTTP 403, {code})."),
+        _ => "Google denied the Antigravity quota request (HTTP 403).".to_owned(),
+    };
+    if let Some(code) = error["message"]
+        .as_str()
+        .and_then(|s| s.trim_end().strip_suffix(')'))
+        .and_then(|s| s.rsplit_once("(#"))
+        .map(|(_, code)| code)
+        .filter(|s| !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit()))
+    {
+        message.push_str(&format!(" (#{code})"));
+    }
+    AntigravityError::PermissionDenied(message)
 }
 
 pub enum RefreshOutcome {
@@ -193,11 +220,12 @@ impl AntigravityClient {
                 "antigravity cloud request HTTP {}",
                 response.status().as_u16()
             );
-            if matches!(
-                response.status(),
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-            ) {
-                return CloudOutcome::AuthFailed;
+            if response.status() == StatusCode::UNAUTHORIZED {
+                return CloudOutcome::Failed(AntigravityError::AuthExpired);
+            }
+            if response.status() == StatusCode::FORBIDDEN {
+                let body = response.json::<Value>().unwrap_or(Value::Null);
+                return CloudOutcome::Failed(forbidden_error(&body));
             }
             if response.status().is_success() {
                 if let Ok(body) = response.json() {
@@ -206,7 +234,7 @@ impl AntigravityClient {
             }
         }
         certificate_error
-            .map(CloudOutcome::CertificateFailed)
+            .map(|hint| CloudOutcome::Failed(AntigravityError::CertificateFailed(hint)))
             .unwrap_or(CloudOutcome::Unavailable)
     }
 
@@ -315,8 +343,11 @@ mod tests {
             _ => panic!("successful cloud response should be returned"),
         }
 
-        for status in [401, 403] {
-            let base = test_http::serve_once(status, &[], r#"{"token":"secret-token"}"#);
+        for (status, body) in [
+            (401, "{}"),
+            (403, r#"{"error":{"status":"UNAUTHENTICATED"}}"#),
+        ] {
+            let base = test_http::serve_once(status, &[], body);
             assert!(matches!(
                 client(&base).cloud_code(
                     "/quota",
@@ -324,9 +355,24 @@ mod tests {
                     json!({}),
                     CloudUserAgent::Antigravity,
                 ),
-                CloudOutcome::AuthFailed
+                CloudOutcome::Failed(super::AntigravityError::AuthExpired)
             ));
         }
+    }
+
+    #[test]
+    fn unknown_forbidden_responses_do_not_disclose_the_body() {
+        let body =
+            json!({"error":{"message":"private value","details":[{"reason":"not a public code"}]}});
+        let error = super::forbidden_error(&body);
+        assert!(matches!(
+            error,
+            super::AntigravityError::PermissionDenied(_)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Google denied the Antigravity quota request (HTTP 403)."
+        );
     }
 
     #[test]
