@@ -12,7 +12,8 @@ use crate::{
 };
 
 pub(super) const SOURCE: &str = "From Sub2API usage logs at upstream model prices";
-const MAX_USAGE_PAGES: usize = 100;
+const MAX_USAGE_PAGES: usize = 1_000;
+const MAX_PAGINATION_ATTEMPTS: usize = 2;
 
 #[derive(Deserialize)]
 struct UsagePage {
@@ -184,8 +185,34 @@ impl Sub2ApiClient {
             .append_pair("page_size", "1000")
             .append_pair("sort_by", "id")
             .append_pair("sort_order", "asc");
+        for attempt in 1..=MAX_PAGINATION_ATTEMPTS {
+            match self.priced_usage_attempt(
+                &base, token, account_id, upstream, now, since, pricing, max_pages,
+            ) {
+                Ok(rows) => return Ok(rows),
+                Err(PaginationFailure::Retryable) if attempt < MAX_PAGINATION_ATTEMPTS => continue,
+                Err(PaginationFailure::Retryable) => return Err(Sub2ApiError::InvalidResponse),
+                Err(PaginationFailure::Fatal(error)) => return Err(error),
+            }
+        }
+        Err(Sub2ApiError::InvalidResponse)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn priced_usage_attempt(
+        &self,
+        base: &reqwest::Url,
+        token: &str,
+        account_id: i64,
+        upstream: Sub2ApiUpstream,
+        now: DateTime<Utc>,
+        since: NaiveDate,
+        pricing: &ModelPricing,
+        max_pages: usize,
+    ) -> Result<Vec<PricedUsage>, PaginationFailure> {
         let mut rows = Vec::new();
         let mut seen = HashSet::new();
+        let mut previous_total = None;
         let mut page = 1_usize;
         loop {
             let mut url = base.clone();
@@ -196,23 +223,31 @@ impl Sub2ApiClient {
                 .bearer_auth(token)
                 .header("Accept", "application/json")
                 .send()
-                .map_err(|err| transport_error("upstream usage records", &err))?;
+                .map_err(|err| {
+                    PaginationFailure::Fatal(transport_error("upstream usage records", &err))
+                })?;
             let status = response.status();
             if !status.is_success() {
-                return Err(classify_status(status));
+                return Err(PaginationFailure::Fatal(classify_status(status)));
             }
             let envelope = response
                 .json::<Envelope<UsagePage>>()
-                .map_err(|_| Sub2ApiError::InvalidResponse)?;
+                .map_err(|_| PaginationFailure::Fatal(Sub2ApiError::InvalidResponse))?;
             if envelope.code != 0 {
-                return Err(Sub2ApiError::InvalidResponse);
+                return Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse));
             }
-            let result = envelope.data.ok_or(Sub2ApiError::InvalidResponse)?;
+            let result = envelope
+                .data
+                .ok_or(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse))?;
+            if previous_total.is_some_and(|prev| result.total < prev) {
+                return Err(PaginationFailure::Retryable);
+            }
+            previous_total = Some(result.total);
             let page_empty = result.items.is_empty();
             let previous = seen.len();
             for row in result.items {
                 if row.account_id != account_id || row.id <= 0 {
-                    return Err(Sub2ApiError::InvalidResponse);
+                    return Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse));
                 }
                 if !seen.insert(row.id)
                     || row.created_at > now
@@ -227,20 +262,25 @@ impl Sub2ApiClient {
             }
             if page_empty {
                 return if page == 1 {
-                    Err(Sub2ApiError::InvalidResponse)
+                    Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse))
                 } else {
-                    Ok(rows)
+                    Err(PaginationFailure::Retryable)
                 };
             }
             if seen.len() == previous {
-                return Err(Sub2ApiError::InvalidResponse);
+                return Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse));
             }
             if page >= max_pages {
-                return Err(Sub2ApiError::InvalidResponse);
+                return Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse));
             }
             page += 1;
         }
     }
+}
+
+enum PaginationFailure {
+    Retryable,
+    Fatal(Sub2ApiError),
 }
 
 #[cfg(test)]
@@ -360,28 +400,86 @@ mod tests {
             )
         };
 
-        // Subcase A: total shrinks between page 1 and page 2 due to log pruning.
+        // Subcase A: total shrinks between page 1 and page 2 due to log pruning
+        // (even when seen.len() >= result.total on page 2); retry from page 1 so
+        // shifted offsets cannot drop surviving rows or retain pruned rows.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
+            page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
+            page(vec![], 1),
+            page(vec![entry(2, "2026-11-19T12:00:00Z")], 1),
+        ]);
+        let rows = fetch(&base).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].date,
+            "2026-11-19T12:00:00Z"
+                .parse::<DateTime<Utc>>()
+                .unwrap()
+                .with_timezone(&Local)
+                .date_naive()
+        );
+        worker.join().unwrap();
+
+        // Subcase A2: total rises on page 2 then shrinks on page 3 (e.g. 2001 -> 2003 -> 2002);
+        // comparing against the previous page's total catches the deletion and retries from page 1.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
+            page(vec![entry(1, "2026-11-18T12:00:00Z")], 3),
+            page(vec![entry(2, "2026-11-18T13:00:00Z")], 4),
+            page(vec![entry(3, "2026-11-19T12:00:00Z")], 3),
+            page(vec![entry(2, "2026-11-18T13:00:00Z")], 3),
+            page(vec![entry(3, "2026-11-19T12:00:00Z")], 3),
+            page(vec![entry(4, "2026-11-20T11:00:00Z")], 3),
+        ]);
+        let rows = fetch(&base).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.last().unwrap().date,
+            "2026-11-20T11:00:00Z"
+                .parse::<DateTime<Utc>>()
+                .unwrap()
+                .with_timezone(&Local)
+                .date_naive()
+        );
+        worker.join().unwrap();
+
+        // Subcase A3: persistent total shrink across all retry attempts fails
+        // instead of publishing an inconsistent snapshot.
         let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
             page(vec![entry(1, "2026-11-18T12:00:00Z")], 3),
             page(vec![entry(2, "2026-11-19T12:00:00Z")], 2),
+            page(vec![entry(2, "2026-11-19T12:00:00Z")], 2),
+            page(vec![], 1),
         ]);
-        assert_eq!(fetch(&base).unwrap().len(), 2);
+        assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
         worker.join().unwrap();
 
-        // Subcase B: trailing page is empty after earlier records were pruned.
+        // Subcase B: trailing page is empty while total still reports more rows;
+        // a bounded retry succeeds once the server's total settles.
         let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
             page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
             page(vec![], 2),
+            page(vec![entry(1, "2026-11-18T12:00:00Z")], 1),
         ]);
         assert_eq!(fetch(&base).unwrap().len(), 1);
         worker.join().unwrap();
 
-        // Subcase C: empty page 1 contradicting total > 0 is invalid.
+        // Subcase C: persistent empty trailing page contradicting total fails
+        // so callers keep the previous complete snapshot instead of publishing truncated data.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
+            page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
+            page(vec![], 2),
+            page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
+            page(vec![], 2),
+        ]);
+        assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
+        worker.join().unwrap();
+
+        // Subcase D: empty page 1 contradicting total > 0 is invalid without retrying.
         let (base, _requests, worker) = super::super::tests::serve_sequence(vec![page(vec![], 2)]);
         assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
         worker.join().unwrap();
 
-        // Subcase D: empty page 1 with total == 0 succeeds with empty rows.
+        // Subcase E: empty page 1 with total == 0 succeeds with empty rows.
         let (base, _requests, worker) = super::super::tests::serve_sequence(vec![page(vec![], 0)]);
         assert!(fetch(&base).unwrap().is_empty());
         worker.join().unwrap();
