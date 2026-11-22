@@ -12,6 +12,7 @@ use crate::{
 };
 
 pub(super) const SOURCE: &str = "From Sub2API usage logs at upstream model prices";
+const MAX_USAGE_PAGES: usize = 100;
 
 #[derive(Deserialize)]
 struct UsagePage {
@@ -157,6 +158,18 @@ impl Sub2ApiClient {
         now: DateTime<Utc>,
         pricing: &ModelPricing,
     ) -> Result<Vec<PricedUsage>, Sub2ApiError> {
+        self.priced_usage_with_max_pages(token, account_id, upstream, now, pricing, MAX_USAGE_PAGES)
+    }
+
+    fn priced_usage_with_max_pages(
+        &self,
+        token: &str,
+        account_id: i64,
+        upstream: Sub2ApiUpstream,
+        now: DateTime<Utc>,
+        pricing: &ModelPricing,
+        max_pages: usize,
+    ) -> Result<Vec<PricedUsage>, Sub2ApiError> {
         let today = now.with_timezone(&Local).date_naive();
         let since = today
             .checked_sub_days(Days::new(29))
@@ -173,7 +186,6 @@ impl Sub2ApiClient {
             .append_pair("sort_order", "asc");
         let mut rows = Vec::new();
         let mut seen = HashSet::new();
-        let mut first_total = None;
         let mut page = 1_usize;
         loop {
             let mut url = base.clone();
@@ -196,7 +208,7 @@ impl Sub2ApiClient {
                 return Err(Sub2ApiError::InvalidResponse);
             }
             let result = envelope.data.ok_or(Sub2ApiError::InvalidResponse)?;
-            let total = *first_total.get_or_insert(result.total);
+            let page_empty = result.items.is_empty();
             let previous = seen.len();
             for row in result.items {
                 if row.account_id != account_id || row.id <= 0 {
@@ -210,10 +222,20 @@ impl Sub2ApiClient {
                 }
                 rows.extend(row.priced(upstream, pricing));
             }
-            if seen.len() >= total {
+            if seen.len() >= result.total {
                 return Ok(rows);
             }
+            if page_empty {
+                return if page == 1 {
+                    Err(Sub2ApiError::InvalidResponse)
+                } else {
+                    Ok(rows)
+                };
+            }
             if seen.len() == previous {
+                return Err(Sub2ApiError::InvalidResponse);
+            }
+            if page >= max_pages {
                 return Err(Sub2ApiError::InvalidResponse);
             }
             page += 1;
@@ -308,6 +330,102 @@ mod tests {
         let (base, _requests, worker) =
             super::super::tests::serve_sequence(vec![page(vec![foreign], 1)]);
         assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn pagination_handles_log_pruning_shrinking_total_and_empty_trailing_page() {
+        let now: DateTime<Utc> = "2026-11-20T12:00:00Z".parse().unwrap();
+        let entry = |id, date| {
+            json!({
+                "id": id,
+                "account_id": 7,
+                "created_at": date,
+                "model": "gpt-6.2-sol",
+                "input_tokens": 100,
+                "output_tokens": 10
+            })
+        };
+        let page = |rows: Vec<serde_json::Value>, total| {
+            json!({"code":0,"data":{"items":rows,"total":total}}).to_string()
+        };
+        let pricing = test_bundled_pricing();
+        let fetch = |base: &str| {
+            Sub2ApiClient::new(base).unwrap().priced_usage(
+                "token",
+                7,
+                Sub2ApiUpstream::Codex,
+                now,
+                &pricing,
+            )
+        };
+
+        // Subcase A: total shrinks between page 1 and page 2 due to log pruning.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
+            page(vec![entry(1, "2026-11-18T12:00:00Z")], 3),
+            page(vec![entry(2, "2026-11-19T12:00:00Z")], 2),
+        ]);
+        assert_eq!(fetch(&base).unwrap().len(), 2);
+        worker.join().unwrap();
+
+        // Subcase B: trailing page is empty after earlier records were pruned.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
+            page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
+            page(vec![], 2),
+        ]);
+        assert_eq!(fetch(&base).unwrap().len(), 1);
+        worker.join().unwrap();
+
+        // Subcase C: empty page 1 contradicting total > 0 is invalid.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![page(vec![], 2)]);
+        assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
+        worker.join().unwrap();
+
+        // Subcase D: empty page 1 with total == 0 succeeds with empty rows.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![page(vec![], 0)]);
+        assert!(fetch(&base).unwrap().is_empty());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn pagination_rejects_responses_exceeding_max_usage_pages() {
+        let now: DateTime<Utc> = "2026-11-20T12:00:00Z".parse().unwrap();
+        let entry = |id| {
+            json!({
+                "id": id,
+                "account_id": 7,
+                "created_at": "2026-11-19T12:00:00Z",
+                "model": "gpt-6.2-sol",
+                "input_tokens": 100,
+                "output_tokens": 10
+            })
+        };
+        let page = |rows: Vec<serde_json::Value>, total| {
+            json!({"code":0,"data":{"items":rows,"total":total}}).to_string()
+        };
+        let pricing = test_bundled_pricing();
+
+        // Exactly max_pages (2) succeeds.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
+            page(vec![entry(1)], 2),
+            page(vec![entry(2)], 2),
+        ]);
+        let rows = Sub2ApiClient::new(&base)
+            .unwrap()
+            .priced_usage_with_max_pages("token", 7, Sub2ApiUpstream::Codex, now, &pricing, 2)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        worker.join().unwrap();
+
+        // Exceeding max_pages (2) fails without requesting page 3.
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
+            page(vec![entry(1)], 3),
+            page(vec![entry(2)], 3),
+        ]);
+        let result = Sub2ApiClient::new(&base)
+            .unwrap()
+            .priced_usage_with_max_pages("token", 7, Sub2ApiUpstream::Codex, now, &pricing, 2);
+        assert!(matches!(result, Err(Sub2ApiError::InvalidResponse)));
         worker.join().unwrap();
     }
 }
