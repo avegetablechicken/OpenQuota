@@ -136,9 +136,11 @@ fn password_from_output(mut stdout: Vec<u8>) -> Vec<u8> {
 }
 
 fn hex(bytes: &[u8]) -> Zeroizing<String> {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut text = Zeroizing::new(String::with_capacity(bytes.len() * 2));
-    for byte in bytes {
-        text.push_str(&format!("{byte:02x}"));
+    for &byte in bytes {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     text
 }
@@ -156,7 +158,7 @@ fn unhex(text: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use std::{io, sync::Mutex, time::Duration};
 
-    use super::{read, unhex, write, CommandOutput, SecurityRunner, SECURITY_TIMEOUT};
+    use super::{hex, read, unhex, write, CommandOutput, SecurityRunner, SECURITY_TIMEOUT};
 
     /// One invocation: its arguments, its standard input and its deadline.
     type Call = (Vec<String>, Option<String>, Duration);
@@ -364,5 +366,17 @@ mod tests {
         let security = FakeSecurity::holding(b"old");
         assert!(write(&security, oversized.as_bytes()).is_err());
         assert!(security.calls().is_empty());
+    }
+
+    #[test]
+    fn hex_encodes_bytes_into_exact_capacity_without_reallocation() {
+        assert_eq!(hex(b"").as_str(), "");
+        assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]).as_str(), "000fa5ff");
+
+        let input: Vec<u8> = (0u8..=255).collect();
+        let encoded = hex(&input);
+        assert_eq!(encoded.len(), input.len() * 2);
+        assert_eq!(encoded.capacity(), input.len() * 2);
+        assert_eq!(unhex(encoded.as_bytes()).as_deref(), Some(input.as_slice()));
     }
 }
