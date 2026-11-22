@@ -274,7 +274,7 @@ mod platform {
         io::Read,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
         os::raw::{c_char, c_int},
-        sync::{Arc, Mutex, MutexGuard, OnceLock},
+        sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock},
         time::{Duration, Instant},
     };
 
@@ -456,11 +456,84 @@ mod platform {
         Url(String),
     }
 
+    #[derive(Clone)]
+    enum CredentialEntry {
+        Loading,
+        Loaded(Option<ProxyCredentials>),
+    }
+
+    #[derive(Default)]
+    struct CredentialCache {
+        entries: Mutex<HashMap<ProxyEndpoint, CredentialEntry>>,
+        ready: Condvar,
+        #[cfg(test)]
+        waiters: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CredentialCache {
+        fn get_or_load(
+            &self,
+            endpoint: ProxyEndpoint,
+            load: impl FnOnce(&ProxyEndpoint) -> Option<ProxyCredentials>,
+        ) -> Option<ProxyCredentials> {
+            let mut entries = self.entries.lock().ok()?;
+            loop {
+                match entries.get(&endpoint) {
+                    Some(CredentialEntry::Loaded(credentials)) => return credentials.clone(),
+                    Some(CredentialEntry::Loading) => {
+                        #[cfg(test)]
+                        self.waiters
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let waited = self.ready.wait(entries);
+                        #[cfg(test)]
+                        self.waiters
+                            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        entries = waited.ok()?;
+                    }
+                    None => {
+                        entries.insert(endpoint.clone(), CredentialEntry::Loading);
+                        drop(entries);
+                        break;
+                    }
+                }
+            }
+
+            struct LoadingGuard<'a> {
+                cache: &'a CredentialCache,
+                endpoint: Option<ProxyEndpoint>,
+            }
+            impl Drop for LoadingGuard<'_> {
+                fn drop(&mut self) {
+                    if let Some(endpoint) = self.endpoint.take() {
+                        if let Ok(mut entries) = self.cache.entries.lock() {
+                            if matches!(entries.get(&endpoint), Some(CredentialEntry::Loading)) {
+                                entries.remove(&endpoint);
+                            }
+                            self.cache.ready.notify_all();
+                        }
+                    }
+                }
+            }
+
+            let mut guard = LoadingGuard {
+                cache: self,
+                endpoint: Some(endpoint.clone()),
+            };
+            let loaded = load(&endpoint);
+            if let Ok(mut entries) = self.entries.lock() {
+                entries.insert(endpoint, CredentialEntry::Loaded(loaded.clone()));
+                guard.endpoint = None;
+                self.ready.notify_all();
+            }
+            loaded
+        }
+    }
+
     struct SystemProxyResolver {
         pac: Option<PacResolver>,
         fallback: Option<StaticProxyConfig>,
         bypass: BypassRules,
-        credentials: Mutex<HashMap<ProxyEndpoint, Option<ProxyCredentials>>>,
+        credentials: CredentialCache,
     }
 
     #[derive(Clone, Hash, PartialEq, Eq)]
@@ -566,7 +639,7 @@ mod platform {
                 pac,
                 fallback: configuration.fallback,
                 bypass: configuration.bypass,
-                credentials: Mutex::new(HashMap::new()),
+                credentials: CredentialCache::default(),
             });
             (resolver, reload_failed)
         }
@@ -628,21 +701,7 @@ mod platform {
             let endpoint = ProxyEndpoint { host, port };
             // Look up credentials on the first request to this proxy. Cache misses too,
             // so an unauthenticated proxy only needs one Keychain lookup per configuration.
-            let cached = match self.credentials.lock() {
-                Ok(cache) => cache.get(&endpoint).cloned(),
-                Err(_) => return proxy,
-            };
-            let credentials = match cached {
-                Some(cached) => cached,
-                None => {
-                    let loaded = load(&endpoint);
-                    match self.credentials.lock() {
-                        Ok(mut cache) => cache.entry(endpoint).or_insert(loaded).clone(),
-                        Err(_) => loaded,
-                    }
-                }
-            };
-            let Some(credentials) = credentials else {
+            let Some(credentials) = self.credentials.get_or_load(endpoint, load) else {
                 return proxy;
             };
             if url.set_username(&credentials.username).is_err()
@@ -1179,15 +1238,18 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::{
-            pac_decision_from_result, BypassRules, DynamicSystemProxyResolver,
-            EnvironmentProxyConfig, HostMatch, PacDecision, ProxyCredentials, ProxyEndpoint,
-            ProxyResolver, StaticProxyConfig, SystemProxyCache, SystemProxyConfiguration,
-            SystemProxyResolver,
+            pac_decision_from_result, BypassRules, CredentialCache, CredentialEntry,
+            DynamicSystemProxyResolver, EnvironmentProxyConfig, HostMatch, PacDecision,
+            ProxyCredentials, ProxyEndpoint, ProxyResolver, StaticProxyConfig, SystemProxyCache,
+            SystemProxyConfiguration, SystemProxyResolver,
         };
         use reqwest::Url;
         use std::{
             collections::HashMap,
-            sync::{mpsc, Arc, Mutex},
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                mpsc, Arc, Condvar, Mutex,
+            },
             time::Instant,
         };
 
@@ -1234,7 +1296,7 @@ mod platform {
                         https: Some("http://system-https:8443/".into()),
                     }),
                     bypass: BypassRules::default(),
-                    credentials: Mutex::new(HashMap::new()),
+                    credentials: CredentialCache::default(),
                 }),
             };
 
@@ -1270,7 +1332,7 @@ mod platform {
                         https: Some("http://system-https:8443/".into()),
                     }),
                     bypass: BypassRules::from_entries(["bypass.example"], false, HostMatch::Exact),
-                    credentials: Mutex::new(HashMap::new()),
+                    credentials: CredentialCache::default(),
                 }),
             };
 
@@ -1318,13 +1380,17 @@ mod platform {
                 pac: None,
                 fallback: None,
                 bypass: BypassRules::default(),
-                credentials: Mutex::new(HashMap::from([(
-                    endpoint,
-                    Some(ProxyCredentials {
-                        username: zeroize::Zeroizing::new("user@example".into()),
-                        password: zeroize::Zeroizing::new("p@ss/word".into()),
-                    }),
-                )])),
+                credentials: CredentialCache {
+                    entries: Mutex::new(HashMap::from([(
+                        endpoint,
+                        CredentialEntry::Loaded(Some(ProxyCredentials {
+                            username: zeroize::Zeroizing::new("user@example".into()),
+                            password: zeroize::Zeroizing::new("p@ss/word".into()),
+                        })),
+                    )])),
+                    ready: Condvar::new(),
+                    waiters: AtomicUsize::new(0),
+                },
             };
 
             assert_eq!(
@@ -1343,7 +1409,7 @@ mod platform {
                     https: Some("http://proxy.example:8080".into()),
                 }),
                 bypass: BypassRules::from_entries(["bypass.example"], false, HostMatch::Exact),
-                credentials: Mutex::new(HashMap::new()),
+                credentials: CredentialCache::default(),
             });
             let dynamic = DynamicSystemProxyResolver {
                 cache: Mutex::new(SystemProxyCache {
@@ -1370,7 +1436,7 @@ mod platform {
                 entered_rx.recv().unwrap();
 
                 assert!(dynamic.cache.try_lock().is_ok());
-                assert!(resolver.credentials.try_lock().is_ok());
+                assert!(resolver.credentials.entries.try_lock().is_ok());
                 assert_eq!(
                     dynamic.proxy_for_url_with(&url("https://bypass.example"), |_| unreachable!()),
                     None
@@ -1405,50 +1471,78 @@ mod platform {
         }
 
         #[test]
-        fn concurrent_credential_misses_preserve_first_cached_entry() {
+        fn concurrent_lookups_for_same_endpoint_share_one_inflight_load() {
             let resolver = SystemProxyResolver {
                 pac: None,
                 fallback: None,
                 bypass: BypassRules::default(),
-                credentials: Mutex::new(HashMap::new()),
+                credentials: CredentialCache::default(),
             };
-            let (b_entered_tx, b_entered_rx) = mpsc::channel();
-            let (b_release_tx, b_release_rx) = mpsc::channel();
+            let loads = AtomicUsize::new(0);
+            let (first_entered_tx, first_entered_rx) = mpsc::channel();
+            let (first_release_tx, first_release_rx) = mpsc::channel();
 
             std::thread::scope(|scope| {
                 let resolver_ref = &resolver;
-                let thread_b = scope.spawn(move || {
+                let loads_ref = &loads;
+                let first = scope.spawn(move || {
                     resolver_ref.proxy_with_credentials_with(
                         "http://shared-proxy.example:8080".into(),
                         |_| {
-                            b_entered_tx.send(()).unwrap();
-                            b_release_rx.recv().unwrap();
+                            loads_ref.fetch_add(1, Ordering::SeqCst);
+                            first_entered_tx.send(()).unwrap();
+                            first_release_rx.recv().unwrap();
                             Some(ProxyCredentials {
-                                username: zeroize::Zeroizing::new("user_b".into()),
-                                password: zeroize::Zeroizing::new("pass_b".into()),
+                                username: zeroize::Zeroizing::new("user_a".into()),
+                                password: zeroize::Zeroizing::new("pass_a".into()),
                             })
                         },
                     )
                 });
 
-                b_entered_rx.recv().unwrap();
+                first_entered_rx.recv().unwrap();
 
-                let result_a = resolver.proxy_with_credentials_with(
-                    "http://shared-proxy.example:8080".into(),
-                    |_| {
-                        Some(ProxyCredentials {
-                            username: zeroize::Zeroizing::new("user_a".into()),
-                            password: zeroize::Zeroizing::new("pass_a".into()),
-                        })
-                    },
+                // A different endpoint proceeds in parallel without waiting for the first lookup.
+                let other = resolver
+                    .proxy_with_credentials_with("http://other-proxy.example:8081".into(), |_| {
+                        None
+                    });
+                assert_eq!(other, "http://other-proxy.example:8081");
+
+                // A second lookup for the same endpoint waits for the in-flight load instead of
+                // racing a duplicate Keychain query or caching a premature `None`.
+                let second = scope.spawn(move || {
+                    resolver_ref.proxy_with_credentials_with(
+                        "http://shared-proxy.example:8080".into(),
+                        |_| unreachable!("in-flight lookup should be shared"),
+                    )
+                });
+
+                let deadline = Instant::now() + std::time::Duration::from_secs(2);
+                let mut entered_wait = false;
+                while Instant::now() < deadline {
+                    if resolver.credentials.waiters.load(Ordering::SeqCst) > 0 {
+                        entered_wait = true;
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+
+                first_release_tx.send(()).unwrap();
+                let first_result = first.join().unwrap();
+                let second_result = second.join().unwrap();
+                assert!(entered_wait, "second lookup did not enter condvar wait");
+                assert_eq!(
+                    first_result,
+                    "http://user_a:pass_a@shared-proxy.example:8080/"
                 );
-                assert_eq!(result_a, "http://user_a:pass_a@shared-proxy.example:8080/");
-
-                b_release_tx.send(()).unwrap();
-                let result_b = thread_b.join().unwrap();
-                assert_eq!(result_b, "http://user_a:pass_a@shared-proxy.example:8080/");
+                assert_eq!(
+                    second_result,
+                    "http://user_a:pass_a@shared-proxy.example:8080/"
+                );
             });
 
+            assert_eq!(loads.load(Ordering::SeqCst), 1);
             assert_eq!(
                 resolver.proxy_with_credentials_with(
                     "http://shared-proxy.example:8080".into(),
@@ -1468,7 +1562,7 @@ mod platform {
                     https: Some("http://system-https:8443/".into()),
                 }),
                 bypass: BypassRules::default(),
-                credentials: Mutex::new(HashMap::new()),
+                credentials: CredentialCache::default(),
             };
             let target = url("https://example.com");
             assert_eq!(
