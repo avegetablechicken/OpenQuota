@@ -501,24 +501,13 @@ fn aggregate_into(
             );
             continue;
         }
+        let model_label = model_name.unwrap_or("Unattributed");
         if let Some(exact) = event.cost_usd {
-            accumulator.add_exact(
-                date,
-                tokens.total_tokens(),
-                exact,
-                model_name.unwrap_or("Unattributed"),
-            );
+            accumulator.add_exact(date, tokens.total_tokens(), exact, model_label);
         } else if let Some(cost) = cost {
-            accumulator.add(
-                date,
-                tokens.total_tokens(),
-                cost,
-                model_name.unwrap_or("Unattributed"),
-            );
+            accumulator.add(date, tokens.total_tokens(), cost, model_label);
         } else if tokens.total_tokens() > 0 {
-            if let Some(model) = model_name {
-                accumulator.add_unknown_model(date, model);
-            }
+            accumulator.add_unpriced(date, tokens.total_tokens(), model_label);
         }
     }
 }
@@ -798,15 +787,73 @@ mod tests {
     }
 
     #[test]
-    fn unknown_usage_is_excluded_but_remains_visible_as_incomplete() {
+    fn unpriced_usage_keeps_tokens_while_marking_estimate_incomplete() {
         let content = r#"{"timestamp":"2026-07-15T08:00:00Z","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100,"output_tokens":10}}}
 {"timestamp":"2026-07-15T09:00:00Z","message":{"model":"future-unpriced-model","usage":{"input_tokens":500,"output_tokens":20}}}"#;
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
         let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.unwrap();
-        assert_eq!(today.tokens, 110);
+        assert_eq!(today.tokens, 630);
+        assert!(today.estimated_cost_usd.is_some());
         assert!(!today.estimate_complete);
         assert_eq!(today.unknown_models, ["future-unpriced-model"]);
+        let breakdown = today.model_breakdown.unwrap();
+        let unpriced = breakdown
+            .models
+            .iter()
+            .find(|entry| entry.model == "future-unpriced-model")
+            .unwrap();
+        assert_eq!(unpriced.total_tokens, 520);
+        assert_eq!(unpriced.cost_usd, None);
+    }
+
+    #[test]
+    fn expired_fast_window_and_pre_history_dates_retain_tokens_as_unpriced() {
+        let pricing = test_bundled_pricing();
+
+        let expired_fast = r#"{"timestamp":"2026-07-25T08:00:00Z","message":{"model":"claude-opus-4-7","usage":{"input_tokens":1000,"output_tokens":100,"speed":"fast"}}}"#;
+        let now_fast = Utc.with_ymd_and_hms(2026, 7, 25, 12, 0, 0).unwrap();
+        let history_fast = aggregate(parse_jsonl(expired_fast), now_fast, &pricing);
+        let today_fast = history_fast.today.unwrap();
+        assert_eq!(today_fast.tokens, 1_100);
+        assert_eq!(today_fast.estimated_cost_usd, None);
+        assert!(!today_fast.estimate_complete);
+        assert_eq!(today_fast.unknown_models, ["claude-opus-4-7"]);
+
+        let pre_history = r#"{"timestamp":"2026-09-27T08:00:00Z","message":{"model":"claude-sonnet-5-5","usage":{"input_tokens":500,"output_tokens":50}}}"#;
+        let now_pre = Utc.with_ymd_and_hms(2026, 9, 27, 12, 0, 0).unwrap();
+        let history_pre = aggregate(parse_jsonl(pre_history), now_pre, &pricing);
+        let today_pre = history_pre.today.unwrap();
+        assert_eq!(today_pre.tokens, 550);
+        assert_eq!(today_pre.estimated_cost_usd, None);
+        assert!(!today_pre.estimate_complete);
+        assert_eq!(today_pre.unknown_models, ["claude-sonnet-5-5"]);
+    }
+
+    #[test]
+    fn missing_model_without_cost_retains_tokens_as_unattributed() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let event = ClaudeTokenEvent {
+            timestamp: Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap(),
+            model: None,
+            input: 200,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_read: 0,
+            output: 20,
+            message_id: None,
+            request_id: None,
+            sidechain: false,
+            is_fast: false,
+            has_speed: false,
+            cost_usd: None,
+        };
+        let history = aggregate(vec![event], now, &test_bundled_pricing());
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 220);
+        assert_eq!(today.estimated_cost_usd, None);
+        assert!(!today.estimate_complete);
+        assert_eq!(today.unknown_models, ["Unattributed"]);
     }
 
     #[test]

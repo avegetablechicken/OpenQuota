@@ -574,10 +574,8 @@ fn aggregate_into(
         }
         if let Some(cost) = estimate_cost(&event, pricing) {
             accumulator.add(date, event.total, cost, event.model.trim());
-        } else if event.model.eq_ignore_ascii_case("codex-auto-review") {
+        } else if event.total > 0 || event.model.eq_ignore_ascii_case("codex-auto-review") {
             accumulator.add_unpriced(date, event.total, &event.model);
-        } else if event.total > 0 {
-            accumulator.add_unknown_model(date, &event.model);
         }
     }
 }
@@ -1109,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn period_breakdown_uses_model_names_and_excludes_unpriced_usage() {
+    fn period_breakdown_uses_model_names_and_retains_unpriced_usage() {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}
 {"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":800,"output_tokens":100,"total_tokens":900}}}}
@@ -1119,7 +1117,8 @@ mod tests {
         let today = history.today.unwrap();
         let breakdown = today.model_breakdown.unwrap();
 
-        assert_eq!(today.tokens, 2_000);
+        assert_eq!(today.tokens, 2_500);
+        assert!(!today.estimate_complete);
         assert_eq!(today.unknown_models, ["gpt-future-unpriced-model"]);
         assert_eq!(
             breakdown
@@ -1127,22 +1126,73 @@ mod tests {
                 .iter()
                 .map(|entry| entry.model.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5.4", "gpt-5.3-codex"]
+            ["gpt-5.4", "gpt-5.3-codex", "gpt-future-unpriced-model"]
         );
+        assert_eq!(breakdown.models[2].total_tokens, 500);
+        assert_eq!(breakdown.models[2].cost_usd, None);
         assert_eq!(breakdown.source_note, "From your Codex logs (estimated)");
     }
 
     #[test]
-    fn unknown_only_usage_does_not_create_spend_periods() {
+    fn unknown_only_usage_keeps_token_history_without_inventing_cost() {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
         let pricing = test_bundled_pricing();
         let history = aggregate(parse_jsonl(content), now, &pricing);
 
-        assert!(history.today.is_none());
-        assert!(history.last_30_days.is_none());
-        assert!(history.daily.is_empty());
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 500);
+        assert_eq!(today.estimated_cost_usd, None);
+        assert!(!today.estimate_complete);
+        assert_eq!(today.unknown_models, ["gpt-future-unpriced-model"]);
+        let breakdown = today.model_breakdown.unwrap();
+        assert_eq!(breakdown.models[0].model, "gpt-future-unpriced-model");
+        assert_eq!(breakdown.models[0].total_tokens, 500);
+        assert_eq!(breakdown.models[0].cost_usd, None);
+        assert_eq!(history.last_30_days.unwrap().tokens, 500);
+        assert_eq!(history.daily.len(), 1);
+        assert_eq!(history.daily[0].tokens, 500);
+        assert_eq!(history.daily[0].estimated_cost_usd, None);
         assert_eq!(history.unknown_models, ["gpt-future-unpriced-model"]);
+    }
+
+    #[test]
+    fn expired_until_rate_retains_tokens_as_unpriced() {
+        let now = Utc.with_ymd_and_hms(2026, 12, 1, 12, 0, 0).unwrap();
+        let content = r#"{"timestamp":"2026-12-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.6-sol","info":{"last_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}"#;
+        let pricing = test_bundled_pricing();
+        let events = parse_jsonl(content);
+        assert_eq!(events.len(), 1);
+        assert_eq!(estimate_cost(&events[0], &pricing), None);
+
+        let history = aggregate(events, now, &pricing);
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 1_100);
+        assert_eq!(today.estimated_cost_usd, None);
+        assert!(!today.estimate_complete);
+        assert_eq!(today.unknown_models, ["gpt-5.6-sol"]);
+    }
+
+    #[test]
+    fn unsupported_tiers_and_fast_above_threshold_retain_tokens_as_unpriced() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","service_tier":"fast","info":{"last_token_usage":{"input_tokens":272001,"output_tokens":0,"total_tokens":272001}}}}
+{"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","service_tier":"flex","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","service_tier":"ultrafast","info":{"last_token_usage":{"input_tokens":200,"output_tokens":20,"total_tokens":220}}}}
+{"timestamp":"2026-07-10T11:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","service_tier":"mystery-tier","info":{"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#;
+        let pricing = test_bundled_pricing();
+        let events = parse_jsonl(content);
+        assert_eq!(events.len(), 4);
+        assert!(events
+            .iter()
+            .all(|event| estimate_cost(event, &pricing).is_none()));
+
+        let history = aggregate(events, now, &pricing);
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 272_661);
+        assert_eq!(today.estimated_cost_usd, None);
+        assert!(!today.estimate_complete);
+        assert_eq!(today.unknown_models, ["gpt-5.3-codex", "gpt-5.4"]);
     }
 
     #[test]
