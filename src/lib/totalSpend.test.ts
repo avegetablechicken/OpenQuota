@@ -129,6 +129,31 @@ describe('Total Spend projection', () => {
     );
   });
 
+  it('hides cost per million for partially priced periods instead of diluting the rate with unpriced tokens', () => {
+    const providers = [
+      provider('codex', {
+        tokens: 2_000_000,
+        estimatedCostUsd: 10,
+        costEstimated: true,
+        estimateComplete: false,
+      }),
+    ];
+
+    expect(projectSpend(providers, 'today', 'tokens', 'localDevice')).toMatchObject({
+      centerValue: 2_000_000,
+      slices: [{ id: 'codex', value: 2_000_000 }],
+    });
+    expect(projectSpend(providers, 'today', 'cost', 'localDevice')).toMatchObject({
+      centerValue: 10,
+      estimateComplete: false,
+      slices: [{ id: 'codex', value: 10 }],
+    });
+    expect(projectSpend(providers, 'today', 'costPerMillion', 'localDevice')).toMatchObject({
+      centerValue: null,
+      slices: [],
+    });
+  });
+
   it('tracks local estimation independently from pricing coverage', () => {
     const providers = [
       provider('claude', {
@@ -277,16 +302,51 @@ describe('Total Spend projection', () => {
     ];
 
     const cost = projectSpend(providers, 'today', 'cost', 'localDevice');
+    expect(cost.centerValue).toBe(2);
     expect(cost.slices).toMatchObject([
       { id: OTHERS_SPEND_ID, value: 2 },
       { id: UNPRICED_OTHERS_SPEND_ID, value: 0.01, showValue: false },
     ]);
 
     const costPerMillion = projectSpend(providers, 'today', 'costPerMillion', 'localDevice');
+    expect(costPerMillion.centerValue).toBe(5_000);
     expect(costPerMillion.slices).toMatchObject([
       { id: OTHERS_SPEND_ID, value: 5_000 },
       { id: UNPRICED_OTHERS_SPEND_ID, value: 0.001, showValue: false },
     ]);
+  });
+
+  it('keeps unpriced-only Others slices visible with a null center value instead of a fake total', () => {
+    const providers: SpendProvider[] = [
+      {
+        id: 'codex',
+        usageHistories: {
+          localDevice: {
+            ...history(null),
+            otherUsage: {
+              today: {
+                tokens: 1_000,
+                pricedTokens: 0,
+                estimatedCostUsd: null,
+                costEstimated: true,
+                estimateComplete: false,
+              },
+              yesterday: null,
+              last30Days: null,
+            },
+          },
+        },
+      },
+    ];
+
+    expect(projectSpend(providers, 'today', 'cost', 'localDevice')).toMatchObject({
+      centerValue: null,
+      slices: [{ id: UNPRICED_OTHERS_SPEND_ID, value: 0.01, showValue: false }],
+    });
+    expect(projectSpend(providers, 'today', 'costPerMillion', 'localDevice')).toMatchObject({
+      centerValue: null,
+      slices: [{ id: UNPRICED_OTHERS_SPEND_ID, value: 0.001, showValue: false }],
+    });
   });
 
   it('keeps both Others slices after every real provider regardless of value', () => {

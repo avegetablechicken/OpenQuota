@@ -59,7 +59,9 @@ function valueFor(period: UsagePeriod, metric: AppSettings['totalSpendMetric']):
   if (metric === 'tokens') return period.tokens > 0 ? period.tokens : null;
   if (period.estimatedCostUsd === null || period.estimatedCostUsd <= 0) return null;
   if (metric === 'costPerMillion') {
-    return period.tokens > 0 ? (period.estimatedCostUsd / period.tokens) * 1_000_000 : null;
+    return period.estimateComplete && period.tokens > 0
+      ? (period.estimatedCostUsd / period.tokens) * 1_000_000
+      : null;
   }
   return period.estimatedCostUsd;
 }
@@ -219,14 +221,12 @@ function otherSpendSlices(
   const unpricedTokens = aggregate.tokens - aggregate.pricedTokens;
   if (unpricedTokens > 0) {
     const pseudoValue = metric === 'cost' ? 0.01 : 0.001;
-    const pseudoCost =
-      metric === 'costPerMillion' ? (pseudoValue * unpricedTokens) / 1_000_000 : pseudoValue;
     slices.push({
       id: UNPRICED_OTHERS_SPEND_ID,
       otherBilling,
       value: pseudoValue,
       showValue: false,
-      period: otherPeriod(unpricedTokens, pseudoCost, true, false),
+      period: otherPeriod(unpricedTokens, null, true, false),
     });
   }
   return slices;
@@ -248,7 +248,7 @@ export function projectSpend(
       return value === null ? [] : [{ id: provider.id, value, period }];
     })
     .sort(spendSliceSort);
-  const slices = [
+  const slices: SpendSlice[] = [
     ...providerSlices,
     ...(scope === 'localDevice' ? otherSpendSlices(providers, periodSelection, metric) : []),
   ].sort(spendSliceSort);
@@ -257,17 +257,20 @@ export function projectSpend(
     return { scope, slices, centerValue: null, costEstimated: false, estimateComplete: true };
   }
 
+  const measuredSlices = slices.filter((slice) => slice.showValue !== false);
   const centerValue =
-    metric === 'costPerMillion'
-      ? (() => {
-          const totalCost = slices.reduce(
-            (sum, slice) => sum + (slice.period.estimatedCostUsd ?? 0),
-            0,
-          );
-          const totalTokens = slices.reduce((sum, slice) => sum + slice.period.tokens, 0);
-          return totalTokens > 0 ? (totalCost / totalTokens) * 1_000_000 : null;
-        })()
-      : slices.reduce((sum, slice) => sum + slice.value, 0);
+    measuredSlices.length === 0
+      ? null
+      : metric === 'costPerMillion'
+        ? (() => {
+            const totalCost = measuredSlices.reduce(
+              (sum, slice) => sum + (slice.period.estimatedCostUsd ?? 0),
+              0,
+            );
+            const totalTokens = measuredSlices.reduce((sum, slice) => sum + slice.period.tokens, 0);
+            return totalTokens > 0 ? (totalCost / totalTokens) * 1_000_000 : null;
+          })()
+        : measuredSlices.reduce((sum, slice) => sum + slice.value, 0);
 
   return {
     scope,

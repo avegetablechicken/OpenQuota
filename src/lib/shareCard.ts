@@ -664,7 +664,7 @@ function drawSpendBody(
   canvasWidth: number,
 ) {
   const { metric } = options;
-  if (projection.centerValue === null) {
+  if (projection.slices.length === 0) {
     context.fillStyle = palette.secondary;
     context.font = '12px system-ui';
     context.textAlign = 'center';
@@ -688,7 +688,10 @@ function drawSpendBody(
     fillRingSector(context, arc, TOTAL_SPEND_GEOMETRY, ringLeft, top);
   });
 
-  const center = totalSpendRingCenter(projection.centerValue, metric);
+  const center =
+    projection.centerValue === null
+      ? { primary: '—', unit: '' }
+      : totalSpendRingCenter(projection.centerValue, metric);
   context.fillStyle = palette.text;
   context.font = `600 ${TOTAL_SPEND_GEOMETRY.centerFontSize}px system-ui`;
   context.textAlign = 'center';

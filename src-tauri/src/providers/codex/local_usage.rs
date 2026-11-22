@@ -1159,7 +1159,7 @@ mod tests {
     #[test]
     fn expired_until_rate_retains_tokens_as_unpriced() {
         let now = Utc.with_ymd_and_hms(2026, 12, 1, 12, 0, 0).unwrap();
-        let content = r#"{"timestamp":"2026-12-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.6-sol","info":{"last_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}"#;
+        let content = r#"{"timestamp":"2026-12-01T12:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.6-sol","info":{"last_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}"#;
         let pricing = test_bundled_pricing();
         let events = parse_jsonl(content);
         assert_eq!(events.len(), 1);

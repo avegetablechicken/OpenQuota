@@ -205,14 +205,14 @@
       {#each projections as projection (projection.scope)}
         <section
           class="total-card__scope"
-          class:total-card__scope--empty-history={projection.centerValue === null &&
+          class:total-card__scope--empty-history={projection.slices.length === 0 &&
             !hasScopeHistory(projection.scope)}
           aria-label={`${SPEND_SCOPE_LABELS[projection.scope]} Spend`}
         >
           {#if viewMode === 'all'}
             <h2>{SPEND_SCOPE_LABELS[projection.scope]}</h2>
           {/if}
-          {#if projection.centerValue === null}
+          {#if projection.slices.length === 0}
             <div class="total-card__empty">
               <span>{emptySpendMessage(settings.totalSpendMetric)}</span>
             </div>
