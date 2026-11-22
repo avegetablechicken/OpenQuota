@@ -494,19 +494,33 @@ mod unix {
         static DOMAIN: OnceLock<String> = OnceLock::new();
         DOMAIN
             .get_or_init(|| {
-                if cfg!(target_os = "linux") {
-                    let machine = std::fs::read_to_string("/etc/machine-id")
-                        .map(|id| id.trim().to_owned())
-                        .unwrap_or_default();
-                    let namespace = std::fs::read_link("/proc/self/ns/pid")
-                        .map(|link| link.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    format!("darwin:{machine}:{namespace}")
-                } else {
-                    "darwin".to_owned()
-                }
+                pid_domain_for_os(
+                    std::env::consts::OS,
+                    std::path::Path::new("/etc/machine-id"),
+                    std::path::Path::new("/proc/self/ns/pid"),
+                )
             })
             .clone()
+    }
+
+    pub(super) fn pid_domain_for_os(
+        os: &str,
+        machine_id_path: &std::path::Path,
+        pid_ns_path: &std::path::Path,
+    ) -> String {
+        match os {
+            "linux" => {
+                let machine = std::fs::read_to_string(machine_id_path)
+                    .map(|id| id.trim().to_owned())
+                    .unwrap_or_default();
+                let namespace = std::fs::read_link(pid_ns_path)
+                    .map(|link| link.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!("linux:{machine}:{namespace}")
+            }
+            "macos" => "darwin".to_owned(),
+            other => other.to_owned(),
+        }
     }
 
     /// Whether PIDs seen here are the host's: on Linux, `/proc` must show
@@ -818,8 +832,10 @@ mod tests {
             assert_eq!(raw["pidSpace"], unix::hostname().unwrap());
             if cfg!(target_os = "macos") {
                 assert_eq!(raw["pidDomain"], "darwin");
+            } else if cfg!(target_os = "linux") {
+                assert!(raw["pidDomain"].as_str().unwrap().starts_with("linux:"));
             } else {
-                assert!(raw["pidDomain"].as_str().unwrap().starts_with("darwin:"));
+                assert_eq!(raw["pidDomain"], std::env::consts::OS);
             }
             // `ps -o lstart=` in UTC, as Claude Code compares it.
             assert_eq!(
@@ -841,6 +857,36 @@ mod tests {
             assert!(!take_over(&dir, modified(&current).unwrap()));
             drop(lock);
             assert!(!dir.join(OWNER_FILE).exists());
+        }
+
+        #[test]
+        fn formats_linux_pid_domain_with_linux_prefix_and_handles_missing_files() {
+            let home = tempfile::tempdir().unwrap();
+            let machine_id = home.path().join("machine-id");
+            let pid_ns = home.path().join("ns_pid");
+            fs::write(&machine_id, "0123456789abcdef0123456789abcdef\n").unwrap();
+            std::os::unix::fs::symlink("pid:[4026531836]", &pid_ns).unwrap();
+
+            assert_eq!(
+                unix::pid_domain_for_os("linux", &machine_id, &pid_ns),
+                "linux:0123456789abcdef0123456789abcdef:pid:[4026531836]"
+            );
+            assert_eq!(
+                unix::pid_domain_for_os(
+                    "linux",
+                    &home.path().join("missing-machine-id"),
+                    &home.path().join("missing-ns"),
+                ),
+                "linux::"
+            );
+            assert_eq!(
+                unix::pid_domain_for_os("macos", &machine_id, &pid_ns),
+                "darwin"
+            );
+            assert_eq!(
+                unix::pid_domain_for_os("freebsd", &machine_id, &pid_ns),
+                "freebsd"
+            );
         }
 
         #[test]
@@ -912,7 +958,9 @@ mod tests {
                 (
                     "another PID namespace",
                     dead_pid(),
-                    Box::new(|record| record["pidDomain"] = "darwin:other".into()),
+                    Box::new(|record| {
+                        record["pidDomain"] = format!("{}:other", unix::pid_domain()).into()
+                    }),
                 ),
                 (
                     "other locks",
