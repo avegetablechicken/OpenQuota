@@ -31,9 +31,9 @@ See [historical pricing](../pricing-history.md).
 
 ## Setup
 
-Open **Customize**, select **+ Sub2API**, and enter the instance Base URL, administrator email, and
-password in the connection editor, which is always expanded. Each click creates the next
-independent Sub2API item. OpenQuota signs in through
+In **Customize**, select **+ Sub2API** to create an independent account. In its **Connection**
+card, select **Add** to configure the instance address and administrator login. Select **Save** to
+collapse the form, or **Done** to discard edits. Use **Edit** to reopen a configured connection. OpenQuota signs in through
 `/api/v1/auth/login`, discovers the active OAuth accounts for the selected upstream, and reads Codex quota from
 `/api/v1/admin/openai/accounts/:id/quota` or Claude quota from `/api/v1/admin/accounts/:id/usage`.
 

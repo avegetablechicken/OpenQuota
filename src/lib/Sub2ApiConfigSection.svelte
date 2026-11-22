@@ -57,6 +57,7 @@
     upstream: 'codex',
     billingMode: 'upstream',
   });
+  let open = $state(false);
   let baseUrl = $state('');
   let providerName = $state('');
   let customBaseUrl = $state(false);
@@ -77,6 +78,7 @@
   let resolvingProvider = $state(false);
   let providerResolution = 0;
   let providerResolutionTimer: number | undefined;
+  let toggleButton = $state<HTMLButtonElement>();
   let clearButton = $state<HTMLButtonElement>();
   let clearCancelButton = $state<HTMLButtonElement>();
   let removeItemButton = $state<HTMLButtonElement>();
@@ -148,6 +150,17 @@
   function syncRememberedUpstream(next: Sub2ApiConfigState) {
     if (next.configured) rememberSub2ApiUpstream(providerId, next.upstream, next.baseUrl);
     else forgetSub2ApiUpstream(providerId);
+  }
+
+  function toggleEditor() {
+    open = !open;
+    if (open) {
+      resetEditor();
+    } else {
+      cancelProviderResolution();
+      resolvingProvider = false;
+      providerResolution += 1;
+    }
   }
 
   function selectUpstream(next: Sub2ApiUpstream) {
@@ -231,6 +244,9 @@
     connectionState = optimisticState;
     syncRememberedUpstream(optimisticState);
     resetEditor(optimisticState);
+    open = false;
+    await tick();
+    toggleButton?.focus();
     try {
       connectionState = await saveSub2ApiConfig(providerId, submitted);
       syncRememberedUpstream(connectionState);
@@ -246,6 +262,7 @@
       billingMode = submitted.billingMode;
       revealPassword = false;
       confirmingClear = false;
+      open = true;
       error = errorMessage(cause, 'The Sub2API connection could not be saved.');
     } finally {
       password = '';
@@ -279,6 +296,7 @@
       forgetSub2ApiUpstream(providerId);
       resetEditor(connectionState);
       confirmingItemRemoval = false;
+      open = false;
       onRemove();
     } catch (cause) {
       error = errorMessage(cause, 'The Sub2API item could not be removed.');
@@ -336,6 +354,7 @@
       })
       .catch((cause) => {
         error = errorMessage(cause, 'The Sub2API connection could not be read.');
+        open = true;
       });
   });
 
@@ -350,207 +369,228 @@
   <div class="sub2api-config-card" role="list" aria-label="Connection configurations">
     <div class="sub2api-config-item" role="listitem" aria-label="Connection">
       <div class="sub2api-config-summary">
-        <!-- The editor is always shown, so the header follows what is being edited;
-         only the status dot reflects the saved connection. -->
-        <ProviderIcon {providerId} upstreamProvider={upstream} size={18} />
+        <ProviderIcon
+          {providerId}
+          upstreamProvider={open
+            ? upstream
+            : connectionState.configured
+              ? connectionState.upstream
+              : null}
+          size={18}
+        />
         <span>
-          <b>{sub2ApiPublicName(upstream)}</b>
+          <b
+            >{open
+              ? sub2ApiPublicName(upstream)
+              : connectionState.configured
+                ? sub2ApiPublicName(connectionState.upstream)
+                : 'Not configured'}</b
+          >
           <small
-            >{email.trim() ||
-              (connectionState.configured
-                ? 'Base URL and administrator login'
-                : 'Not configured')}</small
+            >{open
+              ? email.trim() || 'Base URL and administrator login'
+              : connectionState.configured
+                ? connectionState.email
+                : 'Base URL and administrator login'}</small
           >
         </span>
         <i class:missing={!connectionState.configured} aria-hidden="true"></i>
+        <button bind:this={toggleButton} type="button" aria-expanded={open} onclick={toggleEditor}
+          >{open ? 'Done' : connectionState.configured ? 'Edit' : 'Add'}</button
+        >
       </div>
 
-      <div class="sub2api-config-editor">
-        <div class="config-group">
-          <div class="config-card">
-            <div class="config-row">
-              <span>Upstream</span>
-              <SelectMenu
-                label="Upstream"
-                value={upstream}
-                options={upstreamOptions.map((option) => ({
-                  value: option,
-                  label: sub2ApiUpstreamLabel(option),
-                }))}
-                onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
-              />
-            </div>
-          </div>
-        </div>
-
-        <!-- The address and the administrator login both reach one Sub2API instance. -->
-        <div class="config-group">
-          <div class="config-card">
-            <div class="config-row">
-              <span>Custom Base URL</span>
-              <label class="switch custom-base-url-switch">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  aria-label="Use custom Base URL"
-                  checked={customBaseUrl}
-                  disabled={saving}
-                  onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
+      {#if !open && error}
+        <div class="config-error summary-error" role="alert">{error}</div>
+      {/if}
+      {#if open}
+        <div class="sub2api-config-editor">
+          <div class="config-group">
+            <div class="config-card">
+              <div class="config-row">
+                <span>Upstream</span>
+                <SelectMenu
+                  label="Upstream"
+                  value={upstream}
+                  options={upstreamOptions.map((option) => ({
+                    value: option,
+                    label: sub2ApiUpstreamLabel(option),
+                  }))}
+                  onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
                 />
-                <span></span>
-              </label>
-            </div>
-            <!-- The address comes from one source: the switch above picks it, and
-               what it governs sits inside it. -->
-            <div class="config-dependent">
-              {#if customBaseUrl}
-                <label class="config-row">
-                  <span>Base URL</span>
-                  <input
-                    type="url"
-                    bind:value={baseUrl}
-                    autocomplete="url"
-                    spellcheck="false"
-                    placeholder="https://sub2api.example.com"
-                    aria-label="Base URL"
-                    disabled={saving}
-                  />
-                </label>
-              {:else}
-                <label class="config-row">
-                  <span>Provider</span>
-                  <input
-                    type="text"
-                    value={providerName}
-                    autocomplete="off"
-                    spellcheck="false"
-                    placeholder={upstream === 'claude' ? 'Settings name' : 'Provider or profile'}
-                    aria-label={upstream === 'claude'
-                      ? 'Claude settings provider'
-                      : 'Codex provider or profile'}
-                    disabled={saving}
-                    oninput={(event) => updateProvider(event.currentTarget.value)}
-                  />
-                </label>
-                {#if providerError}
-                  <div class="config-note config-error" role="alert">
-                    {providerError}
-                  </div>
-                {:else}
-                  <p
-                    class="config-note config-resolved-url"
-                    role="status"
-                    aria-label="Resolved Base URL"
-                  >
-                    {resolvingProvider
-                      ? 'Looking up the Base URL…'
-                      : baseUrl || 'The Base URL is read from this provider.'}
-                  </p>
-                {/if}
-              {/if}
-            </div>
-            <label class="config-row">
-              <span>Email</span>
-              <input
-                type="email"
-                bind:value={email}
-                autocomplete="username"
-                spellcheck="false"
-                placeholder="admin@example.com"
-                aria-label="Sub2API administrator email"
-                disabled={saving}
-              />
-            </label>
-            <div class="config-row">
-              <span>Password</span>
-              <div class="password-field">
-                <input
-                  type={revealPassword ? 'text' : 'password'}
-                  bind:value={password}
-                  autocomplete="current-password"
-                  placeholder={canReuseSavedPassword ? 'Unchanged' : 'Password'}
-                  aria-label="Sub2API administrator password"
-                  disabled={saving}
-                />
-                <button
-                  type="button"
-                  aria-label={revealPassword ? 'Hide password' : 'Show password'}
-                  onclick={() => (revealPassword = !revealPassword)}
-                >
-                  <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
-                </button>
               </div>
             </div>
           </div>
-        </div>
 
-        <div class="config-group">
-          <div class="config-card">
-            <div class="config-row">
-              <span>Billing method</span>
-              <SelectMenu
-                label="Billing method"
-                value={billingMode}
-                options={[
-                  { value: 'upstream', label: 'Upstream' },
-                  { value: 'server', label: 'Sub2API' },
-                ]}
-                onChange={(value) => (billingMode = value as Sub2ApiBillingMode)}
-              />
+          <!-- The address and the administrator login both reach one Sub2API instance. -->
+          <div class="config-group">
+            <div class="config-card">
+              <div class="config-row">
+                <span>Custom Base URL</span>
+                <label class="switch custom-base-url-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-label="Use custom Base URL"
+                    checked={customBaseUrl}
+                    disabled={saving}
+                    onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
+                  />
+                  <span></span>
+                </label>
+              </div>
+              <!-- The address comes from one source: the switch above picks it, and
+               what it governs sits inside it. -->
+              <div class="config-dependent">
+                {#if customBaseUrl}
+                  <label class="config-row">
+                    <span>Base URL</span>
+                    <input
+                      type="url"
+                      bind:value={baseUrl}
+                      autocomplete="url"
+                      spellcheck="false"
+                      placeholder="https://sub2api.example.com"
+                      aria-label="Base URL"
+                      disabled={saving}
+                    />
+                  </label>
+                {:else}
+                  <label class="config-row">
+                    <span>Provider</span>
+                    <input
+                      type="text"
+                      value={providerName}
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder={upstream === 'claude' ? 'Settings name' : 'Provider or profile'}
+                      aria-label={upstream === 'claude'
+                        ? 'Claude settings provider'
+                        : 'Codex provider or profile'}
+                      disabled={saving}
+                      oninput={(event) => updateProvider(event.currentTarget.value)}
+                    />
+                  </label>
+                  {#if providerError}
+                    <div class="config-note config-error" role="alert">
+                      {providerError}
+                    </div>
+                  {:else}
+                    <p
+                      class="config-note config-resolved-url"
+                      role="status"
+                      aria-label="Resolved Base URL"
+                    >
+                      {resolvingProvider
+                        ? 'Looking up the Base URL…'
+                        : baseUrl || 'The Base URL is read from this provider.'}
+                    </p>
+                  {/if}
+                {/if}
+              </div>
+              <label class="config-row">
+                <span>Email</span>
+                <input
+                  type="email"
+                  bind:value={email}
+                  autocomplete="username"
+                  spellcheck="false"
+                  placeholder="admin@example.com"
+                  aria-label="Sub2API administrator email"
+                  disabled={saving}
+                />
+              </label>
+              <div class="config-row">
+                <span>Password</span>
+                <div class="password-field">
+                  <input
+                    type={revealPassword ? 'text' : 'password'}
+                    bind:value={password}
+                    autocomplete="current-password"
+                    placeholder={canReuseSavedPassword ? 'Unchanged' : 'Password'}
+                    aria-label="Sub2API administrator password"
+                    disabled={saving}
+                  />
+                  <button
+                    type="button"
+                    aria-label={revealPassword ? 'Hide password' : 'Show password'}
+                    onclick={() => (revealPassword = !revealPassword)}
+                  >
+                    <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="sub2api-config-actions">
-          <button
-            class="primary"
-            type="button"
-            disabled={!canSave}
-            use:saveShortcut={canSave}
-            onclick={() => void save()}>{saving ? 'Saving…' : 'Save'}</button
-          >
-          {#if connectionState.configured}
+          <div class="config-group">
+            <div class="config-card">
+              <div class="config-row">
+                <span>Billing method</span>
+                <SelectMenu
+                  label="Billing method"
+                  value={billingMode}
+                  options={[
+                    { value: 'upstream', label: 'Upstream' },
+                    { value: 'server', label: 'Sub2API' },
+                  ]}
+                  onChange={(value) => (billingMode = value as Sub2ApiBillingMode)}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="sub2api-config-actions">
             <button
-              bind:this={clearButton}
+              class="primary"
               type="button"
-              disabled={saving || confirmingClear}
-              aria-label="Clear connection"
-              onclick={() => void requestClear()}>Clear…</button
+              disabled={!canSave}
+              use:saveShortcut={canSave}
+              onclick={() => void save()}>{saving ? 'Saving…' : 'Save'}</button
             >
-          {/if}
-        </div>
-
-        {#if confirmingClear}
-          <div
-            class="clear-confirm"
-            role="group"
-            aria-labelledby="clear-sub2api-title"
-            aria-describedby="clear-sub2api-message"
-          >
-            <strong id="clear-sub2api-title">Clear connection?</strong>
-            <span id="clear-sub2api-message"
-              >The Base URL and saved login will be removed. This account will remain.</span
-            >
-            <div>
+            {#if connectionState.configured}
               <button
-                bind:this={clearCancelButton}
+                bind:this={clearButton}
                 type="button"
-                disabled={saving}
-                onkeydown={handleClearKeydown}
-                onclick={() => void cancelClear()}>Cancel</button
+                disabled={saving || confirmingClear}
+                aria-label="Clear connection"
+                onclick={() => void requestClear()}>Clear…</button
               >
-              <button
-                class="destructive"
-                type="button"
-                disabled={saving}
-                onkeydown={handleClearKeydown}
-                onclick={() => void clearConnection()}>{saving ? 'Clearing…' : 'Clear'}</button
-              >
-            </div>
+            {/if}
           </div>
-        {/if}
-        {#if error}<div class="config-error" role="alert">{error}</div>{/if}
-      </div>
+
+          {#if confirmingClear}
+            <div
+              class="clear-confirm"
+              role="group"
+              aria-labelledby="clear-sub2api-title"
+              aria-describedby="clear-sub2api-message"
+            >
+              <strong id="clear-sub2api-title">Clear connection?</strong>
+              <span id="clear-sub2api-message"
+                >The Base URL and saved login will be removed. This account will remain.</span
+              >
+              <div>
+                <button
+                  bind:this={clearCancelButton}
+                  type="button"
+                  disabled={saving}
+                  onkeydown={handleClearKeydown}
+                  onclick={() => void cancelClear()}>Cancel</button
+                >
+                <button
+                  class="destructive"
+                  type="button"
+                  disabled={saving}
+                  onkeydown={handleClearKeydown}
+                  onclick={() => void clearConnection()}>{saving ? 'Clearing…' : 'Clear'}</button
+                >
+              </div>
+            </div>
+          {/if}
+          {#if error}<div class="config-error" role="alert">{error}</div>{/if}
+        </div>
+      {/if}
     </div>
   </div>
 </section>
@@ -665,6 +705,7 @@
     background: var(--meter-critical);
   }
 
+  .sub2api-config-summary > button,
   .sub2api-config-actions button,
   .clear-confirm button,
   .remove-item-confirm button {
@@ -683,7 +724,7 @@
     padding: 5px 10px;
   }
 
-  /* Below the header, the connection card holds its fields in groups, each a
+  /* Opened, the connection card holds its fields in captioned groups, each a
      tinted panel inside the card. */
   .sub2api-config-editor {
     display: grid;
@@ -920,5 +961,9 @@
 
   .sub2api-config-editor > .config-error {
     padding: 0 4px;
+  }
+
+  .summary-error {
+    padding: 0 12px 10px 40px;
   }
 </style>
