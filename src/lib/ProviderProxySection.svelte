@@ -174,46 +174,52 @@
         </div>
         {#if custom}
           <div class="proxy-row">
-            <span>URL</span>
-            <input
-              class="proxy-url"
-              type="text"
-              bind:value={draft}
-              placeholder="http://127.0.0.1:7890"
-              aria-label="Proxy URL"
-              aria-invalid={!!error}
-              autocomplete="off"
-              spellcheck="false"
-              oninput={() => (error = '')}
-              onblur={commit}
-              onkeydown={(event) => {
-                if (event.key === 'Enter') event.currentTarget.blur();
-                else if (event.key === 'Escape') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  resetEditor();
-                  event.currentTarget.blur();
-                }
-              }}
-            />
-            {#if location}
-              <span
-                class="proxy-location"
-                role="img"
-                aria-label={locationLabel}
-                title={locationLabel}>{flag}</span
-              >
-            {:else if checking}
-              <span
-                class="proxy-checking"
-                role="status"
-                aria-label="Checking proxy exit location"
-                title="Checking proxy exit location">…</span
-              >
-            {/if}
+            <label for={`proxy-url-${provider.id}`}>URL</label>
+            <div class="proxy-address">
+              <input
+                id={`proxy-url-${provider.id}`}
+                class="proxy-url"
+                type="text"
+                bind:value={draft}
+                placeholder="http://127.0.0.1:7890"
+                aria-label="Proxy URL"
+                aria-invalid={!!error}
+                aria-describedby={error ? `proxy-error-${provider.id}` : undefined}
+                autocomplete="off"
+                spellcheck="false"
+                oninput={() => (error = '')}
+                onblur={commit}
+                onkeydown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                  else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    resetEditor();
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+              {#if location}
+                <span
+                  class="proxy-location"
+                  role="img"
+                  aria-label={locationLabel}
+                  title={locationLabel}>{flag}</span
+                >
+              {:else if checking}
+                <span
+                  class="proxy-checking"
+                  role="status"
+                  aria-label="Checking proxy exit location"
+                  title="Checking proxy exit location">…</span
+                >
+              {/if}
+            </div>
           </div>
         {/if}
-        {#if error}<p class="provider-proxy-error" role="alert">{error}</p>{/if}
+        {#if error}<p class="provider-proxy-error" id={`proxy-error-${provider.id}`} role="alert">
+            {error}
+          </p>{/if}
       </div>
     {/if}
   </div>
@@ -280,34 +286,37 @@
   }
 
   .proxy-editor {
-    display: flow-root;
+    padding: 3px 14px 4px 12px;
     border-top: 1px solid var(--separator);
-    border-radius: 0 0 12px 12px;
-    background: color-mix(in srgb, var(--card) 75%, var(--tray));
   }
 
   .proxy-row {
-    display: flex;
-    min-height: 42px;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    min-height: 29px;
     align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 7px 12px;
-    font-size: 13px;
+    column-gap: 10px;
+    font-size: 12px;
+  }
+
+  .proxy-row > :global(.select-menu) {
+    justify-self: end;
   }
 
   .proxy-row + .proxy-row {
     border-top: 1px solid var(--separator);
   }
 
-  .proxy-row > span:first-child {
-    flex: 0 0 auto;
+  .proxy-address {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .proxy-url {
     min-width: 0;
-    height: 28px;
-    flex: 1 1 auto;
+    height: 25px;
+    flex: 1;
     padding: 4px 8px;
     border: 1px solid var(--separator);
     border-radius: 7px;
@@ -330,16 +339,15 @@
     line-height: 20px;
   }
 
-  p {
-    margin: 0 12px 10px;
-    font-size: 10px;
-    line-height: 14px;
+  .proxy-url[aria-invalid='true'] {
+    border-color: var(--error);
   }
 
   .provider-proxy-error {
-    padding: 6px 7px;
-    border-radius: 7px;
+    margin: 2px 0 1px;
     color: var(--error);
-    background: var(--error-bg);
+    font-size: 10px;
+    line-height: 13px;
+    overflow-wrap: anywhere;
   }
 </style>
