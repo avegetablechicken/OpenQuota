@@ -131,6 +131,8 @@ pub enum AntigravityError {
     InvalidCredentialData,
     #[error("Antigravity usage is temporarily unavailable. Try again shortly.")]
     Unavailable,
+    #[error("{0}")]
+    CertificateFailed(String),
     #[error("Local Antigravity usage transcripts could not be processed.")]
     LocalUsage,
 }
@@ -298,6 +300,9 @@ impl AntigravityProvider {
                     self.access_token_cache.discard();
                     return Err(AntigravityError::AuthExpired);
                 }
+                RefreshOutcome::CertificateFailed(hint) => {
+                    return Err(AntigravityError::CertificateFailed(hint))
+                }
                 RefreshOutcome::Unavailable => return Err(AntigravityError::Unavailable),
             }
         }
@@ -331,6 +336,9 @@ impl AntigravityProvider {
             CloudUserAgent::Antigravity,
         ) {
             CloudOutcome::Ok(value) => parse_quota_summary(&value, Utc::now()),
+            CloudOutcome::CertificateFailed(hint) => {
+                return Err(AntigravityError::CertificateFailed(hint))
+            }
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
             CloudOutcome::Unavailable => None,
         };
@@ -347,6 +355,9 @@ impl AntigravityProvider {
             CloudUserAgent::Antigravity,
         ) {
             CloudOutcome::Ok(value) => build_legacy_quotas(parse_cloud_models(&value), Utc::now()),
+            CloudOutcome::CertificateFailed(hint) => {
+                return Err(AntigravityError::CertificateFailed(hint))
+            }
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
             CloudOutcome::Unavailable => Vec::new(),
         };
@@ -372,6 +383,9 @@ impl AntigravityProvider {
                     .filter(|value| !value.trim().is_empty())
                     .map(str::to_owned),
             ),
+            CloudOutcome::CertificateFailed(hint) => {
+                return Err(AntigravityError::CertificateFailed(hint))
+            }
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
             CloudOutcome::Unavailable => (None, None),
         };
@@ -394,6 +408,9 @@ impl AntigravityProvider {
                 if !quotas.is_empty() {
                     return Ok(snapshot(plan, quotas));
                 }
+            }
+            CloudOutcome::CertificateFailed(hint) => {
+                return Err(AntigravityError::CertificateFailed(hint))
             }
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
             CloudOutcome::Unavailable => {}
@@ -528,7 +545,9 @@ impl crate::providers::UsageProvider for AntigravityProvider {
                 | AntigravityError::AuthExpired
                 | AntigravityError::InvalidCredentialData => Kind::Authentication,
                 AntigravityError::CredentialStoreUnreadable => Kind::CredentialStorage,
-                AntigravityError::Unavailable => Kind::Network,
+                AntigravityError::Unavailable | AntigravityError::CertificateFailed(_) => {
+                    Kind::Network
+                }
                 AntigravityError::LocalUsage => Kind::Internal,
             };
             crate::providers::ProviderError::from_display(kind, error)

@@ -67,9 +67,11 @@ impl ClaudeClient {
             .header("anthropic-beta", "oauth-2025-04-20")
             .header("User-Agent", "claude-code/2.1.69")
             .send()
-            .map_err(|_| {
+            .map_err(|error| {
                 crate::app_warn!("http", "claude usage request failed (transport)");
-                ClaudeError::ConnectionFailed
+                crate::http_client::certificate_restart_hint(&error)
+                    .map(ClaudeError::CertificateFailed)
+                    .unwrap_or(ClaudeError::ConnectionFailed)
             })?;
         let clock_offset = response
             .headers()
@@ -124,9 +126,11 @@ impl ClaudeClient {
                 "scope": OAUTH_SCOPES
             }))
             .send()
-            .map_err(|_| {
+            .map_err(|error| {
                 crate::app_warn!("auth:claude", "token refresh failed (transport)");
-                ClaudeError::ConnectionFailed
+                crate::http_client::certificate_restart_hint(&error)
+                    .map(ClaudeError::CertificateFailed)
+                    .unwrap_or(ClaudeError::ConnectionFailed)
             })?;
         let status = response.status();
         crate::app_debug!(

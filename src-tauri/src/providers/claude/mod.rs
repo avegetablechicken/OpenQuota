@@ -151,6 +151,8 @@ pub enum ClaudeError {
     InvalidResponse,
     #[error("Could not connect to Claude. Check your internet connection.")]
     ConnectionFailed,
+    #[error("{0}")]
+    CertificateFailed(String),
     #[error("Local Claude usage logs could not be processed.")]
     LocalUsage,
     #[error("Claude account settings could not be loaded.")]
@@ -605,7 +607,9 @@ fn provider_error(error: ClaudeError) -> crate::providers::ProviderError {
         ClaudeError::InvalidOAuthUrl | ClaudeError::InvalidResponse => Kind::InvalidResponse,
         ClaudeError::AuthWrite | ClaudeError::RefreshLockUnavailable => Kind::CredentialStorage,
         ClaudeError::RequestFailed(429) => Kind::RateLimited,
-        ClaudeError::RequestFailed(_) | ClaudeError::ConnectionFailed => Kind::Network,
+        ClaudeError::RequestFailed(_)
+        | ClaudeError::ConnectionFailed
+        | ClaudeError::CertificateFailed(_) => Kind::Network,
         ClaudeError::LocalUsage => Kind::LocalData,
         ClaudeError::AccountStore(_) => Kind::Internal,
     };

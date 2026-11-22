@@ -27,6 +27,7 @@ pub struct AntigravityClient {
 pub enum CloudOutcome {
     Ok(Value),
     AuthFailed,
+    CertificateFailed(String),
     Unavailable,
 }
 
@@ -71,6 +72,7 @@ pub enum RefreshOutcome {
         expires_in_seconds: f64,
     },
     AuthFailed,
+    CertificateFailed(String),
     Unavailable,
 }
 
@@ -167,6 +169,7 @@ impl AntigravityClient {
         let Ok(client) = self.remote.current() else {
             return CloudOutcome::Unavailable;
         };
+        let mut certificate_error = None;
         for base in &self.cloud_bases {
             let response = client
                 .post(format!("{base}{path}"))
@@ -175,9 +178,15 @@ impl AntigravityClient {
                 .header("User-Agent", user_agent.header())
                 .json(&body)
                 .send();
-            let Ok(response) = response else {
-                crate::app_warn!("http", "antigravity cloud request failed (transport)");
-                continue;
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(hint) = crate::http_client::certificate_restart_hint(&error) {
+                        certificate_error = Some(hint);
+                    }
+                    crate::app_warn!("http", "antigravity cloud request failed (transport)");
+                    continue;
+                }
             };
             crate::app_debug!(
                 "http",
@@ -196,7 +205,9 @@ impl AntigravityClient {
                 }
             }
         }
-        CloudOutcome::Unavailable
+        certificate_error
+            .map(CloudOutcome::CertificateFailed)
+            .unwrap_or(CloudOutcome::Unavailable)
     }
 
     pub fn refresh_google_token(&self, refresh_token: &str) -> RefreshOutcome {
@@ -214,9 +225,14 @@ impl AntigravityClient {
                 ("grant_type", "refresh_token"),
             ])
             .send();
-        let Ok(response) = response else {
-            crate::app_warn!("auth:antigravity", "token refresh failed (transport)");
-            return RefreshOutcome::Unavailable;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                crate::app_warn!("auth:antigravity", "token refresh failed (transport)");
+                return crate::http_client::certificate_restart_hint(&error)
+                    .map(RefreshOutcome::CertificateFailed)
+                    .unwrap_or(RefreshOutcome::Unavailable);
+            }
         };
         crate::app_debug!(
             "http",

@@ -1505,6 +1505,15 @@ mod tls_tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn certificate_hint_survives_a_real_tls_error_chain() {
+        let error = request(false, "localhost", true, false).unwrap_err();
+        let hint = super::certificate_restart_hint(&error).expect("certificate restart hint");
+        assert!(hint.contains("fully quit and restart OpenQuota"));
+        assert!(!hint.contains("https://"));
+    }
+
+    #[test]
     fn untrusted_self_signed_server_is_rejected() {
         assert!(request(false, "localhost", true, false)
             .unwrap_err()
@@ -1803,5 +1812,61 @@ mod provider_proxy_tests {
         assert!(client
             .current_with_proxy(Some("not a proxy URL".into()))
             .is_err());
+    }
+}
+
+/// Return only the certificate diagnostic, not request URLs or credentials.
+pub(crate) fn certificate_restart_hint(error: &reqwest::Error) -> Option<String> {
+    use std::error::Error;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let message = cause.to_string();
+        if certificate_verification_failure(&message) {
+            return Some(format!("Certificate verification failed. If you updated the system certificates, fully quit and restart OpenQuota, then retry. Otherwise, check the proxy certificate and system trust settings. ({message})"));
+        }
+        source = cause.source();
+    }
+    None
+}
+
+/// Certificate verification failures can persist in cached clients after CA updates.
+fn certificate_verification_failure(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "invalid peer certificate",
+        "certificate verify failed",
+        "certificate verification failed",
+        "unknownissuer",
+        "unknown issuer",
+        "unable to get local issuer certificate",
+        "self-signed certificate",
+        "self signed certificate",
+        "certificate has expired",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+#[cfg(test)]
+mod certificate_hint_tests {
+    use super::certificate_verification_failure;
+
+    #[test]
+    fn recognizes_verification_errors_without_labeling_other_network_failures() {
+        for message in [
+            "invalid peer certificate: BadSignature",
+            "certificate verify failed: unable to get local issuer certificate",
+            "invalid peer certificate: UnknownIssuer",
+        ] {
+            assert!(certificate_verification_failure(message));
+        }
+        for message in [
+            "connection refused",
+            "operation timed out",
+            "HTTP 401",
+            "TLS handshake EOF",
+        ] {
+            assert!(!certificate_verification_failure(message));
+        }
     }
 }
