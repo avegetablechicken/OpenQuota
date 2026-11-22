@@ -1,7 +1,6 @@
 <script lang="ts">
   import { slide } from 'svelte/transition';
   import { probeProviderProxy } from './backend';
-  import Icon from './Icon.svelte';
   import { springMotion } from './motion';
   import SelectMenu from './SelectMenu.svelte';
   import type { AppSettings, ProviderLayout, ProxyExitLocation } from './types';
@@ -51,11 +50,18 @@
   );
   const savedValue = $derived(settings.providerProxies?.[provider.id] ?? '');
 
-  $effect(() => {
-    mode = !savedValue ? 'system' : savedValue === 'direct' ? 'direct' : 'custom';
+  const savedMode = $derived<ProxyMode>(
+    !savedValue ? 'system' : savedValue === 'direct' ? 'direct' : 'custom',
+  );
+  const savedLabel = $derived(modeOptions.find((option) => option.value === savedMode)?.label);
+
+  function resetEditor() {
+    mode = savedMode;
     draft = savedValue === 'direct' ? '' : savedValue;
     error = '';
-  });
+  }
+
+  $effect(resetEditor);
 
   $effect(() => {
     const proxy = savedValue;
@@ -135,82 +141,82 @@
 </script>
 
 <section class="provider-proxy-section" aria-label="Proxy">
-  <h2>
-    <button
-      class="proxy-disclosure"
-      class:expanded
-      type="button"
-      aria-expanded={expanded}
-      aria-controls={`provider-proxy-card-${provider.id}`}
-      onclick={() => {
-        onContentMorph();
-        expanded = !expanded;
-      }}
-    >
-      <span>Proxy</span>
-      <Icon name="chevron-right" size={10} strokeWidth={2.4} />
-      {#if !expanded && mode !== 'system'}
-        <small>{modeOptions.find((option) => option.value === mode)?.label}</small>
-      {/if}
-    </button>
-  </h2>
-  {#if expanded}
-    <div
-      class="provider-proxy-card"
-      id={`provider-proxy-card-${provider.id}`}
-      transition:slide={springMotion(reducedMotion)}
-    >
-      <div class="proxy-row">
-        <span>Mode</span>
-        <SelectMenu
-          label="Proxy mode"
-          value={mode}
-          options={modeOptions}
-          onChange={(value) => selectMode(value as ProxyMode)}
-        />
-      </div>
-      {#if custom}
-        <div class="proxy-row">
-          <span>URL</span>
-          <input
-            class="proxy-url"
-            type="text"
-            bind:value={draft}
-            placeholder="http://127.0.0.1:7890"
-            aria-label="Proxy URL"
-            aria-invalid={!!error}
-            autocomplete="off"
-            spellcheck="false"
-            oninput={() => (error = '')}
-            onblur={commit}
-            onkeydown={(event) => {
-              if (event.key === 'Enter') event.currentTarget.blur();
-              else if (event.key === 'Escape') {
-                event.preventDefault();
-                event.stopPropagation();
-                draft = savedValue === 'direct' ? '' : savedValue;
-                error = '';
-                event.currentTarget.blur();
-              }
-            }}
-          />
-          {#if location}
-            <span class="proxy-location" role="img" aria-label={locationLabel} title={locationLabel}
-              >{flag}</span
-            >
-          {:else if checking}
-            <span
-              class="proxy-checking"
-              role="status"
-              aria-label="Checking proxy exit location"
-              title="Checking proxy exit location">…</span
-            >
-          {/if}
-        </div>
-      {/if}
-      {#if error}<p class="provider-proxy-error" role="alert">{error}</p>{/if}
+  <h2>Proxy</h2>
+  <div class="provider-proxy-card">
+    <div class="proxy-summary">
+      <span class="proxy-mode" data-mode={savedMode}>{savedLabel}</span>
+      <button
+        type="button"
+        aria-label={expanded ? 'Done editing proxy' : 'Edit proxy'}
+        aria-expanded={expanded}
+        aria-controls={expanded ? `provider-proxy-editor-${provider.id}` : undefined}
+        onclick={() => {
+          if (!expanded) resetEditor();
+          onContentMorph();
+          expanded = !expanded;
+        }}>{expanded ? 'Done' : 'Edit'}</button
+      >
     </div>
-  {/if}
+    {#if expanded}
+      <div
+        class="proxy-editor"
+        id={`provider-proxy-editor-${provider.id}`}
+        transition:slide={springMotion(reducedMotion)}
+      >
+        <div class="proxy-row">
+          <span>Mode</span>
+          <SelectMenu
+            label="Proxy mode"
+            value={mode}
+            options={modeOptions}
+            onChange={(value) => selectMode(value as ProxyMode)}
+          />
+        </div>
+        {#if custom}
+          <div class="proxy-row">
+            <span>URL</span>
+            <input
+              class="proxy-url"
+              type="text"
+              bind:value={draft}
+              placeholder="http://127.0.0.1:7890"
+              aria-label="Proxy URL"
+              aria-invalid={!!error}
+              autocomplete="off"
+              spellcheck="false"
+              oninput={() => (error = '')}
+              onblur={commit}
+              onkeydown={(event) => {
+                if (event.key === 'Enter') event.currentTarget.blur();
+                else if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  resetEditor();
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+            {#if location}
+              <span
+                class="proxy-location"
+                role="img"
+                aria-label={locationLabel}
+                title={locationLabel}>{flag}</span
+              >
+            {:else if checking}
+              <span
+                class="proxy-checking"
+                role="status"
+                aria-label="Checking proxy exit location"
+                title="Checking proxy exit location">…</span
+              >
+            {/if}
+          </div>
+        {/if}
+        {#if error}<p class="provider-proxy-error" role="alert">{error}</p>{/if}
+      </div>
+    {/if}
+  </div>
 </section>
 
 <style>
@@ -219,47 +225,65 @@
   }
 
   h2 {
-    margin: 0 0 5px;
+    margin: 0 8px 5px;
+    color: var(--secondary);
     font-size: 11px;
     font-weight: 600;
-  }
-
-  .proxy-disclosure {
-    display: flex;
-    width: 100%;
-    align-items: center;
-    gap: 4px;
-    padding: 0 8px;
-    border: 0;
-    color: var(--secondary);
-    background: none;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .proxy-disclosure:hover {
-    color: var(--text);
-  }
-
-  .proxy-disclosure :global(svg) {
-    transition: transform var(--motion-switch);
-  }
-
-  .proxy-disclosure.expanded :global(svg) {
-    transform: rotate(90deg);
-  }
-
-  .proxy-disclosure small {
-    margin-left: auto;
-    color: var(--tertiary);
-    font-size: 11px;
-    font-weight: 400;
   }
 
   .provider-proxy-card {
     border-radius: 12px;
     background: var(--card);
+  }
+
+  .proxy-summary {
+    display: flex;
+    min-height: 42px;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+  }
+
+  .proxy-mode {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .proxy-mode::after {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #8e8e93;
+    content: '';
+  }
+
+  .proxy-mode[data-mode='system']::after {
+    background: #527eae;
+  }
+
+  .proxy-mode[data-mode='custom']::after {
+    background: #a88800;
+    background: light-dark(#a88800, #ffd60a);
+  }
+
+  .proxy-summary button {
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--text);
+    background: var(--button-hover);
+    font-size: 10px;
+  }
+
+  .proxy-editor {
+    display: flow-root;
+    border-top: 1px solid var(--separator);
+    border-radius: 0 0 12px 12px;
+    background: color-mix(in srgb, var(--card) 75%, var(--tray));
   }
 
   .proxy-row {

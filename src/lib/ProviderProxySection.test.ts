@@ -24,7 +24,7 @@ async function setup(existing = '') {
   settings.providerProxies = { [provider.id]: existing, other: 'http://localhost:8888' };
   const onChange = vi.fn();
   const view = render(ProviderProxySection, { settings, provider, onChange });
-  await fireEvent.click(screen.getByRole('button', { name: /^Proxy/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Edit proxy' }));
   return {
     get input() {
       return screen.getByLabelText('Proxy URL') as HTMLInputElement;
@@ -43,32 +43,39 @@ it('lets the panel follow the disclosure animation in both directions', async ()
   const provider = settings.providers[0];
   const onContentMorph = vi.fn();
   render(ProviderProxySection, { settings, provider, onChange: vi.fn(), onContentMorph });
-  const disclosure = screen.getByRole('button', { name: /^Proxy/ });
+  const disclosure = screen.getByRole('button', { name: 'Edit proxy' });
   await fireEvent.click(disclosure);
   await fireEvent.click(disclosure);
   expect(onContentMorph).toHaveBeenCalledTimes(2);
 });
 
-it('omits the header summary while the system proxy is used', () => {
+it.each([
+  ['', 'system', 'System'],
+  ['direct', 'direct', 'Direct'],
+  ['http://localhost:7890', 'custom', 'Custom'],
+])('shows the saved %s mode and its indicator with the editor closed', (value, mode, label) => {
   const settings = structuredClone(settingsState.settings);
   const provider = settings.providers[0];
+  settings.providerProxies = { [provider.id]: value };
   render(ProviderProxySection, { settings, provider, onChange: vi.fn() });
-  const disclosure = screen.getByRole('button', { name: /^Proxy/ });
-  expect(disclosure).toHaveAttribute('aria-expanded', 'false');
-  expect(disclosure).not.toHaveTextContent('System');
+  expect(screen.getByText(label)).toHaveAttribute('data-mode', mode);
+  expect(screen.getByRole('button', { name: 'Edit proxy' })).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  );
+  expect(screen.queryByRole('combobox', { name: 'Proxy mode' })).toBeNull();
+  expect(screen.queryByLabelText('Proxy URL')).toBeNull();
 });
 
-it('starts collapsed and summarizes the saved mode in the header', async () => {
-  const settings = structuredClone(settingsState.settings);
-  const provider = settings.providers[0];
-  settings.providerProxies = { [provider.id]: 'direct' };
-  render(ProviderProxySection, { settings, provider, onChange: vi.fn() });
-  const disclosure = screen.getByRole('button', { name: /^Proxy/ });
-  expect(disclosure).toHaveAttribute('aria-expanded', 'false');
-  expect(disclosure).toHaveTextContent('Direct');
-  expect(screen.queryByRole('combobox', { name: 'Proxy mode' })).toBeNull();
-  await fireEvent.click(disclosure);
-  expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+it('keeps the saved indicator when a custom mode draft is dismissed', async () => {
+  const { onChange } = await setup('direct');
+  await chooseMode('Custom');
+  const done = screen.getByRole('button', { name: 'Done editing proxy' });
+  expect(done).toHaveAttribute('aria-expanded', 'true');
+  await fireEvent.click(done);
+  expect(screen.getByText('Direct')).toHaveAttribute('data-mode', 'direct');
+  expect(onChange).not.toHaveBeenCalled();
+  await fireEvent.click(screen.getByRole('button', { name: 'Edit proxy' }));
   expect(screen.getByRole('combobox', { name: 'Proxy mode' })).toHaveDisplayValue('Direct');
 });
 
