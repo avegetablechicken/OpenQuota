@@ -5,7 +5,7 @@ import {
   formatSpendValue,
   totalSpendRingCenter,
 } from './metricFormat';
-import { formatLimit, formatReset, projectPace, quotaNow } from './pacing';
+import { formatLimit, formatReset, isUnstartedSession, projectPace, quotaNow } from './pacing';
 import {
   OTHERS_SPEND_ID,
   UNPRICED_OTHERS_SPEND_ID,
@@ -139,7 +139,7 @@ export function buildProviderShareRows(
     if (source.kind === 'quota' || source.kind === 'quotaOrValue') {
       const quota = snapshot.quotas.find((item) => item.id === source.sourceId);
       if (quota) {
-        rows.push(quotaShareRow(quota, settings, now));
+        rows.push(quotaShareRow(quota, settings, now, source.sessionWindow));
       } else if (source.kind === 'quotaOrValue') {
         const valueMetric = snapshot.valueMetrics.find((item) => item.id === source.sourceId);
         rows.push({
@@ -362,7 +362,12 @@ export function renderTotalSpendShareCard(
   return canvas;
 }
 
-function quotaShareRow(quota: QuotaWindow, settings: AppSettings, now: number): ShareRow {
+function quotaShareRow(
+  quota: QuotaWindow,
+  settings: AppSettings,
+  now: number,
+  sessionWindow: boolean,
+): ShareRow {
   const used = clamp(quota.usedPercent, 0, 100);
   const remaining = Math.max(0, 100 - used);
   const usedDisplay = Math.floor(used);
@@ -416,7 +421,9 @@ function quotaShareRow(quota: QuotaWindow, settings: AppSettings, now: number): 
     kind: 'quota',
     label: quota.label,
     reading,
-    trailing: formatReset(quota.resetsAt, serverNow, settings.resetDisplay, settings.timeFormat),
+    trailing: isUnstartedSession(quota, sessionWindow)
+      ? 'Not started'
+      : formatReset(quota.resetsAt, serverNow, settings.resetDisplay, settings.timeFormat),
     fillPercent: clamp(fillPercent, 0, 100),
     severity,
     paceLabel,

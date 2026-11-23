@@ -54,6 +54,14 @@ pub struct QuotaWindow {
     pub source_note: Option<String>,
 }
 
+impl QuotaWindow {
+    /// A starts-on-use session with no usage and no reset has not started yet;
+    /// showing its 0% would read as an open window.
+    pub fn is_unstarted_session(&self, source: &MetricSource) -> bool {
+        source.session_window() && self.used_percent <= 0.0 && self.resets_at.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum MetricValueKind {
@@ -450,7 +458,6 @@ impl MetricSource {
         }
     }
 
-    #[cfg(test)]
     pub fn session_window(&self) -> bool {
         matches!(
             self,

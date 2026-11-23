@@ -49,7 +49,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "codex.session",
                 "Session",
                 "session",
-                false,
+                true,
                 true,
                 MetricSection::AlwaysVisible,
                 true,

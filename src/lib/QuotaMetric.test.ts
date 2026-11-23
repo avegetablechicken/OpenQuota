@@ -22,11 +22,17 @@ function quota(usedPercent: number, elapsedFraction = 0.5): QuotaWindow {
   };
 }
 
-function show(value: QuotaWindow, onToggleReset = vi.fn(), usageDisplay: 'used' | 'left' = 'left') {
+function show(
+  value: QuotaWindow,
+  onToggleReset = vi.fn(),
+  usageDisplay: 'used' | 'left' = 'left',
+  sessionWindow = false,
+) {
   return {
     onToggleReset,
     ...render(QuotaMetric, {
       quota: value,
+      sessionWindow,
       now,
       usageDisplay,
       resetDisplay: 'countdown',
@@ -204,4 +210,25 @@ it('uses floored used percent for fallback meter severity thresholds', () => {
     expect(container.querySelector(`.meter--${tone}`)).toBeInTheDocument();
     unmount();
   }
+});
+
+describe('unstarted sessions', () => {
+  it('show their 0% reading with Not started instead of a reset', () => {
+    show({ ...quota(0), resetsAt: null }, vi.fn(), 'used', true);
+    expect(screen.getByRole('button', { name: '0% used' })).toBeInTheDocument();
+    expect(screen.getByText('Not started')).toBeInTheDocument();
+    expect(screen.queryByText('Reset unavailable')).not.toBeInTheDocument();
+  });
+
+  it('keep reset text for started sessions and other windows', () => {
+    for (const [value, sessionWindow] of [
+      [quota(0), true],
+      [{ ...quota(1), resetsAt: null }, true],
+      [{ ...quota(0), resetsAt: null }, false],
+    ] as const) {
+      const { unmount } = show(value, vi.fn(), 'used', sessionWindow);
+      expect(screen.queryByText('Not started')).not.toBeInTheDocument();
+      unmount();
+    }
+  });
 });

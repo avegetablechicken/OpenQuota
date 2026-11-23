@@ -196,6 +196,23 @@ describe('share card layout', () => {
     expect(leftRows[0]).toMatchObject({ kind: 'quota', reading: '75% left' });
   });
 
+  it('exports an unstarted session as Not started', () => {
+    const snapshot = structuredClone(codexState.snapshot!);
+    snapshot.quotas[0] = { ...snapshot.quotas[0], usedPercent: 0, resetsAt: null };
+    const rows = buildProviderShareRows(
+      'codex',
+      snapshot,
+      settingsState.settings.providers[0],
+      { ...settingsState.settings, usageDisplay: 'used' },
+      Date.now(),
+    );
+
+    expect(rows.find((row) => row.kind === 'quota' && row.label === 'Session')).toMatchObject({
+      reading: '0% used',
+      trailing: 'Not started',
+    });
+  });
+
   it('omits pacing copy for an unused non-session quota', () => {
     const now = Date.parse('2026-08-12T12:00:00Z');
     const snapshot = structuredClone(codexState.snapshot!);

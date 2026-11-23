@@ -55,6 +55,12 @@ export function projectPace(window: QuotaWindow, now: number): PaceProjection {
   };
 }
 
+/// A starts-on-use session with no usage and no reset has not started yet. It has
+/// a real 0% reading, but no countdown: a reset time would read as an open window.
+export function isUnstartedSession(window: QuotaWindow, sessionWindow: boolean) {
+  return sessionWindow && window.usedPercent <= 0 && window.resetsAt === null;
+}
+
 export function paceTooltip(value: PaceProjection) {
   if (value.severity === 'level') return null;
   if (value.severity === 'spent') return 'Limit reached';

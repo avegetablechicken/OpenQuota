@@ -521,6 +521,7 @@ fn tray_metric(
             .quotas
             .iter()
             .find(|quota| quota.id == id)
+            .filter(|quota| !quota.is_unstarted_session(&definition.source))
             .map(|quota| {
                 if quota.format == QuotaFormat::Count {
                     if let (Some(used), Some(limit)) = (quota.used_value, quota.limit_value) {
@@ -1179,7 +1180,7 @@ mod tests {
                     id: "session".into(),
                     label: "Session".into(),
                     used_percent: 25.0,
-                    resets_at: None,
+                    resets_at: Some(Utc::now() + chrono::Duration::hours(4)),
                     period_seconds: 18_000,
                     format: crate::models::QuotaFormat::Percent,
                     used_value: None,
@@ -1627,7 +1628,7 @@ mod tests {
                     id: "session".into(),
                     label: "Session".into(),
                     used_percent,
-                    resets_at: None,
+                    resets_at: Some(Utc::now() + chrono::Duration::hours(1)),
                     period_seconds: 18_000,
                     format: crate::models::QuotaFormat::Percent,
                     used_value: None,
@@ -1652,5 +1653,60 @@ mod tests {
             assert_eq!(used_metric.value, want_used, "used for {used_percent}");
             assert_eq!(left_metric.value, want_left, "left for {used_percent}");
         }
+    }
+
+    #[test]
+    fn unstarted_sessions_show_no_percentage_in_the_menu_bar() {
+        let definition = |session_window| {
+            MetricDefinition::quota(
+                "codex.session",
+                "Session",
+                "session",
+                session_window,
+                true,
+                MetricSection::AlwaysVisible,
+                true,
+                "S",
+            )
+        };
+        let snapshot = |used_percent, resets_at| ProviderSnapshot {
+            accounts: None,
+            provider_id: "codex".into(),
+            plan: None,
+            quotas: vec![QuotaWindow {
+                clock_offset_seconds: None,
+                id: "session".into(),
+                label: "Session".into(),
+                used_percent,
+                resets_at,
+                period_seconds: 18_000,
+                format: crate::models::QuotaFormat::Percent,
+                used_value: None,
+                limit_value: None,
+                unit: None,
+                estimated: false,
+                source_note: None,
+            }],
+            value_metrics: Vec::new(),
+            status_metrics: Vec::new(),
+            notices: Vec::new(),
+            usage_histories: Default::default(),
+            warnings: Vec::new(),
+            refreshed_at: Utc::now(),
+        };
+        let shown = |session_window, used_percent, resets_at| {
+            super::tray_metric(
+                &definition(session_window),
+                &snapshot(used_percent, resets_at),
+                crate::models::UsageDisplay::Used,
+            )
+            .is_some()
+        };
+        let reset = Some(Utc::now() + chrono::Duration::hours(4));
+
+        assert!(!shown(true, 0.0, None));
+        assert!(shown(true, 0.0, reset));
+        assert!(shown(true, 1.0, None));
+        assert!(shown(false, 0.0, None));
     }
 }

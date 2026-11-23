@@ -107,7 +107,7 @@ export const providerCatalog: ProviderCatalog = {
         { label: 'Dashboard', url: 'https://chatgpt.com/codex/settings/usage' },
       ],
       metrics: [
-        quota('codex.session', 'Session', 'session'),
+        quota('codex.session', 'Session', 'session', true),
         quota('codex.weekly', 'Weekly', 'weekly'),
         quota('codex.spark', 'Spark', 'spark'),
         quota('codex.sparkWeekly', 'Spark Weekly', 'sparkWeekly'),

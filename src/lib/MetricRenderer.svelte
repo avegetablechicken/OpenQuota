@@ -65,6 +65,7 @@
     resetDisplay={settings.resetDisplay}
     timeFormat={settings.timeFormat}
     alwaysShowPacing={settings.alwaysShowPacing}
+    sessionWindow={definition.source.sessionWindow}
     onToggleUsage={() =>
       onSettingsChange({
         ...settings,

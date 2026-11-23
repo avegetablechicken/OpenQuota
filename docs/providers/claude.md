@@ -13,6 +13,9 @@ OpenQuota tracks Claude subscription limits and local Claude usage history.
 | Today / Yesterday / Last 30 Days | Tokens and estimated spend calculated from local usage logs  |
 | Usage Trend                      | Recent local usage over time                                 |
 
+The session window starts on first use. Until then the dashboard shows 0% used and **Not started**
+instead of a reset countdown, and the menu bar omits the session value.
+
 See [historical API rates and cost calculations](../pricing-history.md) for dated prices, cache charges, and coverage.
 
 ## Sign-in and local data
