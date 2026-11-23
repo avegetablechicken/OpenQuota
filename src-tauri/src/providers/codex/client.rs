@@ -81,6 +81,25 @@ impl CodexClient {
         access_token: &str,
         account_id: Option<&str>,
     ) -> Result<UsageResponse, CodexError> {
+        self.request_usage(access_token, account_id, false)
+    }
+
+    /// Re-reads usage while bypassing intermediate caches, so a second reading can
+    /// tell a moving idle-window placeholder from a fixed reset deadline.
+    pub fn confirm_usage(
+        &self,
+        access_token: &str,
+        account_id: Option<&str>,
+    ) -> Result<UsageResponse, CodexError> {
+        self.request_usage(access_token, account_id, true)
+    }
+
+    fn request_usage(
+        &self,
+        access_token: &str,
+        account_id: Option<&str>,
+        no_cache: bool,
+    ) -> Result<UsageResponse, CodexError> {
         let started = std::time::Instant::now();
         let mut request = self
             .client
@@ -89,6 +108,9 @@ impl CodexClient {
             .get(&self.usage_url)
             .bearer_auth(access_token)
             .header("Accept", "application/json");
+        if no_cache {
+            request = request.header("Cache-Control", "no-cache");
+        }
         if let Some(account_id) = account_id.filter(|value| !value.is_empty()) {
             request = request.header("ChatGPT-Account-Id", account_id);
         }
@@ -409,6 +431,23 @@ mod tests {
 
         assert!(matches!(error, CodexError::InvalidResponse));
         assert!(!error.to_string().contains("secret-token"));
+    }
+
+    #[test]
+    fn usage_confirmation_bypasses_caches_on_the_same_account() {
+        let (base, request) = capture_once(r#"{"plan_type":"plus"}"#);
+        let response = client(&base)
+            .confirm_usage("secret-token", Some("account-id"))
+            .unwrap();
+        assert!(response.status.is_success());
+
+        let request = request
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(request.starts_with("get /usage http/1.1"));
+        assert!(request.contains("cache-control: no-cache"));
+        assert!(request.contains("chatgpt-account-id: account-id"));
     }
 
     #[test]

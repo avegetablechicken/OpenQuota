@@ -8,6 +8,7 @@ use super::{client::UsageResponse, CodexError};
 const SESSION_PERIOD_SECONDS: u64 = 5 * 60 * 60;
 const WEEKLY_PERIOD_SECONDS: u64 = 7 * 24 * 60 * 60;
 const CREDIT_USD_RATE: f64 = 0.04;
+const IDLE_SESSION_TOLERANCE_SECONDS: i64 = 60;
 
 pub struct MappedUsage {
     pub plan: Option<String>,
@@ -243,6 +244,80 @@ fn map_window(
     })
 }
 
+/// An unused Plus session can be reported as a five-hour placeholder whose reset
+/// stays five hours away. A real window that just started looks the same in a
+/// single reading, so this only identifies a reading that needs confirmation.
+pub fn idle_session_candidate(response: &UsageResponse, received_at: DateTime<Utc>) -> bool {
+    if !response.status.is_success() || !is_plus_plan(&response.body) {
+        return false;
+    }
+    let Some(window) = session_window(&response.body) else {
+        return false;
+    };
+    number(window.get("used_percent")) == Some(0.0)
+        && number(window.get("limit_window_seconds"))
+            .is_none_or(|seconds| seconds == 0.0 || seconds == SESSION_PERIOD_SECONDS as f64)
+        && session_reset_at(&response.body).is_some_and(|reset| {
+            (reset - received_at.timestamp() - SESSION_PERIOD_SECONDS as i64).abs()
+                <= IDLE_SESSION_TOLERANCE_SECONDS
+        })
+}
+
+/// A placeholder's reset moves forward with the clock between two readings,
+/// while a started window keeps a fixed deadline.
+pub fn moving_idle_session(
+    first: &UsageResponse,
+    first_received_at: DateTime<Utc>,
+    latest: &UsageResponse,
+    latest_received_at: DateTime<Utc>,
+) -> bool {
+    if !idle_session_candidate(first, first_received_at)
+        || !idle_session_candidate(latest, latest_received_at)
+    {
+        return false;
+    }
+    let elapsed = latest_received_at.timestamp() - first_received_at.timestamp();
+    match (
+        session_reset_at(&first.body),
+        session_reset_at(&latest.body),
+    ) {
+        // Allow a second of rounding or network jitter, never a fixed reset.
+        (Some(before), Some(after)) => {
+            elapsed > 0 && after > before && (after - before - elapsed).abs() <= 1
+        }
+        _ => false,
+    }
+}
+
+fn is_plus_plan(body: &Value) -> bool {
+    body.get("plan_type")
+        .and_then(Value::as_str)
+        .is_some_and(|plan| plan.trim().eq_ignore_ascii_case("plus"))
+}
+
+/// The window `map_classified_window` would present as the session window.
+fn session_window(body: &Value) -> Option<&Value> {
+    let rate_limit = body.get("rate_limit")?;
+    let primary = rate_limit
+        .get("primary_window")
+        .filter(|value| value.is_object());
+    let secondary = rate_limit
+        .get("secondary_window")
+        .filter(|value| value.is_object());
+    [primary, secondary]
+        .into_iter()
+        .flatten()
+        .find(|window| exact_kind(Some(window)) == Some(WindowKind::Session))
+        .or_else(|| primary.filter(|window| exact_kind(Some(window)).is_none()))
+}
+
+fn session_reset_at(body: &Value) -> Option<i64> {
+    session_window(body)
+        .and_then(|window| number(window.get("reset_at")))
+        .filter(|reset| *reset > 0.0)
+        .map(|reset| reset.floor() as i64)
+}
+
 fn map_reset_credits(body: &Value, dedicated: Option<&UsageResponse>) -> Option<ValueMetric> {
     let source = reset_credits_source(body, dedicated)?;
     let count = number(source.get("available_count"))?;
@@ -388,7 +463,10 @@ mod tests {
     use reqwest::StatusCode;
     use serde_json::{json, Value};
 
-    use super::{map_usage, SESSION_PERIOD_SECONDS, WEEKLY_PERIOD_SECONDS};
+    use super::{
+        idle_session_candidate, map_usage, moving_idle_session, SESSION_PERIOD_SECONDS,
+        WEEKLY_PERIOD_SECONDS,
+    };
     use crate::{
         models::{
             AppSettings, MetricLayout, MetricSection, MetricValueKind, NotificationPreferences,
@@ -563,6 +641,105 @@ mod tests {
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].metric, "Session");
         assert_eq!(alerts[0].milestone, Milestone::WillRunOut);
+    }
+
+    fn plus_reading(reset_at: i64, used_percent: f64) -> UsageResponse {
+        response(json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": used_percent,
+                    "limit_window_seconds": 18000,
+                    "reset_at": reset_at
+                },
+                "secondary_window": {
+                    "used_percent": 12,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1_000_000
+                }
+            }
+        }))
+    }
+
+    fn at(seconds: i64) -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(seconds, 0).unwrap()
+    }
+
+    #[test]
+    fn only_empty_plus_sessions_near_five_hours_need_confirmation() {
+        assert!(idle_session_candidate(&plus_reading(19000, 0.0), at(1000)));
+        assert!(idle_session_candidate(&plus_reading(18940, 0.0), at(1000)));
+        assert!(!idle_session_candidate(&plus_reading(18939, 0.0), at(1000)));
+        assert!(!idle_session_candidate(&plus_reading(19061, 0.0), at(1000)));
+        assert!(!idle_session_candidate(&plus_reading(19000, 0.1), at(1000)));
+
+        let mut pro = plus_reading(19000, 0.0);
+        pro.body["plan_type"] = json!("pro");
+        assert!(!idle_session_candidate(&pro, at(1000)));
+
+        let mut failed = plus_reading(19000, 0.0);
+        failed.status = StatusCode::INTERNAL_SERVER_ERROR;
+        assert!(!idle_session_candidate(&failed, at(1000)));
+
+        let relative_only = response(json!({
+            "plan_type": "plus",
+            "rate_limit": {"primary_window": {
+                "used_percent": 0, "limit_window_seconds": 18000, "reset_after_seconds": 18000
+            }}
+        }));
+        assert!(!idle_session_candidate(&relative_only, at(1000)));
+    }
+
+    #[test]
+    fn a_sole_weekly_primary_window_is_never_an_idle_session() {
+        let weekly_only = response(json!({
+            "plan_type": "plus",
+            "rate_limit": {"primary_window": {
+                "used_percent": 0, "limit_window_seconds": 604800, "reset_at": 19000
+            }}
+        }));
+        assert!(!idle_session_candidate(&weekly_only, at(1000)));
+    }
+
+    #[test]
+    fn fixed_resets_or_new_usage_never_confirm_an_idle_session() {
+        let first = plus_reading(19000, 0.0);
+        assert!(moving_idle_session(
+            &first,
+            at(1000),
+            &plus_reading(19002, 0.0),
+            at(1002)
+        ));
+        assert!(!moving_idle_session(
+            &first,
+            at(1000),
+            &plus_reading(19000, 0.0),
+            at(1002)
+        ));
+        assert!(!moving_idle_session(
+            &first,
+            at(1000),
+            &plus_reading(19002, 0.1),
+            at(1002)
+        ));
+        assert!(!moving_idle_session(
+            &first,
+            at(1000),
+            &plus_reading(19000, 0.0),
+            at(1000)
+        ));
+        assert!(!moving_idle_session(
+            &first,
+            at(1000),
+            &plus_reading(19020, 0.0),
+            at(1002)
+        ));
+        assert!(!moving_idle_session(
+            &first,
+            at(1000),
+            &plus_reading(19001, 0.0),
+            at(999)
+        ));
     }
 
     #[test]

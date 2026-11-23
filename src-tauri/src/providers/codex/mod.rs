@@ -6,7 +6,7 @@ pub mod local_usage;
 pub mod mapper;
 pub mod reset_claim;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 use reqwest::StatusCode;
@@ -25,11 +25,13 @@ use crate::{
 use self::{
     account_usage::{classify_account_usage, AccountUsageOutcome},
     auth::CodexAuthState,
-    client::CodexClient,
+    client::{CodexClient, UsageResponse},
     local_usage::scan_local_usage,
-    mapper::map_usage,
+    mapper::{idle_session_candidate, map_usage, moving_idle_session},
 };
 use crate::providers::log_usage::scan_or_cached_usage;
+
+const IDLE_SESSION_CONFIRMATION_DELAY: Duration = Duration::from_millis(1100);
 
 pub(crate) fn definition() -> ProviderDefinition {
     ProviderDefinition {
@@ -271,6 +273,7 @@ impl CodexProvider {
                 .client
                 .fetch_usage(&auth.access_token, auth.account_id.as_deref())?;
         }
+        let session_idle = self.confirm_idle_session(auth, &mut response);
         let reset_credits = if response.status.is_success() {
             self.client
                 .fetch_reset_credits(&auth.access_token, auth.account_id.as_deref())
@@ -278,7 +281,14 @@ impl CodexProvider {
         } else {
             None
         };
-        let mapped = map_usage(&response, reset_credits.as_ref(), now)?;
+        let mut mapped = map_usage(&response, reset_credits.as_ref(), now)?;
+        if session_idle {
+            // A rolling placeholder is not an actual reset. Keep the quota but
+            // omit its timer so an unused session does not look started.
+            if let Some(session) = mapped.quotas.iter_mut().find(|quota| quota.id == "session") {
+                session.resets_at = None;
+            }
+        }
         let account_usage = self.fetch_account_usage(auth, now, account_identity, &mut warnings);
         let pricing = self.pricing.current();
         let usage = scan_or_cached_usage(
@@ -307,6 +317,31 @@ impl CodexProvider {
             warnings,
             refreshed_at: now,
         })
+    }
+
+    /// Confirms a possibly idle Plus session with a second reading on the same
+    /// endpoint. A failed confirmation keeps the first successful reading.
+    fn confirm_idle_session(&self, auth: &CodexAuthState, response: &mut UsageResponse) -> bool {
+        let first_received_at = Utc::now();
+        if !idle_session_candidate(response, first_received_at) {
+            return false;
+        }
+        // reset_at has whole-second precision. Cross a second boundary so the
+        // confirmation can distinguish a moving placeholder from a fixed deadline.
+        std::thread::sleep(IDLE_SESSION_CONFIRMATION_DELAY);
+        let Ok(latest) = self
+            .client
+            .confirm_usage(&auth.access_token, auth.account_id.as_deref())
+        else {
+            return false;
+        };
+        let latest_received_at = Utc::now();
+        if !latest.status.is_success() || !latest.body.is_object() {
+            return false;
+        }
+        let idle = moving_idle_session(response, first_received_at, &latest, latest_received_at);
+        *response = latest;
+        idle
     }
 
     fn fetch_account_usage(
