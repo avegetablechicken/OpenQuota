@@ -339,7 +339,9 @@ mod tests {
             &format!("{base}/reset-credits"),
             &format!("{base}/reset-credits/consume"),
             &format!("{base}/token"),
-            Duration::from_secs(1),
+            // System PAC evaluation is serialized process-wide, so parallel tests on a
+            // machine with a PAC proxy can spend most of a short budget waiting for it.
+            Duration::from_secs(5),
         )
         .unwrap()
     }
