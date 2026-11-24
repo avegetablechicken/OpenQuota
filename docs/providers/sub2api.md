@@ -36,6 +36,11 @@ OpenQuota keeps a local history cache for each connection and upstream account. 
 billing methods or restarting the app reuses the data already synced for each method.
 Quota and account discovery still refresh normally.
 
+Each refresh reads every account's quota first and shows it right away. Usage history
+loads afterwards, and the previous history stays on screen until it finishes, so a slow
+or busy instance never delays the quota. If loading history fails, the new quota is
+kept and the error is shown on the card.
+
 - **Upstream** stores the fields needed for pricing. A newly discovered account
   downloads only today's request records, then later syncs request new records after
   the saved position. Days before that are shown with the instance's own token counts

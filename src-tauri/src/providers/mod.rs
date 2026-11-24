@@ -126,6 +126,17 @@ pub trait UsageProvider: Send + Sync {
         })
     }
 
+    /// Refreshes like `refresh_for_service`, but may first hand `preview` a snapshot whose
+    /// quotas are live and whose usage histories are not loaded yet. The service uses this
+    /// only for unofficial (connection-configured) providers, whose latency it cannot assume,
+    /// and keeps the last same-identity histories on screen until the final result arrives.
+    fn refresh_for_service_with_preview(
+        &self,
+        _preview: &dyn Fn(ProviderRefresh),
+    ) -> Result<ProviderRefresh, ProviderError> {
+        self.refresh_for_service()
+    }
+
     fn cache_identity(&self) -> CacheIdentity<'_> {
         CacheIdentity::Unscoped
     }

@@ -22,6 +22,7 @@ pub fn spawn(
     notifications: Arc<NotificationEvaluator>,
     pricing: Arc<PricingStore>,
 ) {
+    spawn_preview_publisher(app.clone(), service.clone(), settings.clone());
     tauri::async_runtime::spawn(async move {
         loop {
             pricing.refresh_if_due();
@@ -50,6 +51,20 @@ pub fn spawn(
                 _ = tokio::time::sleep(interval) => {}
                 _ = &mut refresh_frequency_changed => {}
             }
+        }
+    });
+}
+
+/// Publishes quota previews that unofficial providers report while their refresh continues.
+fn spawn_preview_publisher(
+    app: AppHandle,
+    service: Arc<ProviderService>,
+    settings: Arc<SettingsService>,
+) {
+    let mut previews = service.subscribe_previews();
+    tauri::async_runtime::spawn(async move {
+        while previews.changed().await.is_ok() {
+            publish_refresh_progress(&app, &settings, &service.state());
         }
     });
 }

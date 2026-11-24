@@ -12,7 +12,7 @@ use crate::{
         UpdateFrequency,
     },
     policy::{FAILURE_RETRY_BACKOFF, FAST_REFRESH_INTERVAL, REFRESH_INTERVAL, STALE_AFTER},
-    providers::{ProviderError, ProviderRefresh, ProviderRegistry},
+    providers::{CacheIdentity, ProviderError, ProviderRefresh, ProviderRegistry},
     settings::SettingsService,
     storage::Storage,
 };
@@ -53,6 +53,7 @@ pub struct ProviderService {
     refresh_frequency_wakeup: tokio::sync::Notify,
     refresh_timeout: Duration,
     settings: Option<Arc<SettingsService>>,
+    preview_revision: tokio::sync::watch::Sender<u64>,
 }
 
 impl ProviderService {
@@ -125,7 +126,13 @@ impl ProviderService {
             refresh_frequency_wakeup: tokio::sync::Notify::new(),
             refresh_timeout,
             settings,
+            preview_revision: tokio::sync::watch::channel(0).0,
         }
+    }
+
+    /// Changes whenever a refresh publishes an early quota preview, before the refresh ends.
+    pub fn subscribe_previews(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.preview_revision.subscribe()
     }
 
     pub fn state(&self) -> UsageViewState {
@@ -285,32 +292,55 @@ impl ProviderService {
                 state.last_attempt_at = Some(Utc::now());
             });
             let worker_provider = provider.clone();
-            let mut worker =
-                tauri::async_runtime::spawn_blocking(move || worker_provider.refresh_for_service());
-            let mut late_worker = None;
-            let refresh_result = match tokio::time::timeout(self.refresh_timeout, &mut worker).await
-            {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => {
-                    crate::app_error!(&tag, "refresh worker stopped unexpectedly");
-                    Err(ProviderError::new(
-                        ProviderErrorKind::Internal,
-                        "Provider refresh stopped unexpectedly.",
-                    ))
+            // Unofficial providers relay through servers whose latency is unknown, so their
+            // fast quota data is shown as soon as it arrives instead of waiting for history.
+            let (preview_tx, mut preview_rx) = tokio::sync::mpsc::unbounded_channel();
+            let previews = provider.supports_connection_configuration();
+            let mut worker = tauri::async_runtime::spawn_blocking(move || {
+                if previews {
+                    worker_provider.refresh_for_service_with_preview(&|preview| {
+                        let _ = preview_tx.send(preview);
+                    })
+                } else {
+                    drop(preview_tx);
+                    worker_provider.refresh_for_service()
                 }
-                Err(_) => {
-                    crate::app_warn!(
-                        &tag,
-                        "refresh timed out after {}ms; late result will be discarded",
-                        self.refresh_timeout.as_millis()
-                    );
-                    late_worker = Some(worker);
-                    Err(ProviderError::new(
-                        ProviderErrorKind::Network,
-                        "Provider refresh timed out.",
-                    ))
+            });
+            let deadline = tokio::time::sleep(self.refresh_timeout);
+            tokio::pin!(deadline);
+            let mut timed_out = false;
+            let refresh_result = loop {
+                tokio::select! {
+                    result = &mut worker => break match result {
+                        Ok(result) => result,
+                        Err(_) => {
+                            crate::app_error!(&tag, "refresh worker stopped unexpectedly");
+                            Err(ProviderError::new(
+                                ProviderErrorKind::Internal,
+                                "Provider refresh stopped unexpectedly.",
+                            ))
+                        }
+                    },
+                    Some(preview) = preview_rx.recv() => {
+                        self.apply_preview(&provider_id, preview, started);
+                    }
+                    _ = &mut deadline => {
+                        crate::app_warn!(
+                            &tag,
+                            "refresh timed out after {}ms; late result will be discarded",
+                            self.refresh_timeout.as_millis()
+                        );
+                        timed_out = true;
+                        break Err(ProviderError::new(
+                            ProviderErrorKind::Network,
+                            "Provider refresh timed out.",
+                        ));
+                    }
                 }
             };
+            // Dropping the receiver discards previews from a worker that outlived its deadline.
+            drop(preview_rx);
+            let late_worker = timed_out.then_some(worker);
             let refresh_result = refresh_result.and_then(|refresh| {
                 validate_snapshot(&self.registry, &provider_id, refresh.snapshot.clone())?;
                 Ok(refresh)
@@ -536,6 +566,51 @@ impl ProviderService {
             }
         });
         self.provider_state(provider_id)
+    }
+
+    /// Shows a refresh's live quotas while it keeps loading usage history. The preview
+    /// carries the last persisted histories of the same cache identity, so history never
+    /// blanks out or mixes accounts, and it is persisted so a later failure still keeps it.
+    fn apply_preview(&self, provider_id: &str, preview: ProviderRefresh, started: Instant) {
+        let tag = format!("plugin:{provider_id}");
+        let mut snapshot = match validate_snapshot(&self.registry, provider_id, preview.snapshot) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                crate::app_warn!(&tag, "quota preview rejected: {error}");
+                return;
+            }
+        };
+        let identity = match preview.cache_identity.as_deref() {
+            Some(identity) => CacheIdentity::Resolved(identity),
+            None => CacheIdentity::Unscoped,
+        };
+        if let Ok(Some(previous)) = self
+            .storage
+            .load_snapshot_for_identity(provider_id, identity)
+        {
+            carry_usage_histories(&previous, &mut snapshot);
+        }
+        if let Some(definition) = self.registry.definition(provider_id) {
+            normalize_quota_availability(definition, &mut snapshot);
+        }
+        if self
+            .storage
+            .save_snapshot_for_identity(&snapshot, preview.cache_identity.as_deref())
+            .is_err()
+        {
+            crate::app_warn!(
+                "cache",
+                "quota preview for {provider_id} could not be persisted"
+            );
+        }
+        self.update_state(provider_id, |state| {
+            state.snapshot = Some(snapshot);
+            state.source = SnapshotSource::Live;
+            state.stale = false;
+        });
+        crate::app_info!(&tag, "quota preview ({}ms)", started.elapsed().as_millis());
+        self.preview_revision
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     fn is_fresh_this_session(&self, provider_id: &str) -> bool {
@@ -800,6 +875,20 @@ fn validate_snapshot(
     Ok(snapshot)
 }
 
+/// Replaces a preview's not-yet-loaded histories with the previous snapshot's, per account.
+fn carry_usage_histories(previous: &ProviderSnapshot, preview: &mut ProviderSnapshot) {
+    preview.usage_histories = previous.usage_histories.clone();
+    let (Some(previous_accounts), Some(accounts)) = (&previous.accounts, &mut preview.accounts)
+    else {
+        return;
+    };
+    for account in accounts {
+        if let Some(previous) = previous_accounts.iter().find(|item| item.id == account.id) {
+            account.snapshot.usage_histories = previous.snapshot.usage_histories.clone();
+        }
+    }
+}
+
 fn has_duplicate_ids<'a>(mut ids: impl Iterator<Item = &'a str>) -> bool {
     let mut seen = std::collections::HashSet::new();
     ids.any(|id| !seen.insert(id))
@@ -929,9 +1018,9 @@ mod tests {
     };
     use crate::{
         models::{
-            MetricDefinition, MetricSection, MetricSource, ProviderDefinition, ProviderErrorKind,
-            ProviderSnapshot, ProviderViewState, QuotaFormat, QuotaWindow, SnapshotSource,
-            StatusMetric, StatusTone,
+            AccountSnapshot, MetricDefinition, MetricSection, MetricSource, ProviderDefinition,
+            ProviderErrorKind, ProviderSnapshot, ProviderViewState, QuotaFormat, QuotaWindow,
+            SnapshotSource, StatusMetric, StatusTone, UsageHistories, UsageHistory,
         },
         policy::{FAILURE_RETRY_BACKOFF, FAST_REFRESH_INTERVAL, REFRESH_INTERVAL, STALE_AFTER},
         providers::{
@@ -1175,6 +1264,171 @@ mod tests {
                 }),
             })
         }
+    }
+
+    /// Publishes a quota preview, then holds the final result until the test releases it.
+    struct PreviewProvider {
+        id: &'static str,
+        unofficial: bool,
+        previews_requested: AtomicUsize,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl PreviewProvider {
+        fn snapshot(&self, plan: &str, history_marker: Option<&str>) -> ProviderSnapshot {
+            let mut snapshot = test_snapshot(self.id);
+            snapshot.plan = Some(plan.into());
+            snapshot.usage_histories = UsageHistories::account(UsageHistory {
+                unknown_models: history_marker.into_iter().map(str::to_owned).collect(),
+                ..UsageHistory::default()
+            });
+            snapshot.accounts = Some(vec![AccountSnapshot {
+                id: "7".into(),
+                name: "Upstream".into(),
+                snapshot: ProviderSnapshot {
+                    accounts: None,
+                    ..snapshot.clone()
+                },
+            }]);
+            snapshot
+        }
+
+        fn wait_for_release(&self) {
+            let (released, signal) = &*self.release;
+            let released = released.lock().unwrap();
+            let _ = signal
+                .wait_timeout_while(released, TEST_WAIT_TIMEOUT, |released| !*released)
+                .unwrap();
+        }
+    }
+
+    impl UsageProvider for PreviewProvider {
+        fn definition(&self) -> ProviderDefinition {
+            test_definition(self.id)
+        }
+
+        fn has_local_credentials(&self) -> bool {
+            true
+        }
+
+        fn supports_connection_configuration(&self) -> bool {
+            self.unofficial
+        }
+
+        fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
+            self.wait_for_release();
+            Ok(self.snapshot("final", Some("fresh")))
+        }
+
+        fn refresh_for_service_with_preview(
+            &self,
+            preview: &dyn Fn(ProviderRefresh),
+        ) -> Result<ProviderRefresh, ProviderError> {
+            self.previews_requested.fetch_add(1, Ordering::SeqCst);
+            preview(ProviderRefresh {
+                snapshot: self.snapshot("preview", None),
+                cache_identity: Some("server".into()),
+                account: None,
+            });
+            self.wait_for_release();
+            Ok(ProviderRefresh {
+                snapshot: self.snapshot("final", Some("fresh")),
+                cache_identity: Some("server".into()),
+                account: None,
+            })
+        }
+    }
+
+    fn preview_service(
+        unofficial: bool,
+    ) -> (
+        Arc<ProviderService>,
+        Arc<PreviewProvider>,
+        tempfile::TempDir,
+    ) {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("cache.db")).unwrap());
+        let provider = Arc::new(PreviewProvider {
+            id: "relay",
+            unofficial,
+            previews_requested: AtomicUsize::new(0),
+            release: Arc::new((Mutex::new(false), Condvar::new())),
+        });
+        // The last complete snapshot belongs to the same cache identity as the preview.
+        storage
+            .save_snapshot_for_identity(
+                &provider.snapshot("cached", Some("cached")),
+                Some("server"),
+            )
+            .unwrap();
+        let registry = Arc::new(ProviderRegistry::new(vec![provider.clone()]).unwrap());
+        (
+            Arc::new(ProviderService::new(registry, storage)),
+            provider,
+            directory,
+        )
+    }
+
+    fn history_marker(snapshot: &ProviderSnapshot) -> Vec<String> {
+        snapshot
+            .usage_histories
+            .account
+            .as_ref()
+            .map(|history| history.unknown_models.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn unofficial_providers_show_live_quotas_before_their_history_finishes() {
+        let (service, provider, _directory) = preview_service(true);
+        let mut previews = service.subscribe_previews();
+        let refresh = {
+            let service = service.clone();
+            thread::spawn(move || refresh_with_test_timeout(&service, "relay", true))
+        };
+
+        wait_until("quota preview should be shown during the refresh", || {
+            service
+                .provider_state("relay")
+                .snapshot
+                .and_then(|s| s.plan)
+                == Some("preview".into())
+        });
+        let state = service.provider_state("relay");
+        assert!(state.refreshing);
+        assert_eq!(state.source, SnapshotSource::Live);
+        let snapshot = state.snapshot.unwrap();
+        // History keeps the last complete values instead of blanking while it loads.
+        assert_eq!(history_marker(&snapshot), ["cached"]);
+        assert_eq!(
+            history_marker(&snapshot.accounts.as_ref().unwrap()[0].snapshot),
+            ["cached"]
+        );
+        assert!(previews.has_changed().unwrap());
+        previews.mark_unchanged();
+
+        let (released, signal) = &*provider.release;
+        *released.lock().unwrap() = true;
+        signal.notify_all();
+        let finished = refresh.join().unwrap();
+        assert!(!finished.refreshing);
+        let snapshot = finished.snapshot.unwrap();
+        assert_eq!(snapshot.plan.as_deref(), Some("final"));
+        assert_eq!(history_marker(&snapshot), ["fresh"]);
+        assert!(!previews.has_changed().unwrap());
+    }
+
+    #[test]
+    fn official_providers_refresh_in_one_step() {
+        let (service, provider, _directory) = preview_service(false);
+        let (released, signal) = &*provider.release;
+        *released.lock().unwrap() = true;
+        signal.notify_all();
+
+        let finished = refresh_with_test_timeout(&service, "relay", true);
+        assert_eq!(provider.previews_requested.load(Ordering::SeqCst), 0);
+        assert_eq!(finished.snapshot.unwrap().plan.as_deref(), Some("final"));
+        assert!(!service.subscribe_previews().has_changed().unwrap());
     }
 
     fn test_definition(id: &str) -> ProviderDefinition {

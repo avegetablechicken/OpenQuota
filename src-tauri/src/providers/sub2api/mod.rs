@@ -936,21 +936,38 @@ impl Sub2ApiProvider {
         Ok(session)
     }
 
+    #[cfg(test)]
     fn refresh_snapshot(&self, config: &StoredConfig) -> Result<ProviderSnapshot, Sub2ApiError> {
+        self.refresh_snapshot_with_preview(config, &|_| {})
+    }
+
+    /// Fetches every account's quota first and hands that to `preview`, then syncs usage
+    /// history. Quota endpoints answer quickly; usage logs on a busy relay can take much
+    /// longer, so the quota preview must not wait for them.
+    fn refresh_snapshot_with_preview(
+        &self,
+        config: &StoredConfig,
+        preview: &dyn Fn(ProviderSnapshot),
+    ) -> Result<ProviderSnapshot, Sub2ApiError> {
         let client = Sub2ApiClient::for_provider(&config.base_url, &self.provider_id)?;
         let mut session = self.session(config)?;
-        let accounts = match client.accounts(session.token.as_str(), config.upstream) {
-            Err(Sub2ApiError::Authentication) => {
-                session = self.connect(config)?;
-                if let Ok(mut cached) = self.session.lock() {
-                    *cached = Some(clone_session(&session));
-                }
-                client.accounts(session.token.as_str(), config.upstream)?
-            }
-            result => result?,
-        };
-        let mut snapshots = Vec::new();
+        let accounts = self.with_session(config, &mut session, |token| {
+            client.accounts(token, config.upstream)
+        })?;
         let now = Utc::now();
+        let mut snapshots = Vec::with_capacity(accounts.len());
+        for account in &accounts {
+            let snapshot = self.with_session(config, &mut session, |token| {
+                self.account_quota(config, &client, token, account, now)
+            })?;
+            snapshots.push(crate::models::AccountSnapshot {
+                id: account.id.to_string(),
+                name: format!("Sub2API · {} · {}", config.upstream, account.name),
+                snapshot,
+            });
+        }
+        preview(self.connection_snapshot(snapshots.clone(), UsageHistory::default()));
+
         let mut histories = match config.billing_mode {
             Sub2ApiBillingMode::Upstream => ConnectionHistory::Upstream {
                 pricing: self.pricing.current(),
@@ -959,51 +976,52 @@ impl Sub2ApiProvider {
             Sub2ApiBillingMode::Server => ConnectionHistory::Server(AccountStats::default()),
         };
         let mut cache = UsageCache::open(&self.cache_path(), &cache_scope(config))?;
-        for account in accounts {
-            let snapshot = match self.refresh_account(
-                config,
-                &client,
-                &session,
-                &account,
-                now,
-                &mut histories,
-                &mut cache,
-            ) {
-                Err(Sub2ApiError::Authentication) => {
-                    session = self.connect(config)?;
-                    if let Ok(mut cached) = self.session.lock() {
-                        *cached = Some(clone_session(&session));
-                    }
-                    self.refresh_account(
-                        config,
-                        &client,
-                        &session,
-                        &account,
-                        now,
-                        &mut histories,
-                        &mut cache,
-                    )
-                }
-                result => result,
-            }?;
-            // Publish only complete connection snapshots. The service retains the last successful
-            // in-memory and persisted snapshot when any upstream request fails.
-            snapshots.push(crate::models::AccountSnapshot {
-                id: account.id.to_string(),
-                name: format!("Sub2API · {} · {}", config.upstream, account.name),
-                snapshot,
-            });
+        for (account, snapshot) in accounts.iter().zip(&mut snapshots) {
+            let history = self.with_session(config, &mut session, |token| {
+                histories.fetch_account(&client, token, account, config.upstream, now, &mut cache)
+            })?;
+            snapshot.snapshot.usage_histories = UsageHistories::account(history);
         }
         if config.billing_mode == Sub2ApiBillingMode::Upstream {
             cache.finish_backfill()?;
         }
-        let mut snapshot = snapshots
+        // Publish only complete connection snapshots. The service retains the last successful
+        // in-memory and persisted snapshot when any upstream request fails.
+        Ok(self.connection_snapshot(snapshots, histories.finish(now)))
+    }
+
+    /// Runs one administrator request, logging in again once if the cached token expired.
+    fn with_session<T>(
+        &self,
+        config: &StoredConfig,
+        session: &mut CachedSession,
+        mut request: impl FnMut(&str) -> Result<T, Sub2ApiError>,
+    ) -> Result<T, Sub2ApiError> {
+        match request(session.token.as_str()) {
+            Err(Sub2ApiError::Authentication) => {
+                *session = self.connect(config)?;
+                if let Ok(mut cached) = self.session.lock() {
+                    *cached = Some(clone_session(session));
+                }
+                request(session.token.as_str())
+            }
+            result => result,
+        }
+    }
+
+    /// The connection-level snapshot mirrors the first account and lists all of them.
+    fn connection_snapshot(
+        &self,
+        accounts: Vec<crate::models::AccountSnapshot>,
+        total: UsageHistory,
+    ) -> ProviderSnapshot {
+        let mut snapshot = accounts
             .first()
             .map(|account| account.snapshot.clone())
             .unwrap_or_else(|| self.empty_snapshot(Vec::new()));
-        snapshot.usage_histories = UsageHistories::account(histories.finish(now));
-        snapshot.accounts = Some(snapshots);
-        Ok(snapshot)
+        snapshot.usage_histories = UsageHistories::account(total);
+        snapshot.accounts = Some(accounts);
+        snapshot
     }
 
     fn empty_snapshot(&self, warnings: Vec<String>) -> ProviderSnapshot {
@@ -1021,18 +1039,15 @@ impl Sub2ApiProvider {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn refresh_account(
+    fn account_quota(
         &self,
         config: &StoredConfig,
         client: &Sub2ApiClient,
-        session: &CachedSession,
+        token: &str,
         account: &Sub2ApiAccount,
         now: chrono::DateTime<Utc>,
-        histories: &mut ConnectionHistory,
-        cache: &mut UsageCache,
     ) -> Result<ProviderSnapshot, Sub2ApiError> {
-        let body = client.usage(session.token.as_str(), account.id, config.upstream)?;
+        let body = client.usage(token, account.id, config.upstream)?;
         let (plan, quotas, value_metrics) = match config.upstream {
             Sub2ApiUpstream::Codex => {
                 let response = UsageResponse {
@@ -1058,14 +1073,6 @@ impl Sub2ApiProvider {
             }
         };
         let quotas = normalize_refreshed_quotas(config.upstream, quotas, now);
-        let history = histories.fetch_account(
-            client,
-            session.token.as_str(),
-            account,
-            config.upstream,
-            now,
-            cache,
-        )?;
         Ok(ProviderSnapshot {
             accounts: None,
             provider_id: self.provider_id.clone(),
@@ -1074,7 +1081,7 @@ impl Sub2ApiProvider {
             value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage_histories: UsageHistories::account(history),
+            usage_histories: UsageHistories::account(UsageHistory::default()),
             warnings: Vec::new(),
             refreshed_at: now,
         })
@@ -1248,14 +1255,29 @@ impl UsageProvider for Sub2ApiProvider {
     }
 
     fn refresh_for_service(&self) -> Result<super::ProviderRefresh, ProviderError> {
+        self.refresh_for_service_with_preview(&|_| {})
+    }
+
+    fn refresh_for_service_with_preview(
+        &self,
+        preview: &dyn Fn(super::ProviderRefresh),
+    ) -> Result<super::ProviderRefresh, ProviderError> {
         let _guard = self
             .history_lock
             .lock()
             .map_err(|_| Sub2ApiError::HistoryCache)?;
         let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
+        let cache_identity = config.billing_mode.cache_key();
+        let snapshot = self.refresh_snapshot_with_preview(&config, &|snapshot| {
+            preview(super::ProviderRefresh {
+                snapshot,
+                cache_identity: Some(cache_identity.to_owned()),
+                account: None,
+            })
+        })?;
         Ok(super::ProviderRefresh {
-            snapshot: self.refresh_snapshot(&config)?,
-            cache_identity: Some(config.billing_mode.cache_key().to_owned()),
+            snapshot,
+            cache_identity: Some(cache_identity.to_owned()),
             account: None,
         })
     }
@@ -2146,8 +2168,10 @@ mod tests {
         let (base_url, _requests, worker) = serve_sequence(vec![
             r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
             r#"{"code":0,"data":{"items":[{"id":7,"name":"Same name"},{"id":8,"name":"Same name"}],"total":2}}"#.into(),
-            quota.clone(), usage_today(7, now), past_stats(now)[0].clone(), past_stats(now)[1].clone(),
-            quota, usage_today(8, now), past_stats(now)[0].clone(), past_stats(now)[1].clone(),
+            // All quotas come first so they can be shown before usage history loads.
+            quota.clone(), quota, usage_today(7, now), past_stats(now)[0].clone(),
+            past_stats(now)[1].clone(), usage_today(8, now), past_stats(now)[0].clone(),
+            past_stats(now)[1].clone(),
             r#"{"code":0,"data":{"items":[{"id":9,"name":"Unavailable"}],"total":1}}"#.into(),
             r#"{"code":1}"#.into(),
             r#"{"code":0,"data":{"items":[],"total":0}}"#.into(),
@@ -2205,6 +2229,66 @@ mod tests {
         worker.join().unwrap();
     }
 
+    #[test]
+    fn quotas_of_every_account_are_previewed_before_any_usage_history_request() {
+        let now = Utc::now();
+        let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
+        let (base_url, requests, worker) = serve_sequence(vec![
+            r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
+            r#"{"code":0,"data":{"items":[{"id":7,"name":"First"},{"id":8,"name":"Second"}],"total":2}}"#.into(),
+            quota.clone(), quota, usage_today(7, now), past_stats(now)[0].clone(),
+            past_stats(now)[1].clone(), usage_today(8, now), past_stats(now)[0].clone(),
+            past_stats(now)[1].clone(),
+        ]);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("configured"),
+            true,
+            test_pricing(),
+        );
+        let config = StoredConfig {
+            base_url,
+            codex_provider: String::new(),
+            custom_base_url: true,
+            email: "admin@example.com".into(),
+            password: "password".into(),
+            upstream: super::Sub2ApiUpstream::Claude,
+            billing_mode: super::Sub2ApiBillingMode::Upstream,
+            metric_template_version: super::METRIC_TEMPLATE_VERSION,
+        };
+        let previews = std::sync::Mutex::new(Vec::new());
+        let snapshot = provider
+            .refresh_snapshot_with_preview(&config, &|preview| {
+                let sent: Vec<String> = requests.try_iter().collect();
+                assert!(sent.iter().all(|request| !request.contains("/admin/usage")));
+                previews.lock().unwrap().push(preview);
+            })
+            .unwrap();
+        worker.join().unwrap();
+
+        let previews = previews.into_inner().unwrap();
+        assert_eq!(previews.len(), 1);
+        let accounts = previews[0].accounts.as_ref().unwrap();
+        assert_eq!(
+            accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["7", "8"]
+        );
+        assert!(accounts.iter().all(|a| !a.snapshot.quotas.is_empty()
+            && a.snapshot.usage_histories.account == Some(super::UsageHistory::default())));
+        assert_eq!(
+            snapshot
+                .usage_histories
+                .account
+                .unwrap()
+                .last_30_days
+                .unwrap()
+                .tokens,
+            7000
+        );
+    }
+
     #[tokio::test]
     async fn failed_refresh_preserves_all_cached_accounts_on_disk_and_recovers() {
         use crate::{
@@ -2233,7 +2317,7 @@ mod tests {
             }
         }
 
-        // Discovery, a later account's quota, and its statistics must all preserve the same cache.
+        // Discovery, a later account's quota, and history must all preserve the same cache.
         for failed_stage in 0..3 {
             let page = r#"{"code":0,"data":{"items":[{"id":7,"name":"First"},{"id":8,"name":"Second"}],"total":2}}"#.to_owned();
             let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
@@ -2245,19 +2329,16 @@ mod tests {
                 ),
                 (200, page.clone()),
                 (200, quota.clone()),
+                (200, quota.clone()),
                 (200, usage_today(7, now)),
             ];
             responses.extend(past_stats(now).map(|body| (200, body)));
-            responses.extend([(200, quota.clone()), (200, usage_today(8, now))]);
+            responses.push((200, usage_today(8, now)));
             responses.extend(past_stats(now).map(|body| (200, body)));
             if failed_stage > 0 {
-                responses.extend([
-                    (200, page),
-                    (200, quota.clone()),
-                    (200, usage_today(7, now)),
-                ]);
+                responses.extend([(200, page), (200, quota.clone())]);
                 if failed_stage == 2 {
-                    responses.push((200, quota.clone()));
+                    responses.extend([(200, quota.clone()), (200, usage_today(7, now))]);
                 }
             }
             responses.push((503, "temporary outage".into()));
