@@ -66,8 +66,8 @@
       ),
     },
     {
-      id: 'unofficial',
-      title: 'Unofficial',
+      id: 'self-hostable',
+      title: 'Self-hostable providers',
       providers: visibleProviders.filter((provider) =>
         catalog.supportsConnectionConfiguration(provider.id),
       ),
@@ -133,7 +133,7 @@
 
 <section class="screen customize-screen" aria-label="Customize">
   {#each providerGroups as group (group.id)}
-    {#if group.providers.length > 0 || (group.id === 'unofficial' && addableProvider)}
+    {#if group.providers.length > 0 || (group.id === 'self-hostable' && addableProvider)}
       <div class="customize-group" role="group" aria-labelledby={`customize-group-${group.id}`}>
         <h2 id={`customize-group-${group.id}`}>{group.title}</h2>
         <div class="customize-list" role="list">
@@ -193,7 +193,7 @@
               >
             </div>
           {/each}
-          {#if group.id === 'unofficial' && addableProvider}
+          {#if group.id === 'self-hostable' && addableProvider}
             <div class="provider-add-shell" role="listitem">
               <button
                 class="provider-add-row"

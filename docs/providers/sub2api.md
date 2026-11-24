@@ -1,6 +1,6 @@
 # Sub2API
 
-Each Sub2API connection tracks either a user subscription or the upstream accounts managed by an administrator. Choose **Customize → Unofficial → Add Account → Connection → Add**, then use **Track** to select a mode.
+Each Sub2API connection tracks either a user subscription or the upstream accounts managed by an administrator. Choose **Customize → Self-hostable providers → Add Account → Connection → Add**, then use **Track** to select a mode.
 
 ## User subscription
 
@@ -75,7 +75,7 @@ window is complete, and the connection total includes every active account.
 
 ### Administrator setup
 
-In **Customize**, select **Add Account** under **Unofficial** to create an independent account. In its **Connection**
+In **Customize**, select **Add Account** under **Self-hostable providers** to create an independent account. In its **Connection**
 card, select **Add**, choose **Upstream accounts (admin)**, and configure the instance address and administrator login. Select **Save** to
 collapse the form, or **Done** to discard edits. Use **Edit** to reopen a configured connection. OpenQuota signs in through
 `/api/v1/auth/login`, discovers the active OAuth accounts for the selected upstream, and reads Codex quota from

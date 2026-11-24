@@ -108,7 +108,9 @@ describe('CustomizeProviderList Sub2API labels', () => {
 
       expect(await screen.findByText('Sub2API · Claude')).toBeInTheDocument();
       expect(
-        within(screen.getByRole('group', { name: 'Unofficial' })).getByText('Sub2API · Claude'),
+        within(screen.getByRole('group', { name: 'Self-hostable providers' })).getByText(
+          'Sub2API · Claude',
+        ),
       ).toBeInTheDocument();
       expect(await screen.findByText('Claude relay · 192.0.2.8:6060')).toBeInTheDocument();
       expect(screen.queryByText(/Sub2API \d/)).not.toBeInTheDocument();
