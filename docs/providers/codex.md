@@ -14,8 +14,8 @@ OpenQuota tracks Codex subscription limits and usage recorded by the Codex CLI.
 | Today / Yesterday / Last 30 Days | Tokens, model usage, and estimated spend from local logs     |
 | Usage Trend                      | Recent local usage over time                                 |
 
-The session window starts on first use. Until then the dashboard shows 0% used and **Not started**
-instead of a reset countdown, and the menu bar omits the session value.
+The Session and Spark windows start on first use. Until then the dashboard shows 0% used and
+**Not started** instead of a reset countdown, and the menu bar omits the value.
 
 See [historical API rates and cost calculations](../pricing-history.md) for dated prices, cache charges, and coverage.
 

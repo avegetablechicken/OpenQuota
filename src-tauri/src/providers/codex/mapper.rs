@@ -244,20 +244,59 @@ fn map_window(
     })
 }
 
-/// An unused Plus session can be reported as a five-hour placeholder whose reset
-/// stays five hours away. A real window that just started looks the same in a
-/// single reading, so this only identifies a reading that needs confirmation.
-pub fn idle_session_candidate(response: &UsageResponse, received_at: DateTime<Utc>) -> bool {
-    if !response.status.is_success() || !is_plus_plan(&response.body) {
-        return false;
+/// A five-hour window that starts on first use: the account's session, or Spark's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartOnUseWindow {
+    Session,
+    Spark,
+}
+
+impl StartOnUseWindow {
+    pub fn quota_id(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Spark => "spark",
+        }
     }
-    let Some(window) = session_window(&response.body) else {
+
+    fn rate_limit(self, body: &Value) -> Option<&Value> {
+        match self {
+            Self::Session => body.get("rate_limit"),
+            Self::Spark => body
+                .get("additional_rate_limits")
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.iter().find(|entry| is_spark_entry(entry)))
+                .and_then(|entry| entry.get("rate_limit")),
+        }
+    }
+}
+
+/// An unused five-hour window can be reported as a placeholder whose reset stays
+/// five hours away. A real window that just started looks the same in a single
+/// reading, so this only identifies the windows of a reading that need confirmation.
+/// As in Copool, the account session is checked on Plus plans only.
+pub fn idle_session_candidates(
+    response: &UsageResponse,
+    received_at: DateTime<Utc>,
+) -> Vec<StartOnUseWindow> {
+    if !response.status.is_success() {
+        return Vec::new();
+    }
+    [StartOnUseWindow::Session, StartOnUseWindow::Spark]
+        .into_iter()
+        .filter(|kind| *kind != StartOnUseWindow::Session || is_plus_plan(&response.body))
+        .filter(|kind| idle_window_candidate(&response.body, *kind, received_at))
+        .collect()
+}
+
+fn idle_window_candidate(body: &Value, kind: StartOnUseWindow, received_at: DateTime<Utc>) -> bool {
+    let Some(window) = session_window(kind.rate_limit(body)) else {
         return false;
     };
     number(window.get("used_percent")) == Some(0.0)
         && number(window.get("limit_window_seconds"))
             .is_none_or(|seconds| seconds == 0.0 || seconds == SESSION_PERIOD_SECONDS as f64)
-        && session_reset_at(&response.body).is_some_and(|reset| {
+        && session_reset_at(body, kind).is_some_and(|reset| {
             (reset - received_at.timestamp() - SESSION_PERIOD_SECONDS as i64).abs()
                 <= IDLE_SESSION_TOLERANCE_SECONDS
         })
@@ -266,20 +305,21 @@ pub fn idle_session_candidate(response: &UsageResponse, received_at: DateTime<Ut
 /// A placeholder's reset moves forward with the clock between two readings,
 /// while a started window keeps a fixed deadline.
 pub fn moving_idle_session(
+    kind: StartOnUseWindow,
     first: &UsageResponse,
     first_received_at: DateTime<Utc>,
     latest: &UsageResponse,
     latest_received_at: DateTime<Utc>,
 ) -> bool {
-    if !idle_session_candidate(first, first_received_at)
-        || !idle_session_candidate(latest, latest_received_at)
+    if !idle_session_candidates(first, first_received_at).contains(&kind)
+        || !idle_session_candidates(latest, latest_received_at).contains(&kind)
     {
         return false;
     }
     let elapsed = latest_received_at.timestamp() - first_received_at.timestamp();
     match (
-        session_reset_at(&first.body),
-        session_reset_at(&latest.body),
+        session_reset_at(&first.body, kind),
+        session_reset_at(&latest.body, kind),
     ) {
         // Allow a second of rounding or network jitter, never a fixed reset.
         (Some(before), Some(after)) => {
@@ -295,9 +335,9 @@ fn is_plus_plan(body: &Value) -> bool {
         .is_some_and(|plan| plan.trim().eq_ignore_ascii_case("plus"))
 }
 
-/// The window `map_classified_window` would present as the session window.
-fn session_window(body: &Value) -> Option<&Value> {
-    let rate_limit = body.get("rate_limit")?;
+/// The window `map_classified_window` would present as the five-hour window.
+fn session_window(rate_limit: Option<&Value>) -> Option<&Value> {
+    let rate_limit = rate_limit?;
     let primary = rate_limit
         .get("primary_window")
         .filter(|value| value.is_object());
@@ -311,8 +351,8 @@ fn session_window(body: &Value) -> Option<&Value> {
         .or_else(|| primary.filter(|window| exact_kind(Some(window)).is_none()))
 }
 
-fn session_reset_at(body: &Value) -> Option<i64> {
-    session_window(body)
+fn session_reset_at(body: &Value, kind: StartOnUseWindow) -> Option<i64> {
+    session_window(kind.rate_limit(body))
         .and_then(|window| number(window.get("reset_at")))
         .filter(|reset| *reset > 0.0)
         .map(|reset| reset.floor() as i64)
@@ -459,14 +499,33 @@ fn format_plan(value: Option<&Value>) -> Option<String> {
 mod tests {
     use std::collections::HashMap;
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use reqwest::StatusCode;
     use serde_json::{json, Value};
 
     use super::{
-        idle_session_candidate, map_usage, moving_idle_session, SESSION_PERIOD_SECONDS,
+        idle_session_candidates, map_usage, StartOnUseWindow, SESSION_PERIOD_SECONDS,
         WEEKLY_PERIOD_SECONDS,
     };
+
+    fn idle_session_candidate(response: &UsageResponse, received_at: DateTime<Utc>) -> bool {
+        idle_session_candidates(response, received_at).contains(&StartOnUseWindow::Session)
+    }
+
+    fn moving_idle_session(
+        first: &UsageResponse,
+        first_received_at: DateTime<Utc>,
+        latest: &UsageResponse,
+        latest_received_at: DateTime<Utc>,
+    ) -> bool {
+        super::moving_idle_session(
+            StartOnUseWindow::Session,
+            first,
+            first_received_at,
+            latest,
+            latest_received_at,
+        )
+    }
     use crate::{
         models::{
             AppSettings, MetricLayout, MetricSection, MetricValueKind, NotificationPreferences,
@@ -739,6 +798,66 @@ mod tests {
             at(1000),
             &plus_reading(19001, 0.0),
             at(999)
+        ));
+    }
+
+    fn spark_reading(plan: &str, reset_at: i64, used_percent: f64) -> UsageResponse {
+        response(json!({
+            "plan_type": plan,
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 20,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 9000
+                }
+            },
+            "additional_rate_limits": [{
+                "limit_name": "GPT-Codex-Spark",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": used_percent,
+                        "limit_window_seconds": 18000,
+                        "reset_at": reset_at
+                    },
+                    "secondary_window": {
+                        "used_percent": 3,
+                        "limit_window_seconds": 604800,
+                        "reset_at": 500000
+                    }
+                }
+            }]
+        }))
+    }
+
+    #[test]
+    fn unused_spark_windows_need_confirmation_on_any_plan() {
+        for plan in ["plus", "pro"] {
+            assert_eq!(
+                idle_session_candidates(&spark_reading(plan, 19000, 0.0), at(1000)),
+                [StartOnUseWindow::Spark],
+                "{plan}"
+            );
+        }
+        assert!(idle_session_candidates(&spark_reading("pro", 19000, 0.5), at(1000)).is_empty());
+        assert!(idle_session_candidates(&spark_reading("pro", 17000, 0.0), at(1000)).is_empty());
+    }
+
+    #[test]
+    fn only_a_moving_spark_reset_confirms_an_idle_spark_window() {
+        let first = spark_reading("pro", 19000, 0.0);
+        let moving = |latest: &UsageResponse, latest_at| {
+            super::moving_idle_session(StartOnUseWindow::Spark, &first, at(1000), latest, latest_at)
+        };
+        assert!(moving(&spark_reading("pro", 19002, 0.0), at(1002)));
+        assert!(!moving(&spark_reading("pro", 19000, 0.0), at(1002)));
+        assert!(!moving(&spark_reading("pro", 19002, 1.0), at(1002)));
+        // The account session is not a candidate on Pro, whatever Spark does.
+        assert!(!super::moving_idle_session(
+            StartOnUseWindow::Session,
+            &first,
+            at(1000),
+            &spark_reading("pro", 19002, 0.0),
+            at(1002)
         ));
     }
 

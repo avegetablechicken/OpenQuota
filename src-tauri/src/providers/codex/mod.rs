@@ -27,7 +27,7 @@ use self::{
     auth::CodexAuthState,
     client::{CodexClient, UsageResponse},
     local_usage::scan_local_usage,
-    mapper::{idle_session_candidate, map_usage, moving_idle_session},
+    mapper::{idle_session_candidates, map_usage, moving_idle_session, StartOnUseWindow},
 };
 use crate::providers::log_usage::scan_or_cached_usage;
 
@@ -69,7 +69,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "codex.spark",
                 "Spark",
                 "spark",
-                false,
+                true,
                 true,
                 MetricSection::OnDemand,
                 false,
@@ -273,7 +273,7 @@ impl CodexProvider {
                 .client
                 .fetch_usage(&auth.access_token, auth.account_id.as_deref())?;
         }
-        let session_idle = self.confirm_idle_session(auth, &mut response);
+        let idle_windows = self.confirm_idle_windows(auth, &mut response);
         let reset_credits = if response.status.is_success() {
             self.client
                 .fetch_reset_credits(&auth.access_token, auth.account_id.as_deref())
@@ -282,11 +282,11 @@ impl CodexProvider {
             None
         };
         let mut mapped = map_usage(&response, reset_credits.as_ref(), now)?;
-        if session_idle {
-            // A rolling placeholder is not an actual reset. Keep the quota but
-            // omit its timer so an unused session does not look started.
-            if let Some(session) = mapped.quotas.iter_mut().find(|quota| quota.id == "session") {
-                session.resets_at = None;
+        // A rolling placeholder is not an actual reset. Keep the quota but omit its
+        // timer so an unused window does not look started.
+        for quota in &mut mapped.quotas {
+            if idle_windows.iter().any(|kind| kind.quota_id() == quota.id) {
+                quota.resets_at = None;
             }
         }
         let account_usage = self.fetch_account_usage(auth, now, account_identity, &mut warnings);
@@ -319,12 +319,18 @@ impl CodexProvider {
         })
     }
 
-    /// Confirms a possibly idle Plus session with a second reading on the same
-    /// endpoint. A failed confirmation keeps the first successful reading.
-    fn confirm_idle_session(&self, auth: &CodexAuthState, response: &mut UsageResponse) -> bool {
+    /// Confirms possibly idle five-hour windows with a second reading on the same
+    /// endpoint, returning the windows whose reset is only a moving placeholder. A failed
+    /// confirmation keeps the first successful reading.
+    fn confirm_idle_windows(
+        &self,
+        auth: &CodexAuthState,
+        response: &mut UsageResponse,
+    ) -> Vec<StartOnUseWindow> {
         let first_received_at = Utc::now();
-        if !idle_session_candidate(response, first_received_at) {
-            return false;
+        let candidates = idle_session_candidates(response, first_received_at);
+        if candidates.is_empty() {
+            return Vec::new();
         }
         // reset_at has whole-second precision. Cross a second boundary so the
         // confirmation can distinguish a moving placeholder from a fixed deadline.
@@ -333,13 +339,24 @@ impl CodexProvider {
             .client
             .confirm_usage(&auth.access_token, auth.account_id.as_deref())
         else {
-            return false;
+            return Vec::new();
         };
         let latest_received_at = Utc::now();
         if !latest.status.is_success() || !latest.body.is_object() {
-            return false;
+            return Vec::new();
         }
-        let idle = moving_idle_session(response, first_received_at, &latest, latest_received_at);
+        let idle = candidates
+            .into_iter()
+            .filter(|kind| {
+                moving_idle_session(
+                    *kind,
+                    response,
+                    first_received_at,
+                    &latest,
+                    latest_received_at,
+                )
+            })
+            .collect();
         *response = latest;
         idle
     }
