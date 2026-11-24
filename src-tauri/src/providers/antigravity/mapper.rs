@@ -42,7 +42,7 @@ const IDLE_MARGIN_SECONDS: i64 = 90;
 /// A window's reset, unless the window is idle. An untouched window reports its reset a whole
 /// window from each request, rolling on; it starts with the first use, its reset then fixed. An
 /// idle window has no reset, so that it does not read as started.
-fn started_reset(
+pub(crate) fn started_reset(
     remaining: f64,
     reset: Option<chrono::DateTime<chrono::Utc>>,
     period_seconds: u64,

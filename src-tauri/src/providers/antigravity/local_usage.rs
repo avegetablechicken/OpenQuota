@@ -324,7 +324,8 @@ fn integer(value: Option<&Value>) -> Option<u64> {
     }
 }
 
-fn billing_provider(model: &str) -> &'static str {
+/// The rate card of a model served through Antigravity: Claude models keep Anthropic's prices.
+pub(crate) fn billing_provider(model: &str) -> &'static str {
     let normalized = model.trim().to_ascii_lowercase();
     if normalized.starts_with("claude-") || normalized.contains("/claude-") {
         "claude"

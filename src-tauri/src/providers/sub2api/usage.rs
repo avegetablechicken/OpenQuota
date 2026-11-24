@@ -88,7 +88,7 @@ impl UsageLog {
                 0,
                 self.cache_creation_12h_tokens,
             ),
-            Sub2ApiUpstream::Claude => (
+            Sub2ApiUpstream::Claude | Sub2ApiUpstream::Antigravity | Sub2ApiUpstream::Grok => (
                 self.cache_creation_5m_tokens,
                 self.cache_creation_1h_tokens,
                 0,
@@ -140,7 +140,13 @@ impl UsageLog {
                 .flatten()
                 .map(|rates| rates.cost_dollars(tokens, true))
         } else {
-            pricing.upstream_cost_at(upstream.provider_id(), model, self.created_at, tokens, tier)
+            let provider = match upstream {
+                Sub2ApiUpstream::Antigravity => {
+                    crate::providers::antigravity::billing_provider(model)
+                }
+                _ => upstream.provider_id(),
+            };
+            pricing.upstream_cost_at(provider, model, self.created_at, tokens, tier)
         };
         Some(PricedUsage {
             date: self.created_at.with_timezone(&Local).date_naive(),
@@ -421,6 +427,49 @@ mod tests {
         let unknown = record("2026-10-07T00:00:00Z", "unpriced-custom-model");
         assert_eq!(unknown.cost, None);
         assert_eq!(unknown.tokens, 118000);
+    }
+
+    #[test]
+    fn antigravity_and_grok_use_their_native_rate_cards() {
+        let pricing = test_bundled_pricing();
+        let record = |upstream, model: &str| {
+            serde_json::from_value::<UsageLog>(json!({
+                "id":1,"account_id":7,"created_at":"2026-11-23T12:00:00Z",
+                "model":"client-alias","upstream_model":model,
+                "input_tokens":10000,"cache_read_tokens":1000,"output_tokens":100
+            }))
+            .unwrap()
+            .priced(upstream, &pricing)
+            .unwrap()
+        };
+        let tokens = TokenBreakdown {
+            input: 10000,
+            output: 100,
+            cache_read: 1000,
+            ..Default::default()
+        };
+        let at = "2026-11-23T12:00:00Z".parse().unwrap();
+        for (upstream, model, provider) in [
+            (
+                Sub2ApiUpstream::Antigravity,
+                "gemini-4-neon-high",
+                "antigravity",
+            ),
+            (
+                Sub2ApiUpstream::Antigravity,
+                "claude-opus-5-5-high",
+                "claude",
+            ),
+            (Sub2ApiUpstream::Grok, "grok-4.6", "grok"),
+        ] {
+            let row = record(upstream, model);
+            let expected = pricing
+                .upstream_cost_at(provider, model, at, tokens, ServiceTier::Standard)
+                .unwrap_or_else(|| panic!("{model} has no {provider} rate"));
+            assert_eq!(row.model, model);
+            assert_eq!(row.tokens, 11100);
+            assert!((row.cost.unwrap() - expected).abs() < 1e-12, "{model}");
+        }
     }
 
     fn usage_page(ids: impl IntoIterator<Item = i64>, total: usize, now: DateTime<Utc>) -> String {

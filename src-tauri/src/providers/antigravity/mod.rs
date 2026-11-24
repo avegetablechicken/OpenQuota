@@ -6,6 +6,8 @@ mod mapper;
 #[cfg(any(target_os = "macos", test))]
 mod security_cli;
 
+pub(crate) use self::{local_usage::billing_provider, mapper::started_reset};
+
 use std::{path::PathBuf, sync::Arc};
 
 use chrono::Utc;

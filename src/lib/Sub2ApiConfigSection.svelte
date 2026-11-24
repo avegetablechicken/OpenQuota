@@ -16,7 +16,9 @@
     forgetSub2ApiUpstream,
     rememberSub2ApiUpstream,
     sub2ApiPublicName,
+    sub2ApiResolvesProviderNames,
     sub2ApiUpstreamLabel,
+    sub2ApiUpstreamOptions,
   } from './sub2ApiUpstreams';
   import type {
     Sub2ApiMode,
@@ -94,7 +96,10 @@
   let clearCancelButton = $state<HTMLButtonElement>();
   let removeItemButton = $state<HTMLButtonElement>();
   let removeItemCancelButton = $state<HTMLButtonElement>();
-  const upstreamOptions: Sub2ApiUpstream[] = ['codex', 'claude'];
+  // Codex and Claude also name the configuration an address and key are read from.
+  const upstreamOptions = sub2ApiUpstreamOptions;
+  // Only Codex and Claude configurations name a Base URL; others are always entered.
+  const addressFromProvider = $derived(sub2ApiResolvesProviderNames(providerSource));
   const providerResolutionDelayMs = 300;
 
   const endpointReady = $derived(
@@ -178,7 +183,7 @@
     clearSavedKey = draft.clearSavedKey;
     baseUrl = draft.baseUrl;
     providerName = draft.providerName;
-    customBaseUrl = draft.customBaseUrl;
+    customBaseUrl = draft.customBaseUrl || !sub2ApiResolvesProviderNames(providerSource);
     email = draft.email;
     apiKey = draft.apiKey;
     password = draft.password;
@@ -229,6 +234,16 @@
     upstream = next;
     if (mode === 'admin' && providerName.trim()) return;
     providerSource = next;
+    if (!sub2ApiResolvesProviderNames(next)) {
+      // Keep the address already shown: upstreams of one instance share it.
+      customBaseUrl = true;
+      providerName = '';
+      providerError = null;
+      resolvingProvider = false;
+      cancelProviderResolution();
+      providerResolution += 1;
+      return;
+    }
     if (!customBaseUrl && providerName.trim()) updateProvider(providerName);
   }
 
@@ -258,7 +273,9 @@
   }
 
   function updateProvider(value: string) {
-    if (!value.trim() || !providerName.trim()) providerSource = upstream;
+    if ((!value.trim() || !providerName.trim()) && sub2ApiResolvesProviderNames(upstream)) {
+      providerSource = upstream;
+    }
     providerName = value;
     baseUrl = '';
     providerError = null;
@@ -505,21 +522,23 @@
                 onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
               />
             </div>
-            <div class="config-row address-switch-row">
-              <span>Custom Base URL</span>
-              <label class="switch connection-switch">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  aria-label="Use custom Base URL"
-                  checked={customBaseUrl}
-                  disabled={saving}
-                  onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
-                />
-                <span></span>
-              </label>
-            </div>
-            {#if customBaseUrl}
+            {#if addressFromProvider}
+              <div class="config-row address-switch-row">
+                <span>Custom Base URL</span>
+                <label class="switch connection-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-label="Use custom Base URL"
+                    checked={customBaseUrl}
+                    disabled={saving}
+                    onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
+                  />
+                  <span></span>
+                </label>
+              </div>
+            {/if}
+            {#if customBaseUrl || !addressFromProvider}
               <label class="config-row">
                 <span>Base URL</span>
                 <input

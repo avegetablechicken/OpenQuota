@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { ProviderSnapshot, Sub2ApiSource } from './types';
+import type { ProviderSnapshot, Sub2ApiSource, Sub2ApiUpstream } from './types';
 
 export const sub2ApiSnapshotContext = Symbol('Sub2API snapshot');
 
@@ -15,13 +15,27 @@ function storage() {
   }
 }
 
+export const sub2ApiUpstreamOptions: Sub2ApiUpstream[] = ['codex', 'claude', 'antigravity', 'grok'];
+const sources: Sub2ApiSource[] = ['subscription', ...sub2ApiUpstreamOptions];
+const upstreamLabels: Record<Sub2ApiUpstream, string> = {
+  codex: 'Codex',
+  claude: 'Claude',
+  antigravity: 'Antigravity',
+  grok: 'Grok',
+};
+
+/** Whether the Base URL can be read from a named Codex or Claude client configuration. */
+export function sub2ApiResolvesProviderNames(upstream: Sub2ApiUpstream) {
+  return upstream === 'codex' || upstream === 'claude';
+}
+
 function loadUpstreams(): Record<string, Sub2ApiSource> {
   try {
     const parsed = JSON.parse(storage()?.getItem(storageKey) ?? '{}') as Record<string, unknown>;
     return Object.fromEntries(
       Object.entries(parsed).filter(
         (entry): entry is [string, Sub2ApiSource] =>
-          entry[1] === 'codex' || entry[1] === 'claude' || entry[1] === 'subscription',
+          typeof entry[1] === 'string' && sources.includes(entry[1] as Sub2ApiSource),
       ),
     );
   } catch {
@@ -76,7 +90,7 @@ export function sub2ApiDisplayName(providerId: string, customName?: string) {
 
 export function sub2ApiUpstreamLabel(upstream: Sub2ApiSource) {
   if (upstream === 'subscription') return 'User subscription';
-  return upstream === 'claude' ? 'Claude' : 'Codex';
+  return upstreamLabels[upstream];
 }
 
 export function sub2ApiPublicName(upstream?: Sub2ApiSource) {
@@ -99,13 +113,19 @@ export function sub2ApiMetricSupported(
   if (upstream === 'subscription') {
     return ['daily', 'weekly', 'monthly', 'today', 'yesterday', 'last30', 'trend'].includes(suffix);
   }
-  if (['daily', 'monthly'].includes(suffix)) return false;
-  if (suffix === 'extra') return false;
-  if (!upstream) return true;
-  if (upstream === 'claude') {
-    return !['spark', 'sparkWeekly', 'rateLimitResets'].includes(suffix);
+  if (!upstream) {
+    return !['daily', 'monthly', 'extra', 'claude', 'claudeWeekly'].includes(suffix);
   }
-  return !['sonnet', 'fable'].includes(suffix);
+  const upstreamOnly: Record<Sub2ApiUpstream, string[]> = {
+    codex: ['session', 'spark', 'sparkWeekly', 'rateLimitResets'],
+    claude: ['session', 'sonnet', 'fable'],
+    antigravity: ['session', 'claude', 'claudeWeekly'],
+    grok: ['monthly'],
+  };
+  return (
+    ['weekly', 'trend', 'today', 'yesterday', 'last30'].includes(suffix) ||
+    upstreamOnly[upstream].includes(suffix)
+  );
 }
 
 function persist(upstreams: Record<string, Sub2ApiSource>) {
@@ -170,5 +190,5 @@ export function forgetSub2ApiUpstream(providerId: string) {
 }
 
 export function sub2ApiUpstreamAccountName(name: string): string {
-  return name.replace(/^Sub2API · (?:Codex|Claude) · /, '');
+  return name.replace(/^Sub2API · (?:Codex|Claude|Antigravity|Grok) · /, '');
 }

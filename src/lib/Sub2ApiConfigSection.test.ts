@@ -17,7 +17,7 @@ async function chooseAdministrator() {
   await selectOption(screen.getByRole('combobox', { name: 'Track' }), 'Upstream accounts (admin)');
 }
 
-async function chooseUpstream(name: 'Codex' | 'Claude') {
+async function chooseUpstream(name: 'Codex' | 'Claude' | 'Antigravity' | 'Grok') {
   await selectOption(screen.getByRole('combobox', { name: 'Upstream' }), name);
 }
 
@@ -209,7 +209,7 @@ describe('Sub2ApiConfigSection', () => {
     const subscription = {
       configured: true,
       mode: 'subscription',
-      upstream: 'claude',
+      upstream: 'grok',
       customBaseUrl: true,
       baseUrl: 'https://user.example.com',
       codexProvider: '',
@@ -233,7 +233,7 @@ describe('Sub2ApiConfigSection', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     await chooseAdministrator();
     expect(screen.getByLabelText('Base URL')).toHaveValue(admin.baseUrl);
-    expect(screen.getByLabelText('Upstream')).toHaveValue('claude');
+    expect(screen.getByLabelText('Upstream')).toHaveValue('grok');
     expect(screen.queryByLabelText('Billing method')).toBeNull();
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue(admin.email);
     expect(screen.getByLabelText('Sub2API administrator password')).toHaveAttribute(
@@ -246,16 +246,16 @@ describe('Sub2ApiConfigSection', () => {
         providerId: 'sub2api@2',
         config: expect.objectContaining({
           mode: 'admin',
-          upstream: 'claude',
+          upstream: 'grok',
           password: '',
           baseUrl: admin.baseUrl,
         }),
       }),
     );
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    await chooseUpstream('Codex');
+    await chooseUpstream('Antigravity');
     await selectOption(screen.getByLabelText('Track'), 'User subscription');
-    expect(screen.getByLabelText('Upstream')).toHaveValue('codex');
+    expect(screen.getByLabelText('Upstream')).toHaveValue('antigravity');
     expect(screen.getByLabelText('Base URL')).toHaveValue(subscription.baseUrl);
     expect(screen.getByLabelText('Sub2API subscription API key')).toHaveAttribute(
       'placeholder',
@@ -292,6 +292,104 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByText('Not configured')).toBeInTheDocument();
   });
 
+  it('tracks Antigravity accounts at a provider address and Grok at an entered Base URL', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const upstreamNames = () =>
+      within(screen.getByRole('combobox', { name: 'Upstream' }))
+        .getAllByRole('option')
+        .map((option) => option.textContent);
+    expect(upstreamNames()).toEqual(['Codex', 'Claude', 'Antigravity', 'Grok']);
+    await chooseAdministrator();
+    expect(upstreamNames()).toEqual(['Codex', 'Claude', 'Antigravity', 'Grok']);
+
+    await fireEvent.input(screen.getByLabelText('Codex provider or profile'), {
+      target: { value: 'relay' },
+    });
+    await waitFor(() =>
+      expect(resolvedBaseUrl()).toHaveTextContent('https://resolved.example.com'),
+    );
+    // The instance address stays read from the Codex provider.
+    await chooseUpstream('Antigravity');
+    expect(screen.getByLabelText('Codex provider or profile')).toHaveValue('relay');
+    expect(resolvedBaseUrl()).toHaveTextContent('https://resolved.example.com');
+    expect(screen.getByText('Sub2API · Antigravity')).toBeInTheDocument();
+    expect(
+      document.querySelector('.sub2api-config-summary [data-icon-layer="upstream"] path'),
+    ).toHaveAttribute('d', providerIconPath('antigravity'));
+
+    // Without a provider, an Antigravity or Grok address can only be entered.
+    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
+    expect(screen.queryByRole('switch', { name: 'Use custom Base URL' })).not.toBeInTheDocument();
+    await chooseUpstream('Grok');
+    expect(screen.queryByRole('switch', { name: 'Use custom Base URL' })).not.toBeInTheDocument();
+    await fireEvent.input(screen.getByLabelText('Base URL'), {
+      target: { value: 'https://grok-relay.example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'admin@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'secret-password' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        'save_sub2api_config',
+        expect.objectContaining({
+          providerId: 'sub2api@2',
+          config: expect.objectContaining({
+            mode: 'admin',
+            baseUrl: 'https://grok-relay.example.com',
+            codexProvider: '',
+            customBaseUrl: true,
+            upstream: 'grok',
+          }),
+        }),
+      ),
+    );
+    const saved = mocks.invoke.mock.calls.find(([command]) => command === 'save_sub2api_config');
+    expect(saved?.[1].config).not.toHaveProperty('providerSource');
+  });
+
+  it('saves an Antigravity upstream whose address is read from a Codex provider', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await chooseAdministrator();
+    await fireEvent.input(screen.getByLabelText('Codex provider or profile'), {
+      target: { value: 'relay' },
+    });
+    await waitFor(() =>
+      expect(resolvedBaseUrl()).toHaveTextContent('https://resolved.example.com'),
+    );
+    await chooseUpstream('Antigravity');
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
+      target: { value: 'admin@example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
+      target: { value: 'secret-password' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        'save_sub2api_config',
+        expect.objectContaining({
+          config: expect.objectContaining({
+            baseUrl: 'https://resolved.example.com',
+            codexProvider: 'relay',
+            providerSource: 'codex',
+            customBaseUrl: false,
+            upstream: 'antigravity',
+          }),
+        }),
+      ),
+    );
+  });
+
   it('keeps the upstream but leaves the other track’s address empty on first use', async () => {
     const original = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (cmd, args) =>
@@ -299,7 +397,7 @@ describe('Sub2ApiConfigSection', () => {
         ? {
             configured: true,
             mode: 'admin',
-            upstream: 'claude',
+            upstream: 'antigravity',
             providerSource: 'codex',
             codexProvider: 'relay',
             baseUrl: 'https://resolved.example.com',
@@ -311,8 +409,8 @@ describe('Sub2ApiConfigSection', () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     await selectOption(screen.getByLabelText('Track'), 'User subscription');
-    expect(screen.getByLabelText('Upstream')).toHaveValue('claude');
-    expect(screen.getByLabelText('Claude settings provider')).toHaveValue('');
+    expect(screen.getByLabelText('Upstream')).toHaveValue('antigravity');
+    expect(screen.getByLabelText('Base URL')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     await chooseAdministrator();
     expect(screen.getByLabelText('Codex provider or profile')).toHaveValue('relay');
@@ -329,8 +427,7 @@ describe('Sub2ApiConfigSection', () => {
     );
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await fireEvent.click(await screen.findByRole('button', { name: 'Add' }));
-    await chooseUpstream('Claude');
-    await fireEvent.click(screen.getByLabelText('Use custom Base URL'));
+    await chooseUpstream('Grok');
     await fireEvent.input(screen.getByLabelText('Base URL'), {
       target: { value: 'https://user.example' },
     });
@@ -338,8 +435,7 @@ describe('Sub2ApiConfigSection', () => {
       target: { value: 'draft-key' },
     });
     await chooseAdministrator();
-    expect(screen.getByLabelText('Upstream')).toHaveValue('claude');
-    await fireEvent.click(screen.getByLabelText('Use custom Base URL'));
+    expect(screen.getByLabelText('Upstream')).toHaveValue('grok');
     expect(screen.getByLabelText('Base URL')).toHaveValue('');
     await fireEvent.input(screen.getByLabelText('Base URL'), {
       target: { value: 'https://admin.example' },
@@ -350,7 +446,7 @@ describe('Sub2ApiConfigSection', () => {
     await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
       target: { value: 'draft-password' },
     });
-    await chooseUpstream('Codex');
+    await chooseUpstream('Antigravity');
     finishRead({
       configured: false,
       mode: 'subscription',
@@ -362,15 +458,99 @@ describe('Sub2ApiConfigSection', () => {
     });
     await initialRead;
     await selectOption(screen.getByLabelText('Track'), 'User subscription');
-    expect(screen.getByLabelText('Upstream')).toHaveValue('codex');
+    expect(screen.getByLabelText('Upstream')).toHaveValue('antigravity');
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://user.example');
     expect(screen.getByLabelText('Sub2API subscription API key')).toHaveValue('draft-key');
     await chooseAdministrator();
-    expect(screen.getByLabelText('Upstream')).toHaveValue('codex');
+    expect(screen.getByLabelText('Upstream')).toHaveValue('antigravity');
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://admin.example');
     expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('draft@example.com');
     expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('draft-password');
     expect(mocks.invoke).not.toHaveBeenCalledWith('save_sub2api_config', expect.anything());
+  });
+
+  it('keeps an Antigravity or Grok upstream for a subscription at an entered Base URL', async () => {
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('Not configured');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await chooseUpstream('Antigravity');
+    expect(screen.getByRole('combobox', { name: 'Upstream' })).toHaveValue('antigravity');
+    expect(screen.queryByRole('switch', { name: 'Use custom Base URL' })).not.toBeInTheDocument();
+    await fireEvent.input(screen.getByLabelText('Base URL'), {
+      target: { value: 'https://relay.example.com' },
+    });
+    await fireEvent.input(screen.getByLabelText('Sub2API subscription API key'), {
+      target: { value: 'user-key' },
+    });
+
+    // The upstream stays when switching modes and back.
+    await chooseAdministrator();
+    expect(screen.getByRole('combobox', { name: 'Upstream' })).toHaveValue('antigravity');
+    await selectOption(screen.getByRole('combobox', { name: 'Track' }), 'User subscription');
+    expect(screen.getByRole('combobox', { name: 'Upstream' })).toHaveValue('antigravity');
+    await chooseUpstream('Grok');
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://relay.example.com');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        'save_sub2api_config',
+        expect.objectContaining({
+          config: expect.objectContaining({
+            mode: 'subscription',
+            baseUrl: 'https://relay.example.com',
+            customBaseUrl: true,
+            apiKey: 'user-key',
+            upstream: 'grok',
+          }),
+        }),
+      ),
+    );
+  });
+
+  it('marks a saved subscription as Antigravity without entering its key again', async () => {
+    const saved = {
+      configured: true,
+      mode: 'subscription',
+      baseUrl: 'https://relay.example.com',
+      codexProvider: '',
+      customBaseUrl: true,
+      email: '',
+      upstream: 'codex',
+    };
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args?: unknown) =>
+      command === 'get_sub2api_config_state'
+        ? Promise.resolve(saved)
+        : command === 'save_sub2api_config'
+          ? Promise.resolve({ ...saved, upstream: 'antigravity' })
+          : base(command, args),
+    );
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect(screen.getByRole('combobox', { name: 'Upstream' })).toHaveValue('codex');
+    await chooseUpstream('Antigravity');
+    expect(screen.getByLabelText('Sub2API subscription API key')).toHaveAttribute(
+      'placeholder',
+      'Unchanged',
+    );
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://relay.example.com');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        'save_sub2api_config',
+        expect.objectContaining({
+          config: expect.objectContaining({
+            mode: 'subscription',
+            baseUrl: 'https://relay.example.com',
+            customBaseUrl: true,
+            apiKey: '',
+            upstream: 'antigravity',
+          }),
+        }),
+      ),
+    );
   });
 
   it('saves a Claude upstream login without retaining the password in the UI', async () => {

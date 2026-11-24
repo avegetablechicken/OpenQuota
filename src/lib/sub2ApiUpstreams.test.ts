@@ -6,6 +6,8 @@ import {
   sub2ApiDisplayName,
   sub2ApiEndpoints,
   sub2ApiMetricSupported,
+  sub2ApiPublicName,
+  sub2ApiUpstreamAccountName,
 } from './sub2ApiUpstreams';
 
 describe('Sub2API connection labels', () => {
@@ -44,5 +46,29 @@ describe('Sub2API connection labels', () => {
     expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.extra', 'codex')).toBe(false);
     expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.spark', 'codex')).toBe(true);
     expect(sub2ApiMetricSupported('codex', 'codex.spark', 'codex')).toBe(true);
+  });
+
+  it('shows the Gemini and third-party pools for Antigravity and the billing period for Grok', () => {
+    for (const suffix of ['session', 'weekly', 'claude', 'claudeWeekly', 'last30']) {
+      expect(sub2ApiMetricSupported('sub2api@2', `sub2api@2.${suffix}`, 'antigravity')).toBe(true);
+    }
+    for (const suffix of ['sonnet', 'spark', 'monthly', 'extra']) {
+      expect(sub2ApiMetricSupported('sub2api@2', `sub2api@2.${suffix}`, 'antigravity')).toBe(false);
+    }
+    for (const suffix of ['weekly', 'monthly', 'trend', 'today']) {
+      expect(sub2ApiMetricSupported('sub2api@2', `sub2api@2.${suffix}`, 'grok')).toBe(true);
+    }
+    for (const suffix of ['session', 'claude', 'daily', 'extra']) {
+      expect(sub2ApiMetricSupported('sub2api@2', `sub2api@2.${suffix}`, 'grok')).toBe(false);
+    }
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.claude', 'claude')).toBe(false);
+    expect(sub2ApiMetricSupported('sub2api@2', 'sub2api@2.claude')).toBe(false);
+  });
+
+  it('names Antigravity and Grok upstream accounts', () => {
+    expect(sub2ApiPublicName('antigravity')).toBe('Sub2API · Antigravity');
+    expect(sub2ApiPublicName('grok')).toBe('Sub2API · Grok');
+    expect(sub2ApiUpstreamAccountName('Sub2API · Antigravity · agy')).toBe('agy');
+    expect(sub2ApiUpstreamAccountName('Sub2API · Grok · grok')).toBe('grok');
   });
 });

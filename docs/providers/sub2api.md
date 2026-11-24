@@ -8,7 +8,9 @@ New connections default to **User subscription**. Choose the Codex or Claude con
 
 For Codex, OpenQuota resolves the selected provider or standalone profile under `CODEX_HOME` (default `~/.codex`). It looks up the provider’s `env_key` in that directory’s `.env`, then in the process environment. Other supported sources in the selected provider are `experimental_bearer_token` and Bearer Authorization or X-API-Key headers in `env_http_headers` or `http_headers`. For Claude, OpenQuota reads `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` from the selected settings file’s `env` object, then its top-level fields. Automatic mode reads the key again on refresh. If the provider endpoint changes, save the connection again.
 
-OpenQuota uses `GET /v1/models` to choose the subscription icon. A catalog that identifies one supported model family gets its mark alongside Sub2API’s. Mixed or unrecognized catalogs use the Sub2API mark.
+For a subscription to an Antigravity or Grok group, choose that **Upstream**. These clients do not name their endpoint in a provider configuration, so enter the Base URL and API key; the card shows the chosen upstream's mark alongside Sub2API's.
+
+With a Codex or Claude upstream, OpenQuota uses `GET /v1/models` to choose the subscription icon. A catalog that identifies one supported model family gets its mark alongside Sub2API’s. Mixed or unrecognized catalogs use the Sub2API mark.
 
 OpenQuota reads `GET /v1/usage` using that key. The dashboard shows the plan name and quota percentages. The percentage appears below the bar. Unlimited daily and weekly windows show an empty bar with **No data** in the percentage position. The monthly row appears only when the server reports a positive monthly limit. The menu bar shows only used percentages for capped subscription windows. A weekly window also shows its next reset when the server supplies the window start. The **Today**, **Yesterday**, and **Last 30 Days** rows show token counts for this API key. The model breakdown ranks models by tokens. **Monthly** shows usage across the subscription since its current monthly window started. The window can reset partway through the last 30 days. For the key’s rolling 30-day cost, open **Total Spend**, select **Accounts**, **30 Days** and **Cost**. The subscription’s entry in Total Spend uses the daily fees reported for that key. Usage Trend plots the daily token totals for this API key relative to the largest daily total in view. Missing dates appear as zero, and an endpoint that returns only the today summary has no daily trend.
 
@@ -16,7 +18,7 @@ Wallet-only keys and keys with their own quota or rate limits can return a diffe
 
 ## Upstream accounts (admin)
 
-Choose **Upstream accounts (admin)** to see the active Codex or Claude OAuth accounts managed by the instance. Connections saved by earlier versions open in this mode.
+Choose **Upstream accounts (admin)** to see the active Codex, Claude, Antigravity or Grok OAuth accounts managed by the instance. Connections saved by earlier versions open in this mode.
 
 ### What it tracks
 
@@ -30,8 +32,31 @@ Choose **Upstream accounts (admin)** to see the active Codex or Claude OAuth acc
 | Today, Yesterday, Last 30 Days | Token counts and cost for the upstream accounts |
 | Model breakdown | Token counts and cost per model and account |
 
-An account's Session starts on first use. When the upstream reports it unused, the dashboard shows
-0% used and **Not started** instead of a reset countdown, and the menu bar omits the value.
+A Claude upstream shows Session, Weekly, and the Sonnet and Fable limits instead of the Codex rows.
+
+An Antigravity upstream shows the same pools as the [Antigravity](antigravity.md) provider, read
+from Sub2API's `antigravity_quota_groups`:
+
+| Metric        | Meaning                                        |
+| ------------- | ---------------------------------------------- |
+| Session       | Gemini models' five-hour window                |
+| Weekly        | Gemini models' weekly window                   |
+| Claude        | Claude and GPT-OSS models' five-hour window    |
+| Claude Weekly | Claude and GPT-OSS models' weekly window       |
+
+Instances older than Sub2API 0.2.20 report only each model's window; the most used Gemini model
+then stands for Session and the most used Claude or GPT-OSS model for Claude, without weekly rows.
+
+A Grok upstream shows the xAI billing period Sub2API records for the account as **Weekly**, or as
+**Monthly** when xAI reports a monthly period. Instances that have not yet probed the account's
+billing, or that predate Sub2API 0.1.155, report no window.
+
+An account that Sub2API marks as refused upstream or needing a new sign-in keeps its card with the
+reason, and the other accounts still refresh.
+
+An account's Session starts on first use, as does an Antigravity account's Claude window. When
+the upstream reports it unused, the dashboard shows 0% used and **Not started** instead of a reset
+countdown, and the menu bar omits the value.
 
 OpenQuota automatically prices the last 30 days of request records from
 `/api/v1/admin/usage` for each upstream account. It uses the model reported by the
@@ -39,7 +64,9 @@ upstream response, then the model forwarded upstream, then the request model whe
 no mapping is recorded. Each estimate uses the request timestamp, speed tier and
 input, output, cache-read and cache-write tokens. Unknown model rates or unsupported
 image charges leave the estimate incomplete. The window includes today and the
-previous 29 local dates. See [historical pricing](../pricing-history.md).
+previous 29 local dates. Antigravity requests to Claude models use Claude's rates, and
+other Antigravity models use Antigravity's. Grok requests use Grok's rates.
+See [historical pricing](../pricing-history.md).
 
 Quota is shown first. Each refresh syncs up to 16 pages of request records across
 the connection and saves each complete page. OpenQuota resumes from the cached
@@ -52,7 +79,12 @@ In **Customize**, select **Add Account** under **Unofficial** to create an indep
 card, select **Add**, choose **Upstream accounts (admin)**, and configure the instance address and administrator login. Select **Save** to
 collapse the form, or **Done** to discard edits. Use **Edit** to reopen a configured connection. OpenQuota signs in through
 `/api/v1/auth/login`, discovers the active OAuth accounts for the selected upstream, and reads Codex quota from
-`/api/v1/admin/openai/accounts/:id/quota` or Claude quota from `/api/v1/admin/accounts/:id/usage`.
+`/api/v1/admin/openai/accounts/:id/quota`, or Claude, Antigravity and Grok quota from
+`/api/v1/admin/accounts/:id/usage`.
+
+Antigravity and Grok clients do not name their endpoint in a provider configuration. Selecting
+either upstream keeps an address already read from a Codex or Claude **Provider**; otherwise
+enter the instance address, such as `https://sub2api.example.com`, as the Base URL.
 
 Changing **Upstream** changes which accounts OpenQuota tracks on the instance. It keeps the current address, login and named provider configuration. A saved password is reused only for the same instance. To choose another named provider using the newly selected platform’s configuration, clear the Provider field and enter the new name.
 
@@ -103,5 +135,6 @@ through native verification. OpenQuota does not disable certificate or hostname 
 - **Login rejected** — verify the administrator email and password in the Sub2API admin panel.
 - **Administrator access required** — the configured login must be a Sub2API administrator.
 - **Two-factor authentication required** — this initial integration does not complete a 2FA login.
-- **No Codex upstream found** — add or enable an OpenAI OAuth account in Sub2API.
+- **No upstream accounts** — add or enable an OAuth account of the selected platform in Sub2API.
+  Antigravity accounts are listed under the `antigravity` platform, separately from Gemini CLI's.
 - **Could not reach Sub2API** — verify the Base URL, TLS certificate, proxy, and network connection.

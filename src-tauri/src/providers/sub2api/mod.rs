@@ -1,8 +1,9 @@
 mod cache;
 mod reported;
 mod subscription;
-pub(crate) use subscription::restore_subscription_windows;
+mod upstream_quota;
 mod usage;
+pub(crate) use subscription::restore_subscription_windows;
 
 use cache::UsageCache;
 use reported::AccountStats;
@@ -119,6 +120,26 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
                 false,
                 "F",
             ),
+            MetricDefinition::quota(
+                &metric_id("claude"),
+                "Claude",
+                "claude",
+                true,
+                false,
+                MetricSection::OnDemand,
+                false,
+                "C",
+            ),
+            MetricDefinition::quota(
+                &metric_id("claudeWeekly"),
+                "Claude Weekly",
+                "claudeWeekly",
+                false,
+                false,
+                MetricSection::OnDemand,
+                false,
+                "CW",
+            ),
             MetricDefinition::quota_or_value(
                 &metric_id("extra"),
                 "Extra Usage",
@@ -203,12 +224,22 @@ pub fn metric_supported(
             "daily" | "weekly" | "monthly" | "today" | "yesterday" | "last30" | "trend"
         );
     }
-    match suffix {
-        "daily" | "monthly" | "extra" => false,
-        "spark" | "sparkWeekly" | "rateLimitResets" => upstream_provider_id != Some("claude"),
-        "sonnet" | "fable" => upstream_provider_id != Some("codex"),
-        _ => true,
-    }
+    let upstream_only: &[&str] = match upstream_provider_id {
+        Some("codex") => &["session", "spark", "sparkWeekly", "rateLimitResets"],
+        Some("claude") => &["session", "sonnet", "fable"],
+        Some("antigravity") => &["session", "claude", "claudeWeekly"],
+        Some("grok") => &["monthly"],
+        _ => {
+            return !matches!(
+                suffix,
+                "daily" | "monthly" | "extra" | "claude" | "claudeWeekly"
+            )
+        }
+    };
+    matches!(
+        suffix,
+        "weekly" | "trend" | "today" | "yesterday" | "last30"
+    ) || upstream_only.contains(&suffix)
 }
 
 pub fn metric_template(
@@ -238,6 +269,8 @@ pub fn metric_template(
             "session",
             "sonnet",
             "fable",
+            "claude",
+            "claudeWeekly",
             "extra",
             "spark",
             "sparkWeekly",
@@ -247,36 +280,92 @@ pub fn metric_template(
         }
         return template;
     }
-    match upstream {
-        Sub2ApiUpstream::Claude => vec![
-            metric("session", true, always, true),
-            metric("weekly", true, always, true),
-            metric("trend", true, always, false),
-            metric("sonnet", false, demand, false),
-            metric("fable", false, demand, false),
-            metric("extra", false, demand, false),
-            metric("today", true, demand, false),
-            metric("yesterday", true, demand, false),
-            metric("last30", true, demand, false),
-            metric("spark", false, demand, false),
-            metric("sparkWeekly", false, demand, false),
-            metric("rateLimitResets", false, demand, false),
-        ],
-        Sub2ApiUpstream::Codex => vec![
-            metric("session", true, always, true),
-            metric("weekly", true, always, true),
-            metric("trend", true, always, false),
-            metric("spark", true, demand, false),
-            metric("sparkWeekly", true, demand, false),
-            metric("rateLimitResets", true, demand, false),
-            metric("today", true, demand, false),
-            metric("yesterday", true, demand, false),
-            metric("last30", true, demand, false),
-            metric("sonnet", false, demand, false),
-            metric("fable", false, demand, false),
-            metric("extra", false, demand, false),
-        ],
-    }
+    let (shown, hidden): (Vec<MetricLayout>, &[&str]) = match upstream {
+        Sub2ApiUpstream::Claude => (
+            vec![
+                metric("session", true, always, true),
+                metric("weekly", true, always, true),
+                metric("trend", true, always, false),
+                metric("sonnet", false, demand, false),
+                metric("fable", false, demand, false),
+                metric("extra", false, demand, false),
+                metric("today", true, demand, false),
+                metric("yesterday", true, demand, false),
+                metric("last30", true, demand, false),
+            ],
+            &[
+                "spark",
+                "sparkWeekly",
+                "rateLimitResets",
+                "claude",
+                "claudeWeekly",
+            ],
+        ),
+        Sub2ApiUpstream::Codex => (
+            vec![
+                metric("session", true, always, true),
+                metric("weekly", true, always, true),
+                metric("trend", true, always, false),
+                metric("spark", true, demand, false),
+                metric("sparkWeekly", true, demand, false),
+                metric("rateLimitResets", true, demand, false),
+                metric("today", true, demand, false),
+                metric("yesterday", true, demand, false),
+                metric("last30", true, demand, false),
+            ],
+            &["sonnet", "fable", "extra", "claude", "claudeWeekly"],
+        ),
+        // Antigravity's Session and Weekly are its Gemini pool, as in the native provider.
+        Sub2ApiUpstream::Antigravity => (
+            vec![
+                metric("session", true, always, true),
+                metric("weekly", true, always, true),
+                metric("trend", true, always, false),
+                metric("claude", true, demand, false),
+                metric("claudeWeekly", true, demand, false),
+                metric("today", true, demand, false),
+                metric("yesterday", true, demand, false),
+                metric("last30", true, demand, false),
+            ],
+            &[
+                "spark",
+                "sparkWeekly",
+                "rateLimitResets",
+                "sonnet",
+                "fable",
+                "extra",
+            ],
+        ),
+        // Grok's billing period is weekly or monthly; only the reported one has data.
+        Sub2ApiUpstream::Grok => (
+            vec![
+                metric("weekly", true, always, false),
+                metric("monthly", true, always, false),
+                metric("trend", true, always, false),
+                metric("today", true, demand, false),
+                metric("yesterday", true, demand, false),
+                metric("last30", true, demand, false),
+            ],
+            &[
+                "session",
+                "spark",
+                "sparkWeekly",
+                "rateLimitResets",
+                "sonnet",
+                "fable",
+                "extra",
+                "claude",
+                "claudeWeekly",
+            ],
+        ),
+    };
+    let mut template = shown;
+    template.extend(
+        hidden
+            .iter()
+            .map(|suffix| metric(suffix, false, demand, false)),
+    );
+    template
 }
 
 // Older admin snapshots can contain instance-priced daily summaries.
@@ -349,6 +438,8 @@ pub enum Sub2ApiUpstream {
     #[default]
     Codex,
     Claude,
+    Antigravity,
+    Grok,
 }
 
 impl Sub2ApiUpstream {
@@ -356,6 +447,9 @@ impl Sub2ApiUpstream {
         match self {
             Self::Codex => "openai",
             Self::Claude => "anthropic",
+            // Sub2API keeps Antigravity's OAuth accounts apart from Gemini CLI's (`gemini`).
+            Self::Antigravity => "antigravity",
+            Self::Grok => "grok",
         }
     }
 
@@ -363,6 +457,8 @@ impl Sub2ApiUpstream {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
+            Self::Antigravity => "Antigravity",
+            Self::Grok => "Grok",
         }
     }
 
@@ -370,7 +466,14 @@ impl Sub2ApiUpstream {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
+            Self::Grok => "grok",
         }
+    }
+
+    /// Whether the Base URL can be read from a named local client configuration.
+    fn resolves_provider_names(self) -> bool {
+        matches!(self, Self::Codex | Self::Claude)
     }
 }
 
@@ -479,6 +582,10 @@ impl StoredConfig {
                     super::claude::config::subscription_credentials(&self.codex_provider)?;
                 (normalized_base_url_text(&url)?, key)
             }
+            // Subscriptions read keys only from Codex and Claude configurations.
+            Sub2ApiUpstream::Antigravity | Sub2ApiUpstream::Grok => {
+                return Err(Sub2ApiError::MissingApiKey)
+            }
         };
         if url != self.base_url {
             return Err(Sub2ApiError::ProviderEndpointChanged);
@@ -505,6 +612,10 @@ impl StoredConfig {
             base_url: self.base_url.clone(),
             codex_provider: self.codex_provider.clone(),
             custom_base_url: self.custom_base_url
+                || !self
+                    .provider_source
+                    .unwrap_or(self.upstream)
+                    .resolves_provider_names()
                 || (self.upstream == Sub2ApiUpstream::Claude && self.codex_provider.is_empty()),
             email: self.email.clone(),
             upstream: self.upstream,
@@ -785,7 +896,9 @@ impl Sub2ApiClient {
                 &account_id,
                 "quota",
             ],
-            Sub2ApiUpstream::Claude => &["api", "v1", "admin", "accounts", &account_id, "usage"],
+            Sub2ApiUpstream::Claude | Sub2ApiUpstream::Antigravity | Sub2ApiUpstream::Grok => {
+                &["api", "v1", "admin", "accounts", &account_id, "usage"]
+            }
         };
         let response = self
             .client
@@ -1035,9 +1148,16 @@ impl Sub2ApiProvider {
             let key = config.subscription_key()?;
             let mut snapshot =
                 client.subscription_snapshot(&key, self.empty_snapshot(Vec::new()))?;
-            snapshot.upstream_provider_id = client
-                .subscription_icon(&key, &self.model_families)
-                .map(str::to_owned);
+            // Codex and Claude double as the configuration an address is read from, so their
+            // mark comes from the key's model catalog. Antigravity and Grok are chosen only to
+            // name the upstream, whose catalogs can mix model families.
+            snapshot.upstream_provider_id = if config.upstream.resolves_provider_names() {
+                client
+                    .subscription_icon(&key, &self.model_families)
+                    .map(str::to_owned)
+            } else {
+                Some(config.upstream.provider_id().to_owned())
+            };
             return Ok(snapshot);
         }
         let mut session = self.session(config)?;
@@ -1150,6 +1270,7 @@ impl Sub2ApiProvider {
         now: chrono::DateTime<Utc>,
     ) -> Result<ProviderSnapshot, Sub2ApiError> {
         let body = client.usage(token, account.id, config.upstream)?;
+        let mut warnings = Vec::new();
         let (plan, quotas, value_metrics) = match config.upstream {
             Sub2ApiUpstream::Codex => {
                 let response = UsageResponse {
@@ -1173,6 +1294,15 @@ impl Sub2ApiProvider {
                 let mapped = map_sub2api_usage(&body).map_err(|_| Sub2ApiError::InvalidResponse)?;
                 (mapped.plan, mapped.quotas, mapped.value_metrics)
             }
+            Sub2ApiUpstream::Antigravity | Sub2ApiUpstream::Grok => {
+                let mapped = if config.upstream == Sub2ApiUpstream::Antigravity {
+                    upstream_quota::map_antigravity(&body, now)
+                } else {
+                    upstream_quota::map_grok(&body, now)
+                };
+                warnings = mapped.warnings;
+                (mapped.plan, mapped.quotas, Vec::new())
+            }
         };
         let quotas = normalize_refreshed_quotas(config.upstream, quotas, now);
         Ok(ProviderSnapshot {
@@ -1185,7 +1315,7 @@ impl Sub2ApiProvider {
             status_metrics: Vec::new(),
             notices: Vec::new(),
             usage_histories: UsageHistories::account(UsageHistory::default()),
-            warnings: Vec::new(),
+            warnings,
             refreshed_at: now,
         })
     }
@@ -1448,6 +1578,17 @@ fn connection_target(
         }
         Sub2ApiUpstream::Codex => Ok((resolve_codex(&provider_name)?, provider_name, false)),
         Sub2ApiUpstream::Claude => Ok((resolve_claude(&provider_name)?, provider_name, false)),
+        // Neither client keeps its endpoint under a provider name, so the address is entered.
+        Sub2ApiUpstream::Antigravity | Sub2ApiUpstream::Grok => {
+            if !provider_name.is_empty() {
+                return Err(Sub2ApiError::ProviderWithCustomBaseUrl);
+            }
+            Ok((
+                normalized_base_url_text(&input.base_url)?,
+                String::new(),
+                true,
+            ))
+        }
     }
 }
 
@@ -1533,6 +1674,8 @@ fn normalize_refreshed_quotas(
     let expected: &[&str] = match upstream {
         Sub2ApiUpstream::Codex => &["session", "weekly", "spark", "sparkWeekly"],
         Sub2ApiUpstream::Claude => &["session", "weekly", "sonnet", "fable"],
+        Sub2ApiUpstream::Antigravity => &["session", "weekly", "claude", "claudeWeekly"],
+        Sub2ApiUpstream::Grok => &["weekly", "monthly"],
     };
     let mut normalized = Vec::with_capacity(quotas.len().max(expected.len()));
 
@@ -1721,6 +1864,40 @@ mod tests {
             Some("codex")
         ));
         assert!(metric_supported("sub2api", "sub2api@2.extra", None));
+        assert!(!metric_supported("sub2api@2", "sub2api@2.claude", None));
+        for suffix in ["session", "weekly", "claude", "claudeWeekly", "last30"] {
+            assert!(metric_supported(
+                "sub2api@2",
+                &format!("sub2api@2.{suffix}"),
+                Some("antigravity")
+            ));
+        }
+        for suffix in ["sonnet", "spark", "monthly", "extra"] {
+            assert!(!metric_supported(
+                "sub2api@2",
+                &format!("sub2api@2.{suffix}"),
+                Some("antigravity")
+            ));
+        }
+        for suffix in ["weekly", "monthly", "trend", "today"] {
+            assert!(metric_supported(
+                "sub2api@2",
+                &format!("sub2api@2.{suffix}"),
+                Some("grok")
+            ));
+        }
+        for suffix in ["session", "claude", "daily", "expires", "extra"] {
+            assert!(!metric_supported(
+                "sub2api@2",
+                &format!("sub2api@2.{suffix}"),
+                Some("grok")
+            ));
+        }
+        assert!(!metric_supported(
+            "sub2api@2",
+            "sub2api@2.claude",
+            Some("claude")
+        ));
     }
 
     #[test]
@@ -1753,13 +1930,35 @@ mod tests {
                 crate::providers::claude::definition(),
                 "extra",
             ),
+            (
+                super::Sub2ApiUpstream::Antigravity,
+                crate::providers::antigravity::definition(),
+                "",
+            ),
+            (
+                super::Sub2ApiUpstream::Grok,
+                crate::providers::grok::definition(),
+                "payAsYouGo",
+            ),
         ] {
             let template = metric_template("sub2api@2", upstream, super::Sub2ApiMode::Admin);
             for definition in native.metrics {
-                let suffix = definition.id.split_once('.').unwrap().1;
+                let suffix = match definition.id.split_once('.').unwrap().1 {
+                    "geminiPro" => "session",
+                    "geminiWeekly" => "weekly",
+                    suffix => suffix,
+                };
                 if suffix == unsupported {
                     continue;
                 }
+                assert!(
+                    super::metric_supported(
+                        "sub2api@2",
+                        &format!("sub2api@2.{suffix}"),
+                        Some(upstream.provider_id())
+                    ),
+                    "{upstream} {suffix}"
+                );
                 let metric = template
                     .iter()
                     .find(|metric| metric.id == format!("sub2api@2.{suffix}"))
@@ -1804,6 +2003,42 @@ mod tests {
             .chain(codex.iter())
             .filter(|metric| metric.id.ends_with("extra"))
             .all(|metric| !metric.enabled));
+        // Every template lists every metric, and enables only what its upstream reports.
+        let definition = definition_for("sub2api@2", "Sub2API 2");
+        for upstream in [
+            super::Sub2ApiUpstream::Codex,
+            super::Sub2ApiUpstream::Claude,
+            super::Sub2ApiUpstream::Antigravity,
+            super::Sub2ApiUpstream::Grok,
+        ] {
+            let template = metric_template("sub2api@2", upstream, super::Sub2ApiMode::Admin);
+            for known in &definition.metrics {
+                let suffix = known.id.split_once('.').unwrap().1;
+                assert!(
+                    matches!(suffix, "daily" | "monthly" | "expires")
+                        || template.iter().any(|metric| metric.id == known.id),
+                    "{upstream} {suffix}"
+                );
+            }
+            for metric in template {
+                assert!(
+                    definition.metrics.iter().any(|known| known.id == metric.id),
+                    "{upstream} {}",
+                    metric.id
+                );
+                if metric.enabled {
+                    assert!(
+                        super::metric_supported(
+                            "sub2api@2",
+                            &metric.id,
+                            Some(upstream.provider_id())
+                        ),
+                        "{upstream} {}",
+                        metric.id
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2190,6 +2425,41 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_and_grok_subscriptions_are_marked_by_their_chosen_upstream() {
+        let body = serde_json::json!({
+            "planName": "antigravity",
+            "subscription": {"weekly_usage_usd": 0, "weekly_limit_usd": 0},
+            "daily_usage": []
+        });
+        for upstream in ["antigravity", "grok"] {
+            // Only the usage request is served: the mixed catalog is never requested.
+            let (base, requests, worker) = serve_sequence(vec![body.to_string()]);
+            let directory = tempdir().unwrap();
+            let provider = Sub2ApiProvider::new(
+                "sub2api".into(),
+                "Sub2API".into(),
+                directory.path().join("marker"),
+                false,
+                test_pricing(),
+            );
+            let config: StoredConfig = serde_json::from_value(serde_json::json!({
+                "base_url": base, "mode": "subscription", "api_key": "user-test-key",
+                "email": "", "password": "", "upstream": upstream, "custom_base_url": true
+            }))
+            .unwrap();
+            let snapshot = provider.refresh_snapshot(&config).unwrap();
+            worker.join().unwrap();
+
+            assert_eq!(snapshot.upstream_provider_id.as_deref(), Some(upstream));
+            assert!(requests.recv().unwrap().starts_with("GET /v1/usage?"));
+            assert!(requests.try_recv().is_err());
+            let state = config.state();
+            assert_eq!(state.upstream.provider_id(), upstream);
+            assert!(state.custom_base_url);
+        }
+    }
+
+    #[test]
     fn empty_upstream_list_returns_no_account_cards() {
         let responses = vec![
             r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
@@ -2329,6 +2599,65 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_and_grok_connections_always_use_an_entered_base_url() {
+        for upstream in [
+            super::Sub2ApiUpstream::Antigravity,
+            super::Sub2ApiUpstream::Grok,
+        ] {
+            let mut input = Sub2ApiConfigInput {
+                provider_source: None,
+                use_provider_key: false,
+                mode: super::Sub2ApiMode::Admin,
+                api_key: String::new(),
+                base_url: "https://relay.example.com/api/v1/".into(),
+                codex_provider: String::new(),
+                custom_base_url: false,
+                email: "admin@example.com".into(),
+                password: "secret".into(),
+                upstream,
+            };
+            assert_eq!(
+                connection_target(&input, |_| unreachable!(), |_| unreachable!()).unwrap(),
+                ("https://relay.example.com".into(), String::new(), true)
+            );
+            input.codex_provider = "work".into();
+            assert_eq!(
+                connection_target(&input, |_| unreachable!(), |_| unreachable!()).unwrap_err(),
+                Sub2ApiError::ProviderWithCustomBaseUrl
+            );
+
+            let config = admin_config("https://relay.example.com".into(), upstream);
+            let stored: StoredConfig = serde_json::from_value(serde_json::json!({
+                "base_url": config.base_url,
+                "email": config.email,
+                "password": config.password,
+                "upstream": upstream.provider_id(),
+                "custom_base_url": false
+            }))
+            .unwrap();
+            assert_eq!(stored.upstream, upstream);
+            assert!(stored.state().custom_base_url);
+
+            // The instance address can still come from a Codex or Claude provider.
+            input.provider_source = Some(super::Sub2ApiUpstream::Codex);
+            assert_eq!(
+                connection_target(
+                    &input,
+                    |name| Ok(format!("https://{name}.example.com")),
+                    |_| unreachable!()
+                )
+                .unwrap(),
+                ("https://work.example.com".into(), "work".into(), false)
+            );
+            let mut stored = admin_config("https://work.example.com".into(), upstream);
+            stored.custom_base_url = false;
+            stored.codex_provider = "work".into();
+            stored.provider_source = Some(super::Sub2ApiUpstream::Codex);
+            assert!(!stored.state().custom_base_url);
+        }
+    }
+
+    #[test]
     fn legacy_claude_connections_expose_custom_mode_without_changing_named_providers() {
         let mut config: StoredConfig = serde_json::from_str(
             r#"{"base_url":"https://saved.example.com","email":"admin@example.com","password":"secret","upstream":"claude","custom_base_url":false}"#,
@@ -2361,7 +2690,7 @@ mod tests {
             credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
             "saved"
         );
-        input.upstream = super::Sub2ApiUpstream::Claude;
+        input.upstream = super::Sub2ApiUpstream::Grok;
         input.provider_source = Some(super::Sub2ApiUpstream::Codex);
         assert_eq!(
             credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
@@ -2386,6 +2715,32 @@ mod tests {
         input.api_key.clear();
         input.use_provider_key = false;
         input.codex_provider = "another-provider".into();
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn an_entered_subscription_key_follows_a_changed_upstream_mark() {
+        let previous: StoredConfig = serde_json::from_value(serde_json::json!({
+            "mode":"subscription", "api_key":"saved", "upstream":"codex",
+            "base_url":"https://relay.example", "custom_base_url":true, "email":"", "password":""
+        }))
+        .unwrap();
+        let mut input: Sub2ApiConfigInput = serde_json::from_value(serde_json::json!({
+            "mode":"subscription", "upstream":"antigravity", "baseUrl":"https://relay.example",
+            "customBaseUrl":true, "codexProvider":"", "email":"", "password":""
+        }))
+        .unwrap();
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            "saved"
+        );
+        // A key read with a named provider stays scoped to that provider's upstream.
+        input.custom_base_url = false;
+        input.upstream = super::Sub2ApiUpstream::Claude;
+        input.codex_provider = "relay".into();
         assert_eq!(
             credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
             ""
@@ -2667,6 +3022,127 @@ mod tests {
                 .tokens,
             7000
         );
+    }
+
+    fn admin_config(base_url: String, upstream: super::Sub2ApiUpstream) -> StoredConfig {
+        StoredConfig {
+            provider_source: None,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
+            base_url,
+            codex_provider: String::new(),
+            custom_base_url: true,
+            email: "admin@example.com".into(),
+            password: "password".into(),
+            upstream,
+            metric_template_version: super::METRIC_TEMPLATE_VERSION,
+        }
+    }
+
+    #[test]
+    fn antigravity_accounts_show_both_pools_and_keep_unusable_accounts() {
+        let now = Utc::now();
+        let five_hours = (now + chrono::Duration::hours(3)).to_rfc3339();
+        let week = (now + chrono::Duration::days(3)).to_rfc3339();
+        let quota = serde_json::json!({"code":0,"data":{
+            "updated_at": now.to_rfc3339(),
+            "subscription_tier": "PRO",
+            "antigravity_quota_groups": [
+                {"key":"gemini","windows":[
+                    {"window":"5h","utilization":20,"resets_at":five_hours},
+                    {"window":"weekly","utilization":5,"resets_at":week}]},
+                {"key":"3p","windows":[
+                    {"window":"5h","utilization":40,"resets_at":five_hours},
+                    {"window":"weekly","utilization":52,"resets_at":week}]}
+            ]
+        }})
+        .to_string();
+        let (base_url, requests, worker) = serve_sequence(vec![
+            r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
+            r#"{"code":0,"data":{"items":[{"id":6,"name":"agy"},{"id":9,"name":"banned"}],"total":2}}"#.into(),
+            quota,
+            r#"{"code":0,"data":{"is_forbidden":true,"forbidden_reason":"Google disabled the account"}}"#.into(),
+            usage_data(6, now), usage_data(9, now),
+        ]);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("configured"),
+            true,
+            test_pricing(),
+        );
+        let config = admin_config(base_url, super::Sub2ApiUpstream::Antigravity);
+        let snapshot = provider.refresh_snapshot(&config).unwrap();
+        worker.join().unwrap();
+
+        let sent: Vec<String> = requests.try_iter().collect();
+        assert!(sent[1].contains("platform=antigravity"));
+        assert!(sent[2].starts_with("GET /api/v1/admin/accounts/6/usage "));
+        assert!(sent[3].starts_with("GET /api/v1/admin/accounts/9/usage "));
+        let accounts = snapshot.accounts.unwrap();
+        assert_eq!(accounts[0].name, "Sub2API · Antigravity · agy");
+        assert_eq!(accounts[0].snapshot.plan.as_deref(), Some("Pro"));
+        assert_eq!(
+            accounts[0]
+                .snapshot
+                .quotas
+                .iter()
+                .map(|quota| (quota.id.as_str(), quota.used_percent))
+                .collect::<Vec<_>>(),
+            [
+                ("session", 20.0),
+                ("weekly", 5.0),
+                ("claude", 40.0),
+                ("claudeWeekly", 52.0)
+            ]
+        );
+        assert!(accounts[1].snapshot.quotas.is_empty());
+        assert_eq!(
+            accounts[1].snapshot.warnings,
+            ["Google disabled the account"]
+        );
+        assert!(accounts[1].snapshot.usage_histories.account.is_some());
+    }
+
+    #[test]
+    fn grok_accounts_show_their_billing_period() {
+        let now = Utc::now();
+        let quota = serde_json::json!({"code":0,"data":{
+            "seven_day": {"utilization": 88, "resets_at": (now + chrono::Duration::days(4)).to_rfc3339()},
+            "grok_billing": {"period_type":"weekly","usage_percent":88}
+        }})
+        .to_string();
+        let (base_url, requests, worker) = serve_sequence(vec![
+            r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
+            r#"{"code":0,"data":{"items":[{"id":7,"name":"grok"}],"total":1}}"#.into(),
+            quota,
+            usage_data(7, now),
+        ]);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("configured"),
+            true,
+            test_pricing(),
+        );
+        let config = admin_config(base_url, super::Sub2ApiUpstream::Grok);
+        let snapshot = provider.refresh_snapshot(&config).unwrap();
+        worker.join().unwrap();
+
+        let sent: Vec<String> = requests.try_iter().collect();
+        assert!(sent[1].contains("platform=grok"));
+        assert!(sent[2].starts_with("GET /api/v1/admin/accounts/7/usage "));
+        let accounts = snapshot.accounts.unwrap();
+        assert_eq!(accounts[0].name, "Sub2API · Grok · grok");
+        let weekly = &accounts[0].snapshot.quotas;
+        assert_eq!(weekly.len(), 1);
+        assert_eq!(
+            (weekly[0].id.as_str(), weekly[0].used_percent),
+            ("weekly", 88.0)
+        );
+        assert!(weekly[0].resets_at.is_some());
     }
 
     #[tokio::test]

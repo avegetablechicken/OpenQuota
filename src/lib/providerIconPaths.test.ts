@@ -4,7 +4,7 @@ import { providerIconColor, providerSpendColorVariable } from './providerIconPat
 import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
 
 describe('Sub2API account colors', () => {
-  it.each(['codex', 'claude'] as const)(
+  it.each(['codex', 'claude', 'antigravity', 'grok'] as const)(
     'gives all eight %s accounts distinct chart colors while preserving the original icon color',
     (upstream) => {
       const colors = Array.from({ length: 8 }, (_, index) => {

@@ -213,7 +213,7 @@ export interface Sub2ApiConfigState {
   providerSource?: Sub2ApiUpstream | null;
 }
 
-export type Sub2ApiUpstream = 'codex' | 'claude';
+export type Sub2ApiUpstream = 'codex' | 'claude' | 'antigravity' | 'grok';
 
 export interface Sub2ApiConfigInput {
   useProviderKey?: boolean;
