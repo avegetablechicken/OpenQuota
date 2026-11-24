@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use rusqlite::params;
 
 use chrono::{DateTime, Days, Local, NaiveDate, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
+    cache::{utc_start, UsageCache},
     classify_status, transport_error, Envelope, Sub2ApiClient, Sub2ApiError, Sub2ApiUpstream,
 };
 use crate::{
@@ -12,16 +13,16 @@ use crate::{
 };
 
 pub(super) const SOURCE: &str = "From Sub2API usage logs at upstream model prices";
-const MAX_USAGE_PAGES: usize = 1_000;
-const MAX_PAGINATION_ATTEMPTS: usize = 2;
+const PAGE_SIZE: usize = 128;
 
 #[derive(Deserialize)]
 struct UsagePage {
     items: Vec<UsageLog>,
     total: usize,
+    page_size: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct UsageLog {
     id: i64,
     account_id: i64,
@@ -151,136 +152,265 @@ impl UsageLog {
 }
 
 impl Sub2ApiClient {
+    fn usage_page(
+        &self,
+        base: &reqwest::Url,
+        token: &str,
+        page: usize,
+        size: usize,
+    ) -> Result<UsagePage, Sub2ApiError> {
+        let mut url = base.clone();
+        url.query_pairs_mut()
+            .append_pair("page_size", &size.to_string())
+            .append_pair("sort_order", "asc")
+            .append_pair("page", &page.to_string());
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .header("Accept", "application/json")
+            .send()
+            .map_err(|err| transport_error("upstream usage records", &err))?;
+        if !response.status().is_success() {
+            return Err(classify_status(response.status()));
+        }
+        let envelope = response
+            .json::<Envelope<UsagePage>>()
+            .map_err(|_| Sub2ApiError::InvalidResponse)?;
+        if envelope.code != 0 {
+            return Err(Sub2ApiError::InvalidResponse);
+        }
+        envelope.data.ok_or(Sub2ApiError::InvalidResponse)
+    }
+
+    /// Prices request records from the account's covered local date onward and returns
+    /// that date. Days before it are left to the caller, which uses the server's
+    /// summary. A requested backfill extends coverage within a per-refresh page budget.
     pub(super) fn priced_usage(
         &self,
         token: &str,
-        account_id: i64,
+        account: &super::Sub2ApiAccount,
         upstream: Sub2ApiUpstream,
         now: DateTime<Utc>,
         pricing: &ModelPricing,
-    ) -> Result<Vec<PricedUsage>, Sub2ApiError> {
-        self.priced_usage_with_max_pages(token, account_id, upstream, now, pricing, MAX_USAGE_PAGES)
-    }
-
-    fn priced_usage_with_max_pages(
-        &self,
-        token: &str,
-        account_id: i64,
-        upstream: Sub2ApiUpstream,
-        now: DateTime<Utc>,
-        pricing: &ModelPricing,
-        max_pages: usize,
-    ) -> Result<Vec<PricedUsage>, Sub2ApiError> {
+        cache: &mut UsageCache,
+    ) -> Result<(Vec<PricedUsage>, NaiveDate), Sub2ApiError> {
         let today = now.with_timezone(&Local).date_naive();
         let since = today
             .checked_sub_days(Days::new(29))
             .unwrap_or(NaiveDate::MIN);
-        // Query a UTC envelope and apply the local calendar boundary to each timestamp.
-        let mut base = self.endpoint(&["api", "v1", "admin", "usage"])?;
-        base.query_pairs_mut()
-            .append_pair("account_id", &account_id.to_string())
-            .append_pair("start_date", &since.pred_opt().unwrap_or(since).to_string())
-            .append_pair("end_date", &now.date_naive().to_string())
-            .append_pair("timezone", "UTC")
-            .append_pair("page_size", "1000")
-            .append_pair("sort_by", "id")
-            .append_pair("sort_order", "asc");
-        for attempt in 1..=MAX_PAGINATION_ATTEMPTS {
-            match self.priced_usage_attempt(
-                &base, token, account_id, upstream, now, since, pricing, max_pages,
-            ) {
-                Ok(rows) => return Ok(rows),
-                Err(PaginationFailure::Retryable) if attempt < MAX_PAGINATION_ATTEMPTS => continue,
-                Err(PaginationFailure::Retryable) => return Err(Sub2ApiError::InvalidResponse),
-                Err(PaginationFailure::Fatal(error)) => return Err(error),
+        let account_id = account.id;
+        let window_start = utc_start(since);
+        let end = now.date_naive();
+        cache.db.execute(
+            "DELETE FROM records WHERE day < ?1",
+            [window_start.to_string()],
+        )?;
+        let mut covered = cache.coverage(account_id, since, today)?;
+        let mut start = utc_start(covered);
+        // Older servers may omit last_used_at. A one-row boundary check also catches
+        // retention/administrative changes periodically on servers that expose it.
+        let fresh: bool = cache.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM synced
+             WHERE account=?1 AND activity=?2 AND start=?3 AND end=?4 AND checked BETWEEN ?5 AND ?6)",
+            params![account_id, account.last_used_at, start.to_string(), end.to_string(),
+                    now.timestamp() - 3600, now.timestamp()],
+            |row| row.get(0),
+        )?;
+        if !fresh {
+            cache
+                .db
+                .execute("DELETE FROM synced WHERE account=?1", [account_id])?;
+            self.sync_range(token, account_id, start, end, cache, false)?;
+        }
+        let mut complete = true;
+        if covered > since && cache.backfill_requested() {
+            // Earlier days form a closed range, so a partial backfill is a stable prefix
+            // that the next refresh resumes. Its rows are priced only once it completes.
+            let synced = match start.pred_opt().filter(|last| *last >= window_start) {
+                Some(last) => self.sync_range(token, account_id, window_start, last, cache, true),
+                None => Ok(()),
+            };
+            match synced {
+                Ok(()) => {
+                    cache.set_coverage(account_id, since)?;
+                    covered = since;
+                    start = window_start;
+                }
+                Err(Sub2ApiError::HistorySyncPending) => {
+                    cache.mark_backfill_incomplete();
+                    complete = false;
+                }
+                Err(error) => return Err(error),
             }
         }
-        Err(Sub2ApiError::InvalidResponse)
+        if !fresh && complete {
+            if let Some(activity) = &account.last_used_at {
+                cache.db.execute(
+                    "INSERT INTO synced(account,activity,start,end,checked) VALUES(?1,?2,?3,?4,?5)",
+                    params![
+                        account_id,
+                        activity,
+                        start.to_string(),
+                        end.to_string(),
+                        now.timestamp()
+                    ],
+                )?;
+            }
+        }
+        let mut statement = cache.db.prepare(
+            "SELECT payload FROM records WHERE account=?1 AND day BETWEEN ?2 AND ?3 ORDER BY id",
+        )?;
+        let mut records =
+            statement.query(params![account_id, start.to_string(), end.to_string()])?;
+        let mut priced = Vec::new();
+        while let Some(record) = records.next()? {
+            let payload: String = record.get(0)?;
+            let row: UsageLog =
+                serde_json::from_str(&payload).map_err(|_| Sub2ApiError::HistoryCache)?;
+            if row.created_at <= now && row.created_at.with_timezone(&Local).date_naive() >= covered
+            {
+                priced.extend(row.priced(upstream, pricing));
+            }
+        }
+        Ok((priced, covered))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn priced_usage_attempt(
+    fn sync_range(
         &self,
-        base: &reqwest::Url,
         token: &str,
         account_id: i64,
-        upstream: Sub2ApiUpstream,
-        now: DateTime<Utc>,
-        since: NaiveDate,
-        pricing: &ModelPricing,
-        max_pages: usize,
-    ) -> Result<Vec<PricedUsage>, PaginationFailure> {
-        let mut rows = Vec::new();
-        let mut seen = HashSet::new();
-        let mut previous_total = None;
-        let mut page = 1_usize;
-        loop {
-            let mut url = base.clone();
-            url.query_pairs_mut().append_pair("page", &page.to_string());
-            let response = self
-                .client
-                .get(url)
-                .bearer_auth(token)
-                .header("Accept", "application/json")
-                .send()
-                .map_err(|err| {
-                    PaginationFailure::Fatal(transport_error("upstream usage records", &err))
-                })?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(PaginationFailure::Fatal(classify_status(status)));
+        from: NaiveDate,
+        to: NaiveDate,
+        cache: &mut UsageCache,
+        budgeted: bool,
+    ) -> Result<(), Sub2ApiError> {
+        let start = from.to_string();
+        let end = to.to_string();
+        let mut url = self.endpoint(&["api", "v1", "admin", "usage"])?;
+        url.query_pairs_mut()
+            .append_pair("account_id", &account_id.to_string())
+            .append_pair("start_date", &start)
+            .append_pair("end_date", &end)
+            .append_pair("timezone", "UTC")
+            .append_pair("exact_total", "true")
+            .append_pair("sort_by", "id");
+        let (count, mut last_id): (i64, i64) = cache.db.query_row(
+            "SELECT count(*), coalesce(max(id),0) FROM records
+             WHERE account=?1 AND day BETWEEN ?2 AND ?3",
+            params![account_id, start, end],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let mut offset = usize::try_from(count).map_err(|_| Sub2ApiError::HistoryCache)?;
+
+        // The API exposes numbered pages, not an ID cursor. Verify the record at our
+        // saved offset before using it. Appends preserve this prefix, deletions do not.
+        let mut total;
+        let mut page_limit = PAGE_SIZE;
+        if offset > 0 {
+            let boundary = self.usage_page(&url, token, offset, 1)?;
+            total = boundary.total;
+            if boundary.items.len() != usize::from(total >= offset)
+                || boundary
+                    .items
+                    .iter()
+                    .any(|r| r.account_id != account_id || r.id <= 0)
+            {
+                return Err(Sub2ApiError::InvalidResponse);
             }
-            let envelope = response
-                .json::<Envelope<UsagePage>>()
-                .map_err(|_| PaginationFailure::Fatal(Sub2ApiError::InvalidResponse))?;
-            if envelope.code != 0 {
-                return Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse));
-            }
-            let result = envelope
-                .data
-                .ok_or(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse))?;
-            if previous_total.is_some_and(|prev| result.total < prev) {
-                return Err(PaginationFailure::Retryable);
-            }
-            previous_total = Some(result.total);
-            let page_empty = result.items.is_empty();
-            let previous = seen.len();
-            for row in result.items {
-                if row.account_id != account_id || row.id <= 0 {
-                    return Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse));
+            if boundary.items.first().map(|r| r.id) != Some(last_id) {
+                if from < to {
+                    // A retention change moved an offset. Reconcile individual UTC days
+                    // so a deletion on one day cannot invalidate the rest of the month.
+                    let mut day = from;
+                    loop {
+                        self.sync_range(token, account_id, day, day, cache, budgeted)?;
+                        if day == to {
+                            return Ok(());
+                        }
+                        day = day.succ_opt().ok_or(Sub2ApiError::InvalidResponse)?;
+                    }
                 }
-                if !seen.insert(row.id)
-                    || row.created_at > now
-                    || row.created_at.with_timezone(&Local).date_naive() < since
-                {
-                    continue;
-                }
-                rows.extend(row.priced(upstream, pricing));
+                cache.db.execute(
+                    "DELETE FROM records WHERE account=?1 AND day BETWEEN ?2 AND ?3",
+                    params![account_id, start, end],
+                )?;
+                offset = 0;
+                last_id = 0;
             }
-            if seen.len() >= result.total {
-                return Ok(rows);
-            }
-            if page_empty {
-                return if page == 1 {
-                    Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse))
-                } else {
-                    Err(PaginationFailure::Retryable)
-                };
-            }
-            if seen.len() == previous {
-                return Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse));
-            }
-            if page >= max_pages {
-                return Err(PaginationFailure::Fatal(Sub2ApiError::InvalidResponse));
-            }
-            page += 1;
+        } else {
+            total = 0;
         }
+        if offset == 0 {
+            if budgeted {
+                cache.take_page()?;
+            }
+            let first = self.usage_page(&url, token, 1, PAGE_SIZE)?;
+            total = first.total;
+            offset = first.items.len();
+            page_limit = first.page_size.unwrap_or(PAGE_SIZE).min(PAGE_SIZE);
+            if page_limit == 0 || offset != total.min(page_limit) {
+                return Err(Sub2ApiError::InvalidResponse);
+            }
+            if first.items.is_empty() {
+                return Ok(());
+            }
+            last_id = store_page(cache, account_id, &start, &end, last_id, first.items)?;
+        }
+        while offset < total {
+            if budgeted {
+                cache.take_page()?;
+            }
+            // Choose an aligned size so the first returned row is exactly the first
+            // missing offset, including on servers that only support page/page_size.
+            let mut size = PAGE_SIZE;
+            while size > page_limit || size > total - offset || !offset.is_multiple_of(size) {
+                size /= 2;
+            }
+            let page = self.usage_page(&url, token, offset / size + 1, size)?;
+            if let Some(limit) = page.page_size.filter(|limit| *limit > 0 && *limit < size) {
+                // A capped page uses the server's offset. Recompute it before accepting rows.
+                page_limit = limit;
+                continue;
+            }
+            if page.total < total || page.items.len() != size {
+                return Err(Sub2ApiError::InvalidResponse);
+            }
+            last_id = store_page(cache, account_id, &start, &end, last_id, page.items)?;
+            offset += size;
+        }
+        Ok(())
     }
 }
 
-enum PaginationFailure {
-    Retryable,
-    Fatal(Sub2ApiError),
+fn store_page(
+    cache: &mut UsageCache,
+    account_id: i64,
+    start: &str,
+    end: &str,
+    mut last_id: i64,
+    rows: Vec<UsageLog>,
+) -> Result<i64, Sub2ApiError> {
+    let tx = cache.db.transaction()?;
+    for row in rows {
+        let day = row.created_at.date_naive().to_string();
+        if row.account_id != account_id
+            || row.id <= last_id
+            || day.as_str() < start
+            || day.as_str() > end
+        {
+            return Err(Sub2ApiError::InvalidResponse);
+        }
+        last_id = row.id;
+        let payload = serde_json::to_string(&row).map_err(|_| Sub2ApiError::HistoryCache)?;
+        tx.execute(
+            "INSERT INTO records(account,id,day,payload) VALUES(?1,?2,?3,?4)",
+            params![account_id, row.id, day, payload],
+        )?;
+    }
+    tx.commit()?;
+    Ok(last_id)
 }
 
 #[cfg(test)]
@@ -325,205 +455,299 @@ mod tests {
         assert_eq!(unknown.tokens, 118000);
     }
 
+    fn usage_page(ids: impl IntoIterator<Item = i64>, total: usize, now: DateTime<Utc>) -> String {
+        let rows: Vec<_> = ids
+            .into_iter()
+            .map(|id| {
+                json!({
+                    "id":id, "account_id":7, "model":"gpt-6.2-sol", "created_at":now,
+                    "input_tokens":100, "output_tokens":1, "request_id":"unused-server-field"
+                })
+            })
+            .collect();
+        json!({"code":0,"data":{"items":rows,"total":total}}).to_string()
+    }
+
     #[test]
-    fn pages_deduplicate_ids_and_filter_by_account_and_time() {
-        let now: DateTime<Utc> = "2026-11-20T12:00:00Z".parse().unwrap();
-        let entry = |id, date| json!({"id":id,"account_id":7,"created_at":date,"model":"gpt-6.2-sol","input_tokens":100,"output_tokens":10});
-        let first = entry(1, "2026-11-18T12:00:00Z");
-        let second = entry(2, "2026-11-19T12:00:00Z");
-        let page = |rows: Vec<serde_json::Value>, total| {
-            json!({"code":0,"data":{"items":rows,"total":total}}).to_string()
-        };
+    fn resumes_after_restart_and_downloads_only_the_appended_rows() {
+        let now = Utc::now();
         let (base, requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![first.clone(), second.clone()], 4),
-            page(
-                vec![
-                    second.clone(),
-                    entry(3, "2026-10-01T12:00:00Z"),
-                    entry(4, "2026-11-20T13:00:00Z"),
-                ],
-                4,
-            ),
+            usage_page(1..=128, 130, now),
+            usage_page([129, 129], 130, now), // Invalid second row rolls the entire page back.
+            usage_page([128], 131, now),
+            usage_page([129, 130], 131, now),
+            usage_page([131], 131, now),
+            usage_page([131], 132, now),
+            usage_page([132], 132, now),
+            usage_page([132], 132, now),
         ]);
+        let client = Sub2ApiClient::new(&base).unwrap();
         let pricing = test_bundled_pricing();
-        let fetch = |base: &str| {
-            Sub2ApiClient::new(base).unwrap().priced_usage(
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.sqlite3");
+        let fetch = |activity: Option<&str>, time| {
+            let mut cache = UsageCache::open(&path, "instance-a").unwrap();
+            let account = super::super::Sub2ApiAccount {
+                id: 7,
+                name: "test".into(),
+                last_used_at: activity.map(str::to_owned),
+            };
+            client.priced_usage(
                 "token",
-                7,
+                &account,
                 Sub2ApiUpstream::Codex,
-                now,
+                time,
                 &pricing,
+                &mut cache,
             )
         };
-        assert_eq!(fetch(&base).unwrap().len(), 2);
+        assert!(matches!(
+            fetch(Some("A"), now),
+            Err(Sub2ApiError::InvalidResponse)
+        ));
+        assert_eq!(fetch(Some("A"), now).unwrap().0.len(), 131);
+        assert_eq!(fetch(Some("A"), now).unwrap().0.len(), 131); // Another restart, no request.
+        assert_eq!(fetch(Some("B"), now).unwrap().0.len(), 132);
+        assert_eq!(fetch(None, now).unwrap().0.len(), 132); // Legacy server: one row verifies the cache.
         worker.join().unwrap();
-        assert!(requests.recv().unwrap().contains("page=1 "));
-        assert!(requests.recv().unwrap().contains("page=2 "));
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![first.clone()], 2),
-            page(vec![first.clone()], 2),
-        ]);
-        assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
-        worker.join().unwrap();
-        let mut foreign = first;
-        foreign["account_id"] = 8.into();
-        let (base, _requests, worker) =
-            super::super::tests::serve_sequence(vec![page(vec![foreign], 1)]);
-        assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
-        worker.join().unwrap();
-    }
-
-    #[test]
-    fn pagination_handles_log_pruning_shrinking_total_and_empty_trailing_page() {
-        let now: DateTime<Utc> = "2026-11-20T12:00:00Z".parse().unwrap();
-        let entry = |id, date| {
-            json!({
-                "id": id,
-                "account_id": 7,
-                "created_at": date,
-                "model": "gpt-6.2-sol",
-                "input_tokens": 100,
-                "output_tokens": 10
+        let sizes_and_pages: Vec<_> = requests
+            .try_iter()
+            .map(|r| {
+                let path = r.split_whitespace().nth(1).unwrap();
+                let url = reqwest::Url::parse(&format!("http://localhost{path}")).unwrap();
+                let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+                (
+                    query["page_size"].parse::<usize>().unwrap(),
+                    query["page"].parse::<usize>().unwrap(),
+                )
             })
-        };
-        let page = |rows: Vec<serde_json::Value>, total| {
-            json!({"code":0,"data":{"items":rows,"total":total}}).to_string()
-        };
-        let pricing = test_bundled_pricing();
-        let fetch = |base: &str| {
-            Sub2ApiClient::new(base).unwrap().priced_usage(
-                "token",
-                7,
-                Sub2ApiUpstream::Codex,
-                now,
-                &pricing,
-            )
-        };
-
-        // Subcase A: total shrinks between page 1 and page 2 due to log pruning
-        // (even when seen.len() >= result.total on page 2); retry from page 1 so
-        // shifted offsets cannot drop surviving rows or retain pruned rows.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
-            page(vec![], 1),
-            page(vec![entry(2, "2026-11-19T12:00:00Z")], 1),
-        ]);
-        let rows = fetch(&base).unwrap();
-        assert_eq!(rows.len(), 1);
+            .collect();
         assert_eq!(
-            rows[0].date,
-            "2026-11-19T12:00:00Z"
-                .parse::<DateTime<Utc>>()
-                .unwrap()
-                .with_timezone(&Local)
-                .date_naive()
+            sizes_and_pages,
+            [
+                (128, 1),
+                (2, 65),
+                (1, 128),
+                (2, 65),
+                (1, 131),
+                (1, 131),
+                (1, 132),
+                (1, 132)
+            ]
         );
-        worker.join().unwrap();
-
-        // Subcase A2: total rises on page 2 then shrinks on page 3 (e.g. 2001 -> 2003 -> 2002);
-        // comparing against the previous page's total catches the deletion and retries from page 1.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![entry(1, "2026-11-18T12:00:00Z")], 3),
-            page(vec![entry(2, "2026-11-18T13:00:00Z")], 4),
-            page(vec![entry(3, "2026-11-19T12:00:00Z")], 3),
-            page(vec![entry(2, "2026-11-18T13:00:00Z")], 3),
-            page(vec![entry(3, "2026-11-19T12:00:00Z")], 3),
-            page(vec![entry(4, "2026-11-20T11:00:00Z")], 3),
-        ]);
-        let rows = fetch(&base).unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(
-            rows.last().unwrap().date,
-            "2026-11-20T11:00:00Z"
-                .parse::<DateTime<Utc>>()
-                .unwrap()
-                .with_timezone(&Local)
-                .date_naive()
-        );
-        worker.join().unwrap();
-
-        // Subcase A3: persistent total shrink across all retry attempts fails
-        // instead of publishing an inconsistent snapshot.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![entry(1, "2026-11-18T12:00:00Z")], 3),
-            page(vec![entry(2, "2026-11-19T12:00:00Z")], 2),
-            page(vec![entry(2, "2026-11-19T12:00:00Z")], 2),
-            page(vec![], 1),
-        ]);
-        assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
-        worker.join().unwrap();
-
-        // Subcase B: trailing page is empty while total still reports more rows;
-        // a bounded retry succeeds once the server's total settles.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
-            page(vec![], 2),
-            page(vec![entry(1, "2026-11-18T12:00:00Z")], 1),
-        ]);
-        assert_eq!(fetch(&base).unwrap().len(), 1);
-        worker.join().unwrap();
-
-        // Subcase C: persistent empty trailing page contradicting total fails
-        // so callers keep the previous complete snapshot instead of publishing truncated data.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
-            page(vec![], 2),
-            page(vec![entry(1, "2026-11-18T12:00:00Z")], 2),
-            page(vec![], 2),
-        ]);
-        assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
-        worker.join().unwrap();
-
-        // Subcase D: empty page 1 contradicting total > 0 is invalid without retrying.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![page(vec![], 2)]);
-        assert!(matches!(fetch(&base), Err(Sub2ApiError::InvalidResponse)));
-        worker.join().unwrap();
-
-        // Subcase E: empty page 1 with total == 0 succeeds with empty rows.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![page(vec![], 0)]);
-        assert!(fetch(&base).unwrap().is_empty());
-        worker.join().unwrap();
-    }
-
-    #[test]
-    fn pagination_rejects_responses_exceeding_max_usage_pages() {
-        let now: DateTime<Utc> = "2026-11-20T12:00:00Z".parse().unwrap();
-        let entry = |id| {
-            json!({
-                "id": id,
-                "account_id": 7,
-                "created_at": "2026-11-19T12:00:00Z",
-                "model": "gpt-6.2-sol",
-                "input_tokens": 100,
-                "output_tokens": 10
-            })
-        };
-        let page = |rows: Vec<serde_json::Value>, total| {
-            json!({"code":0,"data":{"items":rows,"total":total}}).to_string()
-        };
-        let pricing = test_bundled_pricing();
-
-        // Exactly max_pages (2) succeeds.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![entry(1)], 2),
-            page(vec![entry(2)], 2),
-        ]);
-        let rows = Sub2ApiClient::new(&base)
-            .unwrap()
-            .priced_usage_with_max_pages("token", 7, Sub2ApiUpstream::Codex, now, &pricing, 2)
+        let cache = UsageCache::open(&path, "instance-b").unwrap();
+        let count: i64 = cache
+            .db
+            .query_row("SELECT count(*) FROM records", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows.len(), 2);
-        worker.join().unwrap();
+        assert_eq!(count, 0);
+    }
 
-        // Exceeding max_pages (2) fails without requesting page 3.
-        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
-            page(vec![entry(1)], 3),
-            page(vec![entry(2)], 3),
+    #[test]
+    fn a_new_account_syncs_only_today_and_backfills_the_month_only_on_request() {
+        let now = Utc::now();
+        let past = now - chrono::Duration::days(5);
+        let today = now.with_timezone(&Local).date_naive();
+        let since = today.checked_sub_days(Days::new(29)).unwrap();
+        let (base, requests, worker) = super::super::tests::serve_sequence(vec![
+            usage_page([1000], 1, now),
+            usage_page(1..=128, 200, past), // The budget ends after this page.
+            usage_page([128], 200, past),
+            usage_page(129..=192, 200, past),
+            usage_page(193..=200, 200, past),
         ]);
-        let result = Sub2ApiClient::new(&base)
+        let client = Sub2ApiClient::new(&base).unwrap();
+        let pricing = test_bundled_pricing();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.sqlite3");
+        let account = super::super::Sub2ApiAccount {
+            id: 7,
+            name: "test".into(),
+            last_used_at: Some("A".into()),
+        };
+        let fetch = |cache: &mut UsageCache| {
+            client
+                .priced_usage(
+                    "token",
+                    &account,
+                    Sub2ApiUpstream::Codex,
+                    now,
+                    &pricing,
+                    cache,
+                )
+                .unwrap()
+        };
+
+        let (rows, covered) = fetch(&mut UsageCache::open(&path, "scope").unwrap());
+        assert_eq!((rows.len(), covered), (1, today));
+        let summary = UsageCache::coverage_summary(&path, "scope", since).unwrap();
+        assert_eq!(summary.priced_from, Some(today));
+        assert!(!summary.backfill_pending);
+
+        UsageCache::request_backfill(&path, "scope").unwrap();
+        let mut cache = UsageCache::open(&path, "scope").unwrap();
+        for _ in 0..15 {
+            cache.take_page().unwrap();
+        }
+        let (rows, covered) = fetch(&mut cache);
+        assert_eq!((rows.len(), covered), (1, today)); // Partial pages stay unpriced.
+        cache.finish_backfill().unwrap();
+        assert!(
+            UsageCache::coverage_summary(&path, "scope", since)
+                .unwrap()
+                .backfill_pending
+        );
+
+        let mut cache = UsageCache::open(&path, "scope").unwrap();
+        let (rows, covered) = fetch(&mut cache);
+        assert_eq!((rows.len(), covered), (201, since));
+        cache.finish_backfill().unwrap();
+        let summary = UsageCache::coverage_summary(&path, "scope", since).unwrap();
+        assert_eq!(summary.priced_from, Some(since));
+        assert!(!summary.backfill_pending);
+        assert!(!UsageCache::open(&path, "scope")
             .unwrap()
-            .priced_usage_with_max_pages("token", 7, Sub2ApiUpstream::Codex, now, &pricing, 2);
-        assert!(matches!(result, Err(Sub2ApiError::InvalidResponse)));
+            .backfill_requested());
+
+        worker.join().unwrap();
+        let seen: Vec<_> = requests.try_iter().collect();
+        assert_eq!(seen.len(), 5);
+        assert!(seen[0].contains(&format!("start_date={}&", utc_start(today))));
+        let last_uncovered = utc_start(today).pred_opt().unwrap();
+        assert!(seen[1].contains(&format!(
+            "start_date={}&end_date={last_uncovered}&",
+            utc_start(since)
+        )));
+        assert!(seen[2].contains("page_size=1&") && seen[2].contains("page=128 "));
+    }
+
+    #[test]
+    fn an_account_an_earlier_version_fully_synced_keeps_its_whole_window() {
+        let cache = UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
+        let today = Local::now().date_naive();
+        let since = today.checked_sub_days(Days::new(29)).unwrap();
+        cache
+            .db
+            .execute(
+                "INSERT INTO synced(account,activity,start,end,checked) VALUES(7,'A','x','y',0)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(cache.coverage(7, since, today).unwrap(), since);
+        assert_eq!(cache.coverage(8, since, today).unwrap(), today);
+    }
+
+    #[test]
+    fn a_pruned_day_is_repaired_without_reloading_unchanged_days() {
+        let now = Utc::now();
+        let day = now.date_naive();
+        let prev = now - chrono::Duration::days(1);
+        let (base, requests, worker) = super::super::tests::serve_sequence(vec![
+            usage_page([1], 1, prev),
+            usage_page([2, 3], 2, now),
+            usage_page([], 2, now), // Old offset three no longer exists.
+            usage_page([1], 1, prev),
+            usage_page([], 1, now),
+            usage_page([3], 1, now),
+        ]);
+        let client = Sub2ApiClient::new(&base).unwrap();
+        let mut cache = UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
+        for (from, to) in [
+            (prev.date_naive(), prev.date_naive()),
+            (day, day),
+            (prev.date_naive(), day),
+        ] {
+            client
+                .sync_range("token", 7, from, to, &mut cache, false)
+                .unwrap();
+        }
+        let ids: Vec<i64> = cache
+            .db
+            .prepare("SELECT id FROM records ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, [1, 3]);
+        worker.join().unwrap();
+        let seen: Vec<_> = requests.try_iter().collect();
+        assert!(seen[3].contains("page_size=1&"));
+        assert!(seen[5].contains(&format!("start_date={day}&end_date={day}")));
+    }
+
+    #[test]
+    fn a_limited_backfill_resumes_at_the_saved_offset() {
+        let now = Utc::now();
+        let (base, requests, worker) = super::super::tests::serve_sequence(vec![
+            usage_page(1..=128, 129, now),
+            usage_page([128], 129, now),
+            usage_page([129], 129, now),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let client = Sub2ApiClient::new(&base).unwrap();
+        let mut cache = UsageCache::open(&path, "test").unwrap();
+        for _ in 0..15 {
+            cache.take_page().unwrap();
+        }
+        let day = now.date_naive();
+        assert_eq!(
+            client.sync_range("token", 7, day, day, &mut cache, true),
+            Err(Sub2ApiError::HistorySyncPending)
+        );
+        drop(cache);
+        let mut cache = UsageCache::open(&path, "test").unwrap();
+        client
+            .sync_range("token", 7, day, day, &mut cache, true)
+            .unwrap();
+        worker.join().unwrap();
+        let requests: Vec<_> = requests.try_iter().collect();
+        assert!(requests[2].contains("page=129 "));
+    }
+    #[test]
+    fn rejects_foreign_rows_and_contradictory_pages_without_saving_them() {
+        let now = Utc::now();
+        let mut foreign: serde_json::Value =
+            serde_json::from_str(&usage_page([1, 2], 2, now)).unwrap();
+        foreign["data"]["items"][1]["account_id"] = 8.into();
+        let (base, _requests, worker) = super::super::tests::serve_sequence(vec![
+            foreign.to_string(),
+            usage_page([], 1, now),
+            usage_page([4], 1, now),
+        ]);
+        let client = Sub2ApiClient::new(&base).unwrap();
+        let mut cache = UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                client.sync_range(
+                    "token",
+                    7,
+                    now.date_naive(),
+                    now.date_naive(),
+                    &mut cache,
+                    false
+                ),
+                Err(Sub2ApiError::InvalidResponse)
+            );
+            assert_eq!(
+                cache
+                    .db
+                    .query_row("SELECT count(*) FROM records", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        client
+            .sync_range(
+                "token",
+                7,
+                now.date_naive(),
+                now.date_naive(),
+                &mut cache,
+                false,
+            )
+            .unwrap();
         worker.join().unwrap();
     }
 }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, type Snippet } from 'svelte';
   import {
+    backfillSub2ApiHistory,
     clearSub2ApiConfig,
     deleteSub2ApiConfig,
     getSub2ApiConfigState,
@@ -71,6 +72,7 @@
     claude: emptyConnectionDraft(),
   });
   let saving = $state(false);
+  let backfilling = $state(false);
   let confirmingClear = $state(false);
   let confirmingItemRemoval = $state(false);
   let error = $state<string | null>(null);
@@ -97,6 +99,35 @@
   const canSave = $derived(
     Boolean(endpointReady && email.trim() && (canReuseSavedPassword || password.trim()) && !saving),
   );
+
+  const showsHistoryCoverage = $derived(
+    connectionState.configured &&
+      connectionState.billingMode === 'upstream' &&
+      billingMode === 'upstream' &&
+      upstream === connectionState.upstream &&
+      Boolean(connectionState.historyPricedFrom),
+  );
+
+  function localDateLabel(value: string) {
+    const [year, month, day] = value.split('-').map(Number);
+    return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+    });
+  }
+
+  async function backfillHistory() {
+    if (saving || backfilling) return;
+    backfilling = true;
+    error = null;
+    try {
+      connectionState = await backfillSub2ApiHistory(providerId);
+    } catch (cause) {
+      error = errorMessage(cause, 'The Sub2API history backfill could not be started.');
+    } finally {
+      backfilling = false;
+    }
+  }
 
   function errorMessage(cause: unknown, fallback: string) {
     if (typeof cause === 'string') return cause;
@@ -526,6 +557,30 @@
               onChange={(value) => (billingMode = value as Sub2ApiBillingMode)}
             />
           </div>
+          {#if showsHistoryCoverage}
+            <div class="config-row history-row">
+              <span>Usage history</span>
+              {#if connectionState.historyComplete}
+                <small>All 30 days at upstream prices</small>
+              {:else if connectionState.historyBackfillPending}
+                <small>Backfilling…</small>
+              {:else}
+                <button
+                  type="button"
+                  disabled={saving || backfilling}
+                  onclick={() => void backfillHistory()}
+                  >{backfilling ? 'Starting…' : 'Backfill 30 Days'}</button
+                >
+              {/if}
+            </div>
+            {#if !connectionState.historyComplete}
+              <p class="config-note" role="status" aria-label="Usage history coverage">
+                {connectionState.historyBackfillPending
+                  ? 'Each refresh downloads up to 2,048 earlier records until the 30-day window is complete.'
+                  : `Upstream prices start ${localDateLabel(connectionState.historyPricedFrom ?? '')}. Earlier days use Sub2API's cost. Backfilling downloads every request record of the past 30 days.`}
+              </p>
+            {/if}
+          {/if}
           <div class="sub2api-config-actions">
             {#if connectionState.configured}
               <button
@@ -737,6 +792,25 @@
 
   .config-row > span {
     justify-self: start;
+  }
+
+  .history-row small {
+    color: var(--secondary);
+    font-size: 11px;
+  }
+
+  .history-row button {
+    min-height: 24px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--text);
+    background: var(--button-hover);
+    font-size: 10px;
+  }
+
+  .history-row button:disabled {
+    opacity: 0.5;
   }
 
   .config-note {

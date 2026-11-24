@@ -1,6 +1,8 @@
+mod cache;
 mod reported;
 mod usage;
 
+use cache::UsageCache;
 use reported::AccountStats;
 
 use crate::{
@@ -279,6 +281,10 @@ pub struct Sub2ApiConfigState {
     pub email: String,
     pub upstream: Sub2ApiUpstream,
     pub billing_mode: Sub2ApiBillingMode,
+    /// First local date priced from request records; earlier days use the server summary.
+    pub history_priced_from: Option<String>,
+    pub history_complete: bool,
+    pub history_backfill_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -382,6 +388,7 @@ impl StoredConfig {
             email: self.email.clone(),
             upstream: self.upstream,
             billing_mode: self.billing_mode,
+            ..Sub2ApiConfigState::default()
         }
     }
 }
@@ -412,6 +419,10 @@ enum Sub2ApiError {
     RequestFailed(u16),
     #[error("Could not reach Sub2API. Check the Base URL and connection.")]
     ConnectionFailed,
+    #[error("Sub2API usage history backfill continues on the next refresh.")]
+    HistorySyncPending,
+    #[error("The local Sub2API usage cache is unavailable.")]
+    HistoryCache,
     #[error("Sub2API returned an invalid response.")]
     InvalidResponse,
 }
@@ -426,7 +437,10 @@ impl From<Sub2ApiError> for ProviderError {
             | Sub2ApiError::TwoFactorRequired => Kind::Authentication,
             Sub2ApiError::Permission => Kind::Permission,
             Sub2ApiError::CredentialStorage => Kind::CredentialStorage,
-            Sub2ApiError::CodexConfig(_) | Sub2ApiError::ClaudeConfig(_) => Kind::LocalData,
+            Sub2ApiError::HistorySyncPending
+            | Sub2ApiError::HistoryCache
+            | Sub2ApiError::CodexConfig(_)
+            | Sub2ApiError::ClaudeConfig(_) => Kind::LocalData,
             Sub2ApiError::RateLimited => Kind::RateLimited,
             Sub2ApiError::RequestFailed(_) | Sub2ApiError::ConnectionFailed => Kind::Network,
             Sub2ApiError::InvalidConfig | Sub2ApiError::ProviderWithCustomBaseUrl => Kind::Internal,
@@ -460,6 +474,7 @@ struct AccountPage {
 struct Sub2ApiAccount {
     id: i64,
     name: String,
+    last_used_at: Option<String>,
 }
 
 struct LoginToken {
@@ -552,7 +567,8 @@ impl Sub2ApiClient {
                 .append_pair("type", "oauth")
                 .append_pair("status", "active")
                 .append_pair("sort_by", "name")
-                .append_pair("sort_order", "asc");
+                .append_pair("sort_order", "asc")
+                .append_pair("lite", "true");
             let response = self
                 .client
                 .get(url)
@@ -684,6 +700,23 @@ fn transport_error(stage: &str, error: &reqwest::Error) -> Sub2ApiError {
     Sub2ApiError::ConnectionFailed
 }
 
+/// Model row for days before Upstream coverage, priced by the Sub2API instance.
+const REPORTED_MODEL: &str = "Before sync (Sub2API cost)";
+
+/// First local date of the 30-day window: today and the previous 29 local dates.
+fn history_window_start(now: chrono::DateTime<Utc>) -> chrono::NaiveDate {
+    now.with_timezone(&chrono::Local)
+        .date_naive()
+        .checked_sub_days(chrono::Days::new(29))
+        .unwrap_or(chrono::NaiveDate::MIN)
+}
+
+fn cache_scope(config: &StoredConfig) -> String {
+    crate::hashing::sha256_hex(
+        format!("{}\0{}\0{}", config.base_url, config.email, config.upstream).as_bytes(),
+    )
+}
+
 enum ConnectionHistory {
     Upstream {
         pricing: Arc<ModelPricing>,
@@ -697,22 +730,38 @@ impl ConnectionHistory {
         &mut self,
         client: &Sub2ApiClient,
         token: &str,
-        account_id: i64,
+        account: &Sub2ApiAccount,
         upstream: Sub2ApiUpstream,
         now: chrono::DateTime<Utc>,
+        cache: &mut UsageCache,
     ) -> Result<UsageHistory, Sub2ApiError> {
         match self {
             Self::Upstream { pricing, total } => {
-                let rows = client.priced_usage(token, account_id, upstream, now, pricing)?;
-                let mut account = DailyUsageAccumulator::default();
+                let (rows, covered) =
+                    client.priced_usage(token, account, upstream, now, pricing, cache)?;
+                let mut history = DailyUsageAccumulator::default();
                 for row in rows {
-                    row.add_to(&mut account);
+                    row.add_to(&mut history);
                     row.add_to(total);
                 }
-                Ok(account.build(now, SOURCE))
+                let since = history_window_start(now);
+                if covered > since {
+                    // Days before local coverage use the server's own summary instead of
+                    // downloading every request record of the month.
+                    let stats = client.past_stats(token, account, now, cache)?;
+                    for (date, tokens, cost) in stats.days_before(since, covered) {
+                        for target in [&mut history, &mut *total] {
+                            match cost {
+                                Some(cost) => target.add_exact(date, tokens, cost, REPORTED_MODEL),
+                                None => target.add_unpriced(date, tokens, REPORTED_MODEL),
+                            }
+                        }
+                    }
+                }
+                Ok(history.build(now, SOURCE))
             }
             Self::Server(total) => {
-                let stats = client.stats(token, account_id)?;
+                let stats = client.cached_stats(token, account, now, cache)?;
                 let account = stats.clone().into_history(now);
                 total.extend(stats);
                 Ok(account)
@@ -735,6 +784,7 @@ pub struct Sub2ApiProvider {
     configured_marker: PathBuf,
     configured: AtomicBool,
     session: Mutex<Option<CachedSession>>,
+    history_lock: Mutex<()>,
 }
 
 impl Sub2ApiProvider {
@@ -752,13 +802,45 @@ impl Sub2ApiProvider {
             configured_marker,
             configured: AtomicBool::new(configured),
             session: Mutex::new(None),
+            history_lock: Mutex::new(()),
         }
     }
 
     pub fn config_state(&self) -> Result<Sub2ApiConfigState, ProviderError> {
-        Ok(self
-            .load_config()?
-            .map_or_else(Sub2ApiConfigState::default, |config| config.state()))
+        let Some(config) = self.load_config()? else {
+            return Ok(Sub2ApiConfigState::default());
+        };
+        let mut state = config.state();
+        let since = history_window_start(Utc::now());
+        let coverage = {
+            let _guard = self
+                .history_lock
+                .lock()
+                .map_err(|_| Sub2ApiError::HistoryCache)?;
+            UsageCache::coverage_summary(&self.cache_path(), &cache_scope(&config), since)?
+        };
+        state.history_priced_from = coverage.priced_from.map(|day| day.to_string());
+        state.history_complete = coverage.priced_from.is_some_and(|day| day <= since);
+        state.history_backfill_pending = coverage.backfill_pending;
+        Ok(state)
+    }
+
+    /// Asks later refreshes to download the remaining request records of the 30-day
+    /// window, a bounded number of pages per refresh. The caller starts a refresh.
+    pub fn request_history_backfill(&self) -> Result<Sub2ApiConfigState, ProviderError> {
+        let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
+        {
+            let _guard = self
+                .history_lock
+                .lock()
+                .map_err(|_| Sub2ApiError::HistoryCache)?;
+            UsageCache::request_backfill(&self.cache_path(), &cache_scope(&config))?;
+        }
+        self.config_state()
+    }
+
+    fn cache_path(&self) -> PathBuf {
+        self.configured_marker.with_extension("usage.sqlite3")
     }
 
     pub fn save_config(
@@ -809,6 +891,15 @@ impl Sub2ApiProvider {
     }
 
     pub fn delete_config(&self) -> Result<Sub2ApiConfigState, ProviderError> {
+        let _guard = self
+            .history_lock
+            .lock()
+            .map_err(|_| Sub2ApiError::HistoryCache)?;
+        match fs::remove_file(self.cache_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Sub2ApiError::HistoryCache.into()),
+        }
         delete_owned_password(CREDENTIAL_SERVICE, self.credential_account())
             .map_err(|_| Sub2ApiError::CredentialStorage)?;
         self.set_configuration_marker(None)?;
@@ -867,6 +958,7 @@ impl Sub2ApiProvider {
             },
             Sub2ApiBillingMode::Server => ConnectionHistory::Server(AccountStats::default()),
         };
+        let mut cache = UsageCache::open(&self.cache_path(), &cache_scope(config))?;
         for account in accounts {
             let snapshot = match self.refresh_account(
                 config,
@@ -875,13 +967,22 @@ impl Sub2ApiProvider {
                 &account,
                 now,
                 &mut histories,
+                &mut cache,
             ) {
                 Err(Sub2ApiError::Authentication) => {
                     session = self.connect(config)?;
                     if let Ok(mut cached) = self.session.lock() {
                         *cached = Some(clone_session(&session));
                     }
-                    self.refresh_account(config, &client, &session, &account, now, &mut histories)
+                    self.refresh_account(
+                        config,
+                        &client,
+                        &session,
+                        &account,
+                        now,
+                        &mut histories,
+                        &mut cache,
+                    )
                 }
                 result => result,
             }?;
@@ -892,6 +993,9 @@ impl Sub2ApiProvider {
                 name: format!("Sub2API · {} · {}", config.upstream, account.name),
                 snapshot,
             });
+        }
+        if config.billing_mode == Sub2ApiBillingMode::Upstream {
+            cache.finish_backfill()?;
         }
         let mut snapshot = snapshots
             .first()
@@ -917,6 +1021,7 @@ impl Sub2ApiProvider {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn refresh_account(
         &self,
         config: &StoredConfig,
@@ -925,6 +1030,7 @@ impl Sub2ApiProvider {
         account: &Sub2ApiAccount,
         now: chrono::DateTime<Utc>,
         histories: &mut ConnectionHistory,
+        cache: &mut UsageCache,
     ) -> Result<ProviderSnapshot, Sub2ApiError> {
         let body = client.usage(session.token.as_str(), account.id, config.upstream)?;
         let (plan, quotas, value_metrics) = match config.upstream {
@@ -955,9 +1061,10 @@ impl Sub2ApiProvider {
         let history = histories.fetch_account(
             client,
             session.token.as_str(),
-            account.id,
+            account,
             config.upstream,
             now,
+            cache,
         )?;
         Ok(ProviderSnapshot {
             accounts: None,
@@ -1141,6 +1248,10 @@ impl UsageProvider for Sub2ApiProvider {
     }
 
     fn refresh_for_service(&self) -> Result<super::ProviderRefresh, ProviderError> {
+        let _guard = self
+            .history_lock
+            .lock()
+            .map_err(|_| Sub2ApiError::HistoryCache)?;
         let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
         Ok(super::ProviderRefresh {
             snapshot: self.refresh_snapshot(&config)?,
@@ -1150,8 +1261,7 @@ impl UsageProvider for Sub2ApiProvider {
     }
 
     fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
-        let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
-        self.refresh_snapshot(&config).map_err(ProviderError::from)
+        Ok(self.refresh_for_service()?.snapshot)
     }
 }
 
@@ -1356,6 +1466,32 @@ mod tests {
                 "output_tokens":500,"total_cost":70,"actual_cost":60,"account_stats_cost":50,"rate_multiplier":0.1}),
         ];
         serde_json::json!({"code":0,"data":{"items":items,"total":2}}).to_string()
+    }
+
+    /// Today's request records, as returned for a newly covered account.
+    fn usage_today(account: i64, now: chrono::DateTime<Utc>) -> String {
+        let mut body: serde_json::Value = serde_json::from_str(&usage_data(account, now)).unwrap();
+        body["data"]["items"].as_array_mut().unwrap().remove(0);
+        body["data"]["total"] = 1.into();
+        body.to_string()
+    }
+
+    /// The one-day and 30-day summaries for days before Upstream coverage: yesterday
+    /// used 1000 tokens that the instance billed at $0.05.
+    fn past_stats(now: chrono::DateTime<Utc>) -> [String; 2] {
+        let yesterday = now
+            .with_timezone(&chrono::Local)
+            .date_naive()
+            .pred_opt()
+            .unwrap();
+        [
+            r#"{"code":0,"data":{"history":[],"models":[]}}"#.to_owned(),
+            serde_json::json!({"code":0,"data":{
+                "history":[{"date":yesterday.to_string(),"tokens":1000,"actual_cost":0.05}],
+                "models":[{"model":"claude-haiku-4-5","tokens":1000,"actual_cost":0.05}]
+            }})
+            .to_string(),
+        ]
     }
 
     pub(super) fn serve_sequence(
@@ -2010,7 +2146,8 @@ mod tests {
         let (base_url, _requests, worker) = serve_sequence(vec![
             r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
             r#"{"code":0,"data":{"items":[{"id":7,"name":"Same name"},{"id":8,"name":"Same name"}],"total":2}}"#.into(),
-            quota.clone(), usage_data(7, now), quota, usage_data(8, now),
+            quota.clone(), usage_today(7, now), past_stats(now)[0].clone(), past_stats(now)[1].clone(),
+            quota, usage_today(8, now), past_stats(now)[0].clone(), past_stats(now)[1].clone(),
             r#"{"code":0,"data":{"items":[{"id":9,"name":"Unavailable"}],"total":1}}"#.into(),
             r#"{"code":1}"#.into(),
             r#"{"code":0,"data":{"items":[],"total":0}}"#.into(),
@@ -2108,12 +2245,17 @@ mod tests {
                 ),
                 (200, page.clone()),
                 (200, quota.clone()),
-                (200, usage_data(7, now)),
-                (200, quota.clone()),
-                (200, usage_data(8, now)),
+                (200, usage_today(7, now)),
             ];
+            responses.extend(past_stats(now).map(|body| (200, body)));
+            responses.extend([(200, quota.clone()), (200, usage_today(8, now))]);
+            responses.extend(past_stats(now).map(|body| (200, body)));
             if failed_stage > 0 {
-                responses.extend([(200, page), (200, quota.clone()), (200, usage_data(7, now))]);
+                responses.extend([
+                    (200, page),
+                    (200, quota.clone()),
+                    (200, usage_today(7, now)),
+                ]);
                 if failed_stage == 2 {
                     responses.push((200, quota.clone()));
                 }
@@ -2125,7 +2267,7 @@ mod tests {
                     r#"{"code":0,"data":{"items":[{"id":8,"name":"Recovered"}],"total":1}}"#.into(),
                 ),
                 (200, quota),
-                (200, usage_data(8, now)),
+                (200, usage_today(8, now)),
                 (200, r#"{"code":0,"data":{"items":[],"total":0}}"#.into()),
             ]);
             let (base_url, _requests, worker) = serve_sequence_with_status(responses);
@@ -2308,13 +2450,23 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 8, 23, 12, 0, 0).unwrap();
         let (base_url, requests, worker) = serve_sequence(vec![usage_data(42, now)]);
         let client = Sub2ApiClient::new(&base_url).unwrap();
-        let rows = client
+        let mut cache = super::UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
+        // A completed backfill covers the whole window.
+        cache
+            .set_coverage(42, super::history_window_start(now))
+            .unwrap();
+        let (rows, _) = client
             .priced_usage(
                 "admin-jwt",
-                42,
+                &super::Sub2ApiAccount {
+                    id: 42,
+                    name: String::new(),
+                    last_used_at: None,
+                },
                 super::Sub2ApiUpstream::Claude,
                 now,
                 &test_bundled_pricing(),
+                &mut cache,
             )
             .unwrap();
         worker.join().unwrap();
@@ -2346,11 +2498,14 @@ mod tests {
 
     #[test]
     fn claude_refresh_combines_quota_with_server_usage_history() {
+        let now = Utc::now();
         let responses = vec![
             r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
             r#"{"code":0,"message":"success","data":{"items":[{"id":7,"name":"Claude upstream"}],"total":1,"page":1,"page_size":1,"pages":1}}"#.into(),
             format!(r#"{{"code":0,"message":"success","data":{CLAUDE_USAGE_DATA}}}"#),
-            usage_data(7, Utc::now()),
+            usage_today(7, now),
+            past_stats(now)[0].clone(),
+            past_stats(now)[1].clone(),
         ];
         let (base_url, requests, worker) = serve_sequence(responses);
         let directory = tempdir().unwrap();
@@ -2401,6 +2556,85 @@ mod tests {
     }
 
     #[test]
+    fn switching_billing_methods_reuses_both_caches_and_still_refreshes_quota() {
+        let accounts = r#"{"code":0,"data":{"items":[{"id":7,"name":"One","last_used_at":"2026-11-01T00:00:00Z"}],"total":1}}"#;
+        let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
+        let stats = r#"{"code":0,"data":{"history":[],"models":[]}}"#;
+        let mut responses =
+            vec![r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.to_owned()];
+        let modes = [
+            super::Sub2ApiBillingMode::Upstream,
+            super::Sub2ApiBillingMode::Server,
+            super::Sub2ApiBillingMode::Upstream,
+            super::Sub2ApiBillingMode::Server,
+        ];
+        for index in 0..modes.len() {
+            responses.extend([accounts.to_owned(), quota.clone()]);
+            // Upstream's first sync downloads today's records and reads the server
+            // summary for earlier days, which the Sub2API method then reuses.
+            if index == 0 {
+                responses.extend([
+                    usage_today(7, Utc::now()),
+                    stats.to_owned(),
+                    stats.to_owned(),
+                ]);
+            }
+        }
+        let (base_url, requests, worker) = serve_sequence(responses);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("configured"),
+            true,
+            test_pricing(),
+        );
+        let mut config = StoredConfig {
+            base_url,
+            codex_provider: String::new(),
+            custom_base_url: true,
+            email: "test@example.test".into(),
+            password: "test".into(),
+            upstream: super::Sub2ApiUpstream::Claude,
+            billing_mode: modes[0],
+            metric_template_version: 1,
+        };
+        for mode in modes {
+            config.billing_mode = mode;
+            let snapshot = provider.refresh_snapshot(&config).unwrap();
+            assert!(!snapshot.quotas.is_empty());
+            assert_eq!(
+                snapshot
+                    .usage_histories
+                    .account
+                    .unwrap()
+                    .last_30_days
+                    .is_some(),
+                mode == super::Sub2ApiBillingMode::Upstream
+            );
+        }
+        worker.join().unwrap();
+        let paths: Vec<_> = requests
+            .try_iter()
+            .map(|r| r.split_whitespace().nth(1).unwrap().to_string())
+            .collect();
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|p| p.starts_with("/api/v1/admin/usage?"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|p| p.as_str() == "/api/v1/admin/accounts/7/usage")
+                .count(),
+            4
+        );
+    }
+
+    #[test]
     fn server_method_uses_account_stats_and_preserves_free_or_missing_costs() {
         let now = Utc::now();
         let date = now.with_timezone(&chrono::Local).date_naive();
@@ -2410,25 +2644,42 @@ mod tests {
                 "models":[{"model":"unknown-model","total_tokens":100,"actual_cost":amount,"cost":fallback}]
             }}).to_string()
         };
-        let (base, requests, worker) = serve_sequence(vec![
+        let responses = [
             response(0.into(), 10.into()),
             response(serde_json::Value::Null, 2.5.into()),
             response(serde_json::Value::Null, serde_json::Value::Null),
-        ]);
+        ]
+        .into_iter()
+        .flat_map(|response| [response.clone(), response])
+        .collect();
+        let (base, requests, worker) = serve_sequence(responses);
+        let mut cache = super::UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
         let client = Sub2ApiClient::new(&base).unwrap();
         let mut histories = super::ConnectionHistory::Server(Default::default());
         for (id, expected) in [(1, Some(0.0)), (2, Some(2.5)), (3, None)] {
             let history = histories
-                .fetch_account(&client, "token", id, super::Sub2ApiUpstream::Codex, now)
+                .fetch_account(
+                    &client,
+                    "token",
+                    &super::Sub2ApiAccount {
+                        id,
+                        name: String::new(),
+                        last_used_at: None,
+                    },
+                    super::Sub2ApiUpstream::Codex,
+                    now,
+                    &mut cache,
+                )
                 .unwrap();
             let today = history.today.unwrap();
             assert_eq!(today.estimated_cost_usd, expected);
             assert!(!today.cost_estimated);
             assert_eq!(today.estimate_complete, expected.is_some());
-            assert!(requests
-                .recv()
-                .unwrap()
-                .starts_with(&format!("GET /api/v1/admin/accounts/{id}/stats?days=30 ")));
+            for days in [1, 30] {
+                assert!(requests.recv().unwrap().starts_with(&format!(
+                    "GET /api/v1/admin/accounts/{id}/stats?days={days} "
+                )));
+            }
         }
         worker.join().unwrap();
         let monthly = histories.finish(now).last_30_days.unwrap();

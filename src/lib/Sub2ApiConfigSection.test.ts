@@ -197,6 +197,47 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.getByRole('combobox', { name: 'Billing method' })).toHaveValue('server');
   });
 
+  it('offers a 30-day backfill only while Upstream pricing starts after the window', async () => {
+    const saved = {
+      configured: true,
+      baseUrl: 'https://sub2api.example.com',
+      codexProvider: '',
+      customBaseUrl: true,
+      email: 'admin@example.com',
+      upstream: 'codex',
+      billingMode: 'upstream',
+      historyPricedFrom: '2026-11-24',
+      historyComplete: false,
+      historyBackfillPending: false,
+    };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_sub2api_config_state') return saved;
+      if (command === 'backfill_sub2api_history') {
+        return { ...saved, historyBackfillPending: true };
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+    render(Sub2ApiConfigSection, { providerId: 'sub2api' });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect(screen.getByRole('status', { name: 'Usage history coverage' })).toHaveTextContent(
+      "Earlier days use Sub2API's cost.",
+    );
+
+    // Switching the draft to the Sub2API method hides Upstream-only coverage.
+    await selectOption(screen.getByRole('combobox', { name: 'Billing method' }), 'Sub2API');
+    expect(screen.queryByRole('button', { name: 'Backfill 30 Days' })).not.toBeInTheDocument();
+    await selectOption(screen.getByRole('combobox', { name: 'Billing method' }), 'Upstream');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Backfill 30 Days' }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('backfill_sub2api_history', {
+        providerId: 'sub2api',
+      }),
+    );
+    expect(await screen.findByText('Backfilling…')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Backfill 30 Days' })).not.toBeInTheDocument();
+  });
+
   it('requires a Claude provider or a manually entered custom URL', async () => {
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await screen.findByText('Not configured');

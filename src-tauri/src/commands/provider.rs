@@ -435,6 +435,33 @@ pub async fn save_sub2api_config(
 }
 
 #[tauri::command]
+pub async fn backfill_sub2api_history(
+    app: AppHandle,
+    providers: State<'_, Arc<Sub2ApiProviders>>,
+    service: State<'_, Arc<ProviderService>>,
+    settings: State<'_, Arc<SettingsService>>,
+    notifications: State<'_, Arc<NotificationEvaluator>>,
+    provider_id: String,
+) -> Result<Sub2ApiConfigState, String> {
+    let provider = providers
+        .provider(&provider_id)
+        .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
+    let state = tauri::async_runtime::spawn_blocking(move || provider.request_history_backfill())
+        .await
+        .map_err(|_| "The Sub2API history backfill could not be started.".to_owned())?
+        .map_err(|error| error.to_string())?;
+    crate::app_info!("refresh", "Sub2API 30-day history backfill requested");
+    spawn_sub2api_refresh(
+        app,
+        service.inner().clone(),
+        settings.inner().clone(),
+        notifications.inner().clone(),
+        provider_id,
+    );
+    Ok(state)
+}
+
+#[tauri::command]
 pub async fn clear_sub2api_config(
     app: AppHandle,
     providers: State<'_, Arc<Sub2ApiProviders>>,

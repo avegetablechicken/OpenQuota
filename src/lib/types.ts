@@ -204,6 +204,10 @@ export interface Sub2ApiConfigState {
   email: string;
   upstream: Sub2ApiUpstream;
   billingMode: Sub2ApiBillingMode;
+  /** First local date (YYYY-MM-DD) priced from request records with Upstream billing. */
+  historyPricedFrom?: string | null;
+  historyComplete?: boolean;
+  historyBackfillPending?: boolean;
 }
 
 export type Sub2ApiBillingMode = 'upstream' | 'server';

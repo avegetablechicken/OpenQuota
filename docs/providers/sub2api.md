@@ -32,6 +32,30 @@ incomplete estimate. The 30-day window includes today and the previous 29 local 
 Instance markups and account multipliers apply separately to the instance's own billing.
 See [historical pricing](../pricing-history.md).
 
+OpenQuota keeps a local history cache for each connection and upstream account. Switching
+billing methods or restarting the app reuses the data already synced for each method.
+Quota and account discovery still refresh normally.
+
+- **Upstream** stores the fields needed for pricing. A newly discovered account
+  downloads only today's request records, then later syncs request new records after
+  the saved position. Days before that are shown with the instance's own token counts
+  and cost from `/api/v1/admin/accounts/:id/stats`, under the model row
+  **Before sync (Sub2API cost)**, read once per day. Coverage grows by one day each
+  day until it spans the 30-day window. Accounts that an earlier version had already
+  synced completely keep their full window.
+- To price the whole window now, select **Backfill 30 Days** under **Usage history** in
+  the connection editor. This downloads every request record of the past 30 days, which
+  can be a lot of data on a busy instance, so it never starts on its own. Each refresh
+  downloads up to 16 pages of 128 records and saves each complete page; the earlier
+  days stay on the server summary until the backfill completes. If the server removes
+  records, OpenQuota checks the affected dates before rebuilding them.
+- **Sub2API** stores the server's summary and updates the current day's contribution
+  when usage changes. It refreshes the 30-day summary when the calendar window
+  changes or when the daily and monthly figures cannot be reconciled.
+- When the server reports the same account activity timestamp, routine refreshes reuse
+  the history cache. OpenQuota periodically checks for delayed changes and uses a
+  lightweight history check on instances that omit the timestamp.
+
 ## Setup
 
 In **Customize**, select **+ Sub2API** to create an independent account. In its **Connection**
