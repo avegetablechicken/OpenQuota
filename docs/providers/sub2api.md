@@ -14,6 +14,9 @@ OpenQuota shows quota and upstream usage estimates for active Codex or Claude OA
 | Today, Yesterday, Last 30 Days | Token counts and cost using the selected billing method |
 | Model breakdown | Token counts and cost per model and account |
 
+An account's Session starts on first use. When the upstream reports it unused, the dashboard shows
+0% used and **Not started** instead of a reset countdown, and the menu bar omits the value.
+
 The last field in the connection editor is **Billing method**. **Upstream** is the default,
 including for existing connections. **Sub2API** reads the instance's 30-day account statistics
 from `/api/v1/admin/accounts/:id/stats`. It uses the account's reported `actual_cost`, including

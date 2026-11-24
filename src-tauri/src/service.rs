@@ -674,9 +674,23 @@ fn normalize_quota_availability(
     definition: &crate::models::ProviderDefinition,
     snapshot: &mut ProviderSnapshot,
 ) {
-    // Missing quota entries are the shared no-data representation for every consumer.
+    normalize_unstarted_sessions(definition, snapshot);
+    for account in snapshot.accounts.iter_mut().flatten() {
+        normalize_unstarted_sessions(definition, &mut account.snapshot);
+    }
+}
+
+/// A session that starts on first use is reported with 0% and no reset until then. Each
+/// provider's mapper drops placeholder resets of unused windows; here a reset that has
+/// already passed is dropped too, so the session reads as not started rather than as
+/// due to reset. Such sessions are kept: a missing quota means the account has no such
+/// limit, which differs from a limit that has not started.
+fn normalize_unstarted_sessions(
+    definition: &crate::models::ProviderDefinition,
+    snapshot: &mut ProviderSnapshot,
+) {
     let refreshed_at = snapshot.refreshed_at;
-    snapshot.quotas.retain_mut(|quota| {
+    for quota in &mut snapshot.quotas {
         let starts_on_use = definition.metrics.iter().any(|metric| {
             metric.source.session_window() && metric.source.source_id() == Some(quota.id.as_str())
         });
@@ -684,20 +698,10 @@ fn normalize_quota_availability(
             reset
                 > refreshed_at + chrono::Duration::seconds(quota.clock_offset_seconds.unwrap_or(0))
         });
-        // Claude and Codex report an unused session without an active reset (Codex after
-        // confirming its moving placeholder). Keep it as a not-started session, which
-        // differs from a provider that reports no session limit at all.
-        if matches!(definition.id.as_str(), "claude" | "codex")
-            && starts_on_use
-            && quota.used_percent <= 0.0
-        {
-            if !has_active_reset {
-                quota.resets_at = None;
-            }
-            return true;
+        if starts_on_use && quota.used_percent <= 0.0 && !has_active_reset {
+            quota.resets_at = None;
         }
-        !(starts_on_use && quota.used_percent <= 0.0 && has_active_reset)
-    });
+    }
 }
 
 fn validate_snapshot(
@@ -1298,15 +1302,13 @@ mod tests {
     }
 
     #[test]
-    fn zero_sessions_preserve_claude_windows_for_live_and_cached_data() {
+    fn zero_sessions_with_an_active_reset_stay_started_for_live_and_cached_data() {
         for mut definition in [
             crate::providers::claude::definition(),
             crate::providers::opencode::definition(),
             crate::providers::codex::definition(),
         ] {
             let id = definition.id.clone();
-            let starts_on_use = definition.metrics[0].source.session_window();
-            let hides_zero_session = starts_on_use && !matches!(id.as_str(), "claude" | "codex");
             definition.fallback_enabled = true;
             let directory = tempdir().unwrap();
             let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
@@ -1333,16 +1335,16 @@ mod tests {
             storage.save_snapshot(&snapshot).unwrap();
             let service = ProviderService::new(registry, storage.clone());
             let cached = service.provider_state(&id).snapshot.unwrap();
-            assert_eq!(cached.quotas.len(), if hides_zero_session { 1 } else { 2 });
-            if matches!(id.as_str(), "claude" | "codex") {
-                let session = cached
-                    .quotas
-                    .iter()
-                    .find(|quota| quota.id == "session")
-                    .unwrap();
-                assert_eq!(session.used_percent, 0.0);
-                assert!(session.resets_at.unwrap() > cached.refreshed_at);
-            }
+            // Mappers drop placeholder resets, so a reset that is still ahead marks a
+            // started session for every provider.
+            assert_eq!(cached.quotas.len(), 2, "{id}");
+            let session = cached
+                .quotas
+                .iter()
+                .find(|quota| quota.id == "session")
+                .unwrap();
+            assert_eq!(session.used_percent, 0.0);
+            assert!(session.resets_at.unwrap() > cached.refreshed_at, "{id}");
             assert!(cached.quotas.iter().any(|quota| quota.id == "weekly"));
             let live = service
                 .apply_refresh_result(
@@ -1375,6 +1377,39 @@ mod tests {
                 .unwrap();
             assert_eq!(active.quotas.len(), 2);
         }
+    }
+
+    #[test]
+    fn account_sessions_with_a_passed_reset_read_as_not_started() {
+        let definition = crate::providers::claude::definition();
+        let mut snapshot = test_snapshot("claude");
+        let mut account = test_snapshot("claude");
+        account.quotas.push(QuotaWindow {
+            clock_offset_seconds: None,
+            id: "session".into(),
+            label: "Session".into(),
+            used_percent: 0.0,
+            resets_at: Some(account.refreshed_at - chrono::Duration::minutes(1)),
+            period_seconds: 18_000,
+            format: QuotaFormat::Percent,
+            used_value: None,
+            limit_value: None,
+            unit: None,
+            estimated: false,
+            source_note: None,
+        });
+        snapshot.accounts = Some(vec![crate::models::AccountSnapshot {
+            id: "1".into(),
+            name: "Upstream".into(),
+            snapshot: account,
+        }]);
+
+        super::normalize_quota_availability(&definition, &mut snapshot);
+
+        let session = &snapshot.accounts.unwrap()[0].snapshot.quotas[0];
+        assert_eq!(session.used_percent, 0.0);
+        assert_eq!(session.resets_at, None);
+        assert!(session.is_unstarted_session(&definition.metrics[0].source));
     }
 
     #[test]
@@ -1412,6 +1447,7 @@ mod tests {
         for (mut definition, reset_offset) in [
             crate::providers::claude::definition(),
             crate::providers::codex::definition(),
+            crate::providers::opencode::definition(),
         ]
         .into_iter()
         .flat_map(|definition| {

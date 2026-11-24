@@ -65,7 +65,7 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
                 &metric_id("session"),
                 "Session",
                 "session",
-                false,
+                true,
                 true,
                 MetricSection::AlwaysVisible,
                 true,

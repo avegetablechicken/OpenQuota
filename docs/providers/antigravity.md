@@ -18,6 +18,9 @@ local token usage and API-equivalent spend estimated from Antigravity's local se
 
 Only the pools available to the signed-in account are shown.
 
+The Session and Claude five-hour pools start on first use. Until then the dashboard shows 0% used
+and **Not started** instead of a reset countdown, and the menu bar omits the value.
+
 ## Sign-in and local data
 
 Sign in through Antigravity or run `agy`. OpenQuota reuses Antigravity's locally stored credentials

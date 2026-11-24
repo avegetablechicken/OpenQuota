@@ -21,6 +21,9 @@ the OpenCode data directory. OpenCode-hosted requests remain on the OpenCode car
 requests are attributed to Claude, while direct OpenAI and OpenAI Codex requests are attributed to
 Codex.
 
+The Session window starts on first use. Until then the dashboard shows 0% used and **Not started**
+instead of a reset countdown, and the menu bar omits the value.
+
 ## Sign-in and local data
 
 Sign in to OpenCode Go or use OpenCode locally first. OpenQuota reads OpenCode's local authentication

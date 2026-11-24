@@ -41,7 +41,17 @@ pub(super) fn map_go_usage(response: UsageResponse) -> Result<Vec<QuotaWindow>, 
         quota(usage.get("monthly"), "monthly", "Monthly", 0),
     ]
     .into_iter()
+    .map(|quota| quota.map(unstarted_session_without_reset))
     .collect()
+}
+
+/// An unused rolling window still reports a reset, which would read as a running session.
+/// It starts with the first request, so at 0% it has not started and has no reset yet.
+fn unstarted_session_without_reset(mut quota: QuotaWindow) -> QuotaWindow {
+    if quota.id == "session" && quota.used_percent <= 0.0 {
+        quota.resets_at = None;
+    }
+    quota
 }
 
 fn quota(
@@ -107,6 +117,22 @@ mod tests {
         assert_eq!(quotas[2].period_seconds, 0);
         assert_eq!(quotas[1].used_percent, 100.0);
         assert!(!quotas.iter().any(|quota| quota.estimated));
+    }
+
+    #[test]
+    fn unused_rolling_window_has_no_reset_while_other_windows_keep_theirs() {
+        let response = UsageResponse {
+            status: StatusCode::OK,
+            body: json!({"usage": {
+                "rolling": {"percent": 0, "resetsAt": "2026-08-12T12:00:00Z", "status": "ok"},
+                "weekly": {"percent": 0, "resetsAt": "2026-08-17T00:00:00Z", "status": "ok"},
+                "monthly": {"percent": 0, "resetsAt": "2026-09-05T00:00:00Z", "status": "ok"}
+            }}),
+        };
+        let quotas = map_go_usage(response).unwrap();
+        assert_eq!(quotas[0].used_percent, 0.0);
+        assert_eq!(quotas[0].resets_at, None);
+        assert!(quotas[1..].iter().all(|quota| quota.resets_at.is_some()));
     }
 
     #[test]

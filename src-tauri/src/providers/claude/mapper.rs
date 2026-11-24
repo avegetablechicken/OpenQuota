@@ -129,41 +129,15 @@ pub(crate) fn map_sub2api_usage(body: &Value) -> Result<ClaudeMappedUsage, Claud
         .get("subscription_tier")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let mut normalized = body.clone();
-    if sub2api_five_hour_is_empty(body) {
-        if let Some(object) = normalized.as_object_mut() {
-            object.remove("five_hour");
-        }
-    }
+    // An unused session (0%, no reset) is kept as not started, as for direct logins.
     map_usage(
         StatusCode::OK,
-        &normalized,
+        body,
         &ClaudeOAuth {
             subscription_type,
             ..ClaudeOAuth::default()
         },
     )
-}
-
-fn sub2api_five_hour_is_empty(body: &Value) -> bool {
-    let Some(window) = body.get("five_hour").and_then(Value::as_object) else {
-        return false;
-    };
-    let utilization = window.get("utilization").and_then(number).unwrap_or(0.0);
-    let remaining = window
-        .get("remaining_seconds")
-        .and_then(number)
-        .unwrap_or(0.0);
-    let has_reset = window.get("resets_at").and_then(reset_date).is_some();
-    let has_activity = window
-        .get("window_stats")
-        .and_then(Value::as_object)
-        .is_some_and(|stats| stats.values().filter_map(number).any(|value| value > 0.0))
-        || window
-            .get("used_requests")
-            .and_then(number)
-            .is_some_and(|value| value > 0.0);
-    utilization <= 0.0 && remaining <= 0.0 && !has_reset && !has_activity
 }
 
 fn append_window(
@@ -330,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn sub2api_omits_a_synthetic_empty_session_window() {
+    fn sub2api_keeps_an_unused_session_as_not_started() {
         let body = serde_json::json!({
             "five_hour": {
                 "utilization": 0,
@@ -349,14 +323,11 @@ mod tests {
         });
 
         let mapped = map_sub2api_usage(&body).unwrap();
-        assert_eq!(
-            mapped
-                .quotas
-                .iter()
-                .map(|quota| quota.id.as_str())
-                .collect::<Vec<_>>(),
-            ["weekly"]
-        );
+        let session = &mapped.quotas[0];
+        assert_eq!(session.id, "session");
+        assert_eq!(session.used_percent, 0.0);
+        assert_eq!(session.resets_at, None);
+        assert_eq!(mapped.quotas[1].id, "weekly");
     }
 
     #[test]
