@@ -308,6 +308,7 @@ impl ClaudeProvider {
 
         if credential.inference_only {
             return Ok(ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: self.provider_id().into(),
                 plan: plan_name(credential),
@@ -326,6 +327,7 @@ impl ClaudeProvider {
                     .into(),
             );
             return Ok(ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: self.provider_id().into(),
                 plan: plan_name(credential),
@@ -375,6 +377,7 @@ impl ClaudeProvider {
                 retry_minutes(retry)
             ));
             return Ok(ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: self.provider_id().into(),
                 plan: plan_name(credential),
@@ -429,6 +432,7 @@ impl ClaudeProvider {
                 retry_minutes(retry)
             ));
             return Ok(ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: self.provider_id().into(),
                 plan: plan_name(credential),
@@ -446,6 +450,7 @@ impl ClaudeProvider {
             quota.clock_offset_seconds = clock_offset;
         }
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: self.provider_id().into(),
             plan: mapped.plan,
@@ -732,6 +737,7 @@ mod tests {
             ClaudeClient::new().unwrap(),
         );
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "claude".into(),
             plan: None,

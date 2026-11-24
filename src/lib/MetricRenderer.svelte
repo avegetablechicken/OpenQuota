@@ -1,6 +1,8 @@
 <script lang="ts">
   import { usageSourceNote, type ProviderCatalogIndex } from './metrics';
   import QuotaMetric from './QuotaMetric.svelte';
+  import QuotaReset from './QuotaReset.svelte';
+  import { quotaNow } from './pacing';
   import StatusMetric from './StatusMetric.svelte';
   import UsageMetric from './UsageMetric.svelte';
   import UsageTrend from './UsageTrend.svelte';
@@ -23,10 +25,20 @@
     catalog: ProviderCatalogIndex;
     viewMode: UsageViewMode;
     usageScope?: UsageScope;
+    tokensOnly?: boolean;
     onSettingsChange: (settings: AppSettings) => void;
   }
-  let { layout, snapshot, settings, now, catalog, viewMode, usageScope, onSettingsChange }: Props =
-    $props();
+  let {
+    layout,
+    snapshot,
+    settings,
+    now,
+    catalog,
+    viewMode,
+    usageScope,
+    tokensOnly = false,
+    onSettingsChange,
+  }: Props = $props();
   const definition = $derived(catalog.metric(layout.id));
   const providerDisplayName = $derived(
     catalog.resolvedDisplayName(snapshot.providerId, settings.providerNames),
@@ -55,9 +67,15 @@
     if (source?.kind !== 'status') return null;
     return snapshot.statusMetrics.find((item) => item.id === source.sourceId) ?? null;
   });
+  function toggleReset() {
+    onSettingsChange({
+      ...settings,
+      resetDisplay: settings.resetDisplay === 'countdown' ? 'exact' : 'countdown',
+    });
+  }
 </script>
 
-{#if (definition?.source.kind === 'quota' || definition?.source.kind === 'quotaOrValue') && quota}
+{#if (definition?.source.kind === 'quota' || definition?.source.kind === 'quotaOrValue') && quota && quota.format !== 'unlimitedDollars'}
   <QuotaMetric
     {quota}
     {now}
@@ -71,13 +89,9 @@
         ...settings,
         usageDisplay: settings.usageDisplay === 'used' ? 'left' : 'used',
       })}
-    onToggleReset={() =>
-      onSettingsChange({
-        ...settings,
-        resetDisplay: settings.resetDisplay === 'countdown' ? 'exact' : 'countdown',
-      })}
+    onToggleReset={toggleReset}
   />
-{:else if definition?.source.kind === 'quotaOrValue' && valueMetric}
+{:else if definition?.source.kind === 'quotaOrValue' && !quota && valueMetric}
   <ValueMetric
     label={definition.label}
     metric={valueMetric}
@@ -95,10 +109,23 @@
         aria-label={`${definition.label} used`}
         aria-valuemin="0"
         aria-valuemax="100"
-        aria-valuenow="0"
+        aria-valuetext="No data"
       ></div>
     </div>
-    <div class="metric__reading"><span>No data</span><span>Reset unavailable</span></div>
+    <div class="metric__reading">
+      <span>No data</span>
+      {#if quota?.resetsAt}
+        <QuotaReset
+          resetsAt={quota.resetsAt}
+          now={quotaNow(quota, now)}
+          resetDisplay={settings.resetDisplay}
+          timeFormat={settings.timeFormat}
+          onToggleReset={toggleReset}
+        />
+      {:else}
+        <span>Reset unavailable</span>
+      {/if}
+    </div>
   </section>
 {:else if definition?.source.kind === 'trend'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
@@ -120,7 +147,7 @@
   <StatusMetric label={definition.label} metric={statusMetric} />
 {:else if definition?.source.kind === 'usage'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
-    <UsageMetric label={definition.label} period={usagePeriod(scoped.history)} />
+    <UsageMetric {tokensOnly} label={definition.label} period={usagePeriod(scoped.history)} />
   {/each}
 {:else if definition?.source.kind === 'value'}
   <ValueMetric

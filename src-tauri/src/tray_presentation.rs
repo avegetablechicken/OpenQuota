@@ -303,12 +303,17 @@ fn menu_bar_providers(settings: &AppSettings, registry: &ProviderRegistry) -> Ve
                             &metric.id,
                             upstream_provider_id,
                         );
-                    (metric_definition.pinnable && supported).then(|| MenuBarOption {
-                        metric_id: metric.id.clone(),
-                        label: metric_definition.label.clone(),
-                        pinned: metric.pinned,
-                        available: metric.pinned || pins < crate::settings::MAX_PINS_PER_PROVIDER,
-                    })
+                    let allowed = upstream_provider_id != Some("subscription")
+                        || subscription_percentage_metric(&metric.id);
+                    (metric_definition.pinnable && supported && (allowed || metric.pinned)).then(
+                        || MenuBarOption {
+                            metric_id: metric.id.clone(),
+                            label: metric_definition.label.clone(),
+                            pinned: metric.pinned,
+                            available: metric.pinned
+                                || pins < crate::settings::MAX_PINS_PER_PROVIDER,
+                        },
+                    )
                 })
                 .collect::<Vec<_>>();
             (!options.is_empty()).then(|| MenuBarProvider {
@@ -457,6 +462,7 @@ fn resolved_groups(
                 .get(&provider.id)
                 .and_then(|state| state.snapshot.as_ref())?;
             let provider_name = provider_name(registry, settings, definition);
+            let subscription = snapshot.is_sub2api_subscription();
             let snapshots = match &snapshot.accounts {
                 Some(accounts) => accounts
                     .iter()
@@ -484,11 +490,11 @@ fn resolved_groups(
                             .filter(|metric| metric.pinned)
                             .filter_map(|metric| {
                                 let metric_definition = registry.metric(&metric.id)?;
-                                let mut resolved = tray_metric(
-                                    metric_definition,
-                                    snapshot,
-                                    settings.usage_display,
-                                )?;
+                                let mut resolved = if subscription {
+                                    subscription_tray_metric(metric_definition, snapshot)
+                                } else {
+                                    tray_metric(metric_definition, snapshot, settings.usage_display)
+                                }?;
                                 resolved.detail = format!("{} {}", name, resolved.detail);
                                 Some(resolved)
                             })
@@ -497,9 +503,13 @@ fn resolved_groups(
                             #[cfg(any(target_os = "macos", test))]
                             provider_id: definition.id.clone(),
                             #[cfg(any(target_os = "macos", test))]
-                            upstream_provider_id: registry
-                                .upstream_provider_id(&definition.id)
-                                .map(str::to_owned),
+                            upstream_provider_id: if subscription {
+                                snapshot.upstream_provider_id.clone()
+                            } else {
+                                registry
+                                    .upstream_provider_id(&definition.id)
+                                    .map(str::to_owned)
+                            },
                             metrics,
                         })
                     })
@@ -508,6 +518,25 @@ fn resolved_groups(
         })
         .flatten()
         .collect()
+}
+
+fn subscription_percentage_metric(id: &str) -> bool {
+    matches!(id.rsplit('.').next(), Some("daily" | "weekly" | "monthly"))
+}
+
+fn subscription_tray_metric(
+    definition: &MetricDefinition,
+    snapshot: &ProviderSnapshot,
+) -> Option<TrayMetric> {
+    if !subscription_percentage_metric(&definition.id) {
+        return None;
+    }
+    let id = definition.source.source_id()?;
+    snapshot
+        .quotas
+        .iter()
+        .find(|quota| quota.id == id && quota.limit_value.is_some_and(|limit| limit > 0.0))?;
+    tray_metric(definition, snapshot, UsageDisplay::Used)
 }
 
 fn tray_metric(
@@ -1039,6 +1068,7 @@ mod tests {
             source_note: None,
         };
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: None,
@@ -1171,6 +1201,7 @@ mod tests {
     #[test]
     fn pinned_quota_metrics_resolve_in_layout_order() {
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: None,
@@ -1350,6 +1381,7 @@ mod tests {
     #[test]
     fn tray_details_use_the_runtime_provider_name() {
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: None,
@@ -1403,6 +1435,7 @@ mod tests {
     #[test]
     fn count_quota_display_changes_text_and_fill_but_not_status_fraction() {
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "cursor".into(),
             plan: None,
@@ -1511,8 +1544,65 @@ mod tests {
     }
 
     #[test]
+    fn subscription_tray_only_renders_a_capped_windows_used_percentage() {
+        let mut snapshot: ProviderSnapshot = serde_json::from_value(serde_json::json!({
+            "providerId": "sub2api@2", "plan": "Plan", "warnings": [], "refreshedAt": Utc::now(),
+            "quotas": [{"id": "weekly", "label": "Weekly", "format": "dollars", "usedPercent": 25.0,
+                "usedValue": 2.5, "limitValue": 10.0, "periodSeconds": 604800}],
+            "statusMetrics": [{"id": "expires", "label": "Expires", "text": "2027-01-01"}]
+        }))
+        .unwrap();
+        let weekly = MetricDefinition::quota_or_value(
+            "sub2api@2.weekly",
+            "Weekly",
+            "weekly",
+            true,
+            MetricSection::AlwaysVisible,
+            true,
+            "W",
+        );
+        assert!(snapshot.is_sub2api_subscription());
+        let metric = super::subscription_tray_metric(&weekly, &snapshot).unwrap();
+        assert_eq!(metric.value, "25%");
+        assert_eq!(metric.gauge.unwrap().display_fraction, 0.25);
+        snapshot.quotas[0].limit_value = None;
+        assert!(super::subscription_tray_metric(&weekly, &snapshot).is_none());
+        snapshot.quotas.clear();
+        snapshot.value_metrics.push(ValueMetric {
+            id: "weekly".into(),
+            label: "Weekly".into(),
+            expiries_at: vec![],
+            values: vec![MetricValue {
+                number: 11.0,
+                kind: MetricValueKind::Dollars,
+                label: None,
+                estimated: false,
+            }],
+        });
+        assert!(super::subscription_tray_metric(&weekly, &snapshot).is_none());
+        crate::providers::sub2api::restore_subscription_windows(&mut snapshot);
+        assert_eq!(
+            snapshot.quotas[0].format,
+            crate::models::QuotaFormat::UnlimitedDollars
+        );
+        assert_eq!(snapshot.quotas[0].used_value, Some(11.0));
+        assert!(super::subscription_tray_metric(&weekly, &snapshot).is_none());
+        let expires = MetricDefinition::status(
+            "sub2api@2.expires",
+            "Expires",
+            "expires",
+            true,
+            MetricSection::AlwaysVisible,
+            false,
+            "Exp",
+        );
+        assert!(super::subscription_tray_metric(&expires, &snapshot).is_none());
+    }
+
+    #[test]
     fn pinned_value_metrics_keep_numeric_values_outside_quota_bars() {
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: None,
@@ -1557,6 +1647,7 @@ mod tests {
     #[test]
     fn pinned_status_metrics_keep_text_and_never_create_a_gauge() {
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "grok".into(),
             plan: None,
@@ -1620,6 +1711,7 @@ mod tests {
             (100.0, "100%", "0%"),
         ] {
             let snapshot = ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: "codex".into(),
                 plan: None,
@@ -1670,6 +1762,7 @@ mod tests {
             )
         };
         let snapshot = |used_percent, resets_at| ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: None,

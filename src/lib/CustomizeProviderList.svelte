@@ -52,6 +52,7 @@
       const upstream = $sub2ApiUpstreams[provider.id];
       const endpoint = $sub2ApiEndpoints[provider.id];
       if (!upstream || !endpoint) return 'Not configured';
+      if (upstream === 'subscription') return `User subscription · ${endpoint}`;
       return `${sub2ApiUpstreamLabel(upstream)} relay · ${endpoint}`;
     }
     return `${availableMetricCount(provider)} metrics`;
@@ -87,9 +88,6 @@
         !provider.detected,
     ),
   );
-  const addableProviderName = $derived(
-    addableProvider ? catalog.connectionConfigurationLabel() : '',
-  );
   function updateProvider(provider: ProviderLayout) {
     onChange({
       ...settings,
@@ -121,7 +119,11 @@
       void getSub2ApiConfigState(provider.id)
         .then((state) => {
           if (state.configured) {
-            rememberSub2ApiUpstream(provider.id, state.upstream, state.baseUrl);
+            rememberSub2ApiUpstream(
+              provider.id,
+              state.mode === 'subscription' ? state.mode : state.upstream,
+              state.baseUrl,
+            );
           }
         })
         .catch(() => undefined);
@@ -196,13 +198,12 @@
               <button
                 class="provider-add-row"
                 type="button"
-                aria-label={`Add ${addableProviderName}`}
                 onclick={() => addProvider(addableProvider)}
               >
                 <span class="provider-add-icon"
                   ><Icon name="plus" size={18} strokeWidth={1.8} /></span
                 >
-                <span>Add {addableProviderName}</span>
+                <span>Add Account</span>
               </button>
             </div>
           {/if}

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, setContext, tick } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
     beginPanelResize,
@@ -50,7 +50,12 @@
   import { horizontalPageTransition, shouldSlideBetweenScreens } from './lib/pageTransition';
   import { desktopPlatform, shortcutLabels } from './lib/platform';
   import { withProviderName } from './lib/providerNames';
-  import { sub2ApiUpstreamAccountName, sub2ApiUpstreams } from './lib/sub2ApiUpstreams';
+  import {
+    isSub2ApiSubscription,
+    sub2ApiUpstreamAccountName,
+    sub2ApiUpstreams,
+    sub2ApiSnapshotContext,
+  } from './lib/sub2ApiUpstreams';
   import RenameProviderSheet from './lib/RenameProviderSheet.svelte';
   import {
     buildProviderShareRows,
@@ -70,6 +75,7 @@
   const emptyView: UsageViewState = { providers: {} };
 
   let viewState = $state<UsageViewState>(emptyView);
+  setContext(sub2ApiSnapshotContext, (id: string) => viewState.providers[id]?.snapshot);
   let catalog = $state<ProviderCatalogIndex>(emptyProviderCatalog);
   let screen = $state<Screen>('dashboard');
   let now = $state(Date.now());
@@ -462,6 +468,7 @@
           current.settings,
           now,
           viewMode,
+          isSub2ApiSubscription(parentSnapshot),
         );
       const rows = accounts
         ? accounts.flatMap((upstream) => [
@@ -476,6 +483,7 @@
 
       const canvas = renderProviderShareCard(catalog, {
         providerId,
+        upstreamProviderId: provider.upstreamProviderId ?? parentSnapshot?.upstreamProviderId,
         providerNames: current.settings.providerNames,
         plan: account
           ? [sub2ApiUpstreamAccountName(account.name), provider.plan].filter(Boolean).join(' · ')

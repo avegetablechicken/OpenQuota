@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, type Snippet } from 'svelte';
   import {
-    backfillSub2ApiHistory,
     clearSub2ApiConfig,
     deleteSub2ApiConfig,
     getSub2ApiConfigState,
@@ -19,7 +18,12 @@
     sub2ApiPublicName,
     sub2ApiUpstreamLabel,
   } from './sub2ApiUpstreams';
-  import type { Sub2ApiBillingMode, Sub2ApiConfigState, Sub2ApiUpstream } from './types';
+  import type {
+    Sub2ApiMode,
+    Sub2ApiConfigState,
+    Sub2ApiConfigInput,
+    Sub2ApiUpstream,
+  } from './types';
 
   interface Props {
     providerId: string;
@@ -28,21 +32,27 @@
   }
 
   interface ConnectionDraft {
+    providerSource: Sub2ApiUpstream;
+    clearSavedKey: boolean;
     baseUrl: string;
     providerName: string;
     customBaseUrl: boolean;
     email: string;
     password: string;
+    apiKey: string;
     revealPassword: boolean;
   }
 
   function emptyConnectionDraft(): ConnectionDraft {
     return {
+      providerSource: 'codex',
       baseUrl: '',
       providerName: '',
+      clearSavedKey: false,
       customBaseUrl: false,
       email: '',
       password: '',
+      apiKey: '',
       revealPassword: false,
     };
   }
@@ -51,28 +61,27 @@
 
   let connectionState = $state<Sub2ApiConfigState>({
     configured: false,
+    mode: 'subscription',
     baseUrl: '',
     codexProvider: '',
     customBaseUrl: false,
     email: '',
     upstream: 'codex',
-    billingMode: 'upstream',
   });
   let open = $state(false);
   let baseUrl = $state('');
   let providerName = $state('');
   let customBaseUrl = $state(false);
+  let mode = $state<Sub2ApiMode>('subscription');
+  let apiKey = $state('');
+  let clearSavedKey = $state(false);
   let email = $state('');
   let password = $state('');
   let upstream = $state<Sub2ApiUpstream>('codex');
-  let billingMode = $state<Sub2ApiBillingMode>('upstream');
+  let providerSource = $state<Sub2ApiUpstream>('codex');
   let revealPassword = $state(false);
-  let upstreamDrafts = $state<Record<Sub2ApiUpstream, ConnectionDraft>>({
-    codex: emptyConnectionDraft(),
-    claude: emptyConnectionDraft(),
-  });
+  let drafts = $state<Partial<Record<Sub2ApiMode, ConnectionDraft>>>({});
   let saving = $state(false);
-  let backfilling = $state(false);
   let confirmingClear = $state(false);
   let confirmingItemRemoval = $state(false);
   let error = $state<string | null>(null);
@@ -93,41 +102,51 @@
       ? Boolean(providerName.trim() && baseUrl.trim() && !providerError && !resolvingProvider)
       : Boolean(baseUrl.trim()),
   );
-  const canReuseSavedPassword = $derived(
-    connectionState.configured && upstream === connectionState.upstream,
+  const savedMode = $derived(
+    connectionState.mode ?? (connectionState.configured ? 'admin' : 'subscription'),
+  );
+  const summarySource = $derived.by(() => {
+    if (open) return mode === 'subscription' ? mode : upstream;
+    if (!connectionState.configured) return null;
+    return savedMode === 'subscription' ? savedMode : connectionState.upstream;
+  });
+  const summaryDetail = $derived.by(() => {
+    if (!open && !connectionState.configured) return 'Provider or custom Base URL';
+    if (summarySource === 'subscription') {
+      const address = open
+        ? providerName.trim() || baseUrl
+        : connectionState.codexProvider || connectionState.baseUrl;
+      return address || 'Provider or custom Base URL';
+    }
+    return (open ? email.trim() : connectionState.email) || 'Base URL and administrator login';
+  });
+  const savedProfile = $derived(mode === savedMode ? connectionState : connectionState.otherMode);
+  const canReuseCredential = $derived(
+    savedProfile?.configured &&
+      !savedProfile.useProviderKey &&
+      (savedProfile.mode ?? savedMode) === mode &&
+      (mode === 'admin' ||
+        providerSource === (savedProfile.providerSource ?? savedProfile.upstream) ||
+        (customBaseUrl && savedProfile.customBaseUrl)) &&
+      (mode !== 'subscription' ||
+        (customBaseUrl === savedProfile.customBaseUrl &&
+          providerName.trim() === (savedProfile.codexProvider ?? ''))) &&
+      baseUrl.trim().replace(/\/+$/, '') === savedProfile.baseUrl,
+  );
+  const keepSavedKey = $derived(canReuseCredential && !clearSavedKey);
+  const automaticKey = $derived(
+    mode === 'subscription' && !customBaseUrl && !apiKey.trim() && !keepSavedKey,
   );
   const canSave = $derived(
-    Boolean(endpointReady && email.trim() && (canReuseSavedPassword || password.trim()) && !saving),
+    Boolean(
+      endpointReady &&
+      (mode === 'subscription' || email.trim()) &&
+      (mode === 'subscription'
+        ? !customBaseUrl || keepSavedKey || apiKey.trim()
+        : canReuseCredential || password.trim()) &&
+      !saving,
+    ),
   );
-
-  const showsHistoryCoverage = $derived(
-    connectionState.configured &&
-      connectionState.billingMode === 'upstream' &&
-      billingMode === 'upstream' &&
-      upstream === connectionState.upstream &&
-      Boolean(connectionState.historyPricedFrom),
-  );
-
-  function localDateLabel(value: string) {
-    const [year, month, day] = value.split('-').map(Number);
-    return new Date(year, month - 1, day).toLocaleDateString(undefined, {
-      month: 'short',
-      day: 'numeric',
-    });
-  }
-
-  async function backfillHistory() {
-    if (saving || backfilling) return;
-    backfilling = true;
-    error = null;
-    try {
-      connectionState = await backfillSub2ApiHistory(providerId);
-    } catch (cause) {
-      error = errorMessage(cause, 'The Sub2API history backfill could not be started.');
-    } finally {
-      backfilling = false;
-    }
-  }
 
   function errorMessage(cause: unknown, fallback: string) {
     if (typeof cause === 'string') return cause;
@@ -141,35 +160,48 @@
   }
 
   function currentDraft(): ConnectionDraft {
-    return { baseUrl, providerName, customBaseUrl, email, password, revealPassword };
+    return {
+      providerSource,
+      baseUrl,
+      providerName,
+      customBaseUrl,
+      email,
+      password,
+      apiKey,
+      revealPassword,
+      clearSavedKey,
+    };
   }
 
   function applyDraft(draft: ConnectionDraft) {
+    providerSource = draft.providerName.trim() ? draft.providerSource : upstream;
+    clearSavedKey = draft.clearSavedKey;
     baseUrl = draft.baseUrl;
     providerName = draft.providerName;
     customBaseUrl = draft.customBaseUrl;
     email = draft.email;
+    apiKey = draft.apiKey;
     password = draft.password;
     revealPassword = draft.revealPassword;
   }
 
   function resetEditor(next = connectionState) {
-    const drafts: Record<Sub2ApiUpstream, ConnectionDraft> = {
-      codex: emptyConnectionDraft(),
-      claude: emptyConnectionDraft(),
-    };
-    drafts[next.upstream] = {
-      baseUrl: next.baseUrl,
-      providerName: next.codexProvider ?? '',
-      customBaseUrl: next.customBaseUrl,
-      email: next.email,
-      password: '',
-      revealPassword: false,
-    };
-    upstreamDrafts = drafts;
-    billingMode = next.billingMode ?? 'upstream';
+    drafts = {};
     upstream = next.upstream;
-    applyDraft(drafts[next.upstream]);
+    mode = next.mode ?? (next.configured ? 'admin' : 'subscription');
+    for (const profile of [next, next.otherMode]) {
+      if (!profile) continue;
+      const profileMode = profile.mode ?? mode;
+      drafts[profileMode] = {
+        ...emptyConnectionDraft(),
+        providerSource: profile.providerSource ?? profile.upstream,
+        baseUrl: profile.baseUrl,
+        providerName: profile.codexProvider ?? '',
+        customBaseUrl: profile.customBaseUrl,
+        email: profile.email,
+      };
+    }
+    applyDraft(drafts[mode]!);
     confirmingClear = false;
     error = null;
     providerError = null;
@@ -179,26 +211,32 @@
   }
 
   function syncRememberedUpstream(next: Sub2ApiConfigState) {
-    if (next.configured) rememberSub2ApiUpstream(providerId, next.upstream, next.baseUrl);
+    if (next.configured)
+      rememberSub2ApiUpstream(
+        providerId,
+        next.mode === 'subscription' ? next.mode : next.upstream,
+        next.baseUrl,
+      );
     else forgetSub2ApiUpstream(providerId);
   }
 
   function toggleEditor() {
     open = !open;
-    if (open) {
-      resetEditor();
-    } else {
-      cancelProviderResolution();
-      resolvingProvider = false;
-      providerResolution += 1;
-    }
+    resetEditor();
   }
 
   function selectUpstream(next: Sub2ApiUpstream) {
-    if (upstream === next) return;
-    upstreamDrafts[upstream] = currentDraft();
     upstream = next;
-    applyDraft(upstreamDrafts[next]);
+    if (mode === 'admin' && providerName.trim()) return;
+    providerSource = next;
+    if (!customBaseUrl && providerName.trim()) updateProvider(providerName);
+  }
+
+  function selectMode(next: Sub2ApiMode) {
+    drafts[mode] = currentDraft();
+    mode = next;
+    applyDraft(drafts[next] ?? emptyConnectionDraft());
+    error = null;
     providerError = null;
     resolvingProvider = false;
     cancelProviderResolution();
@@ -210,6 +248,7 @@
 
   function setCustomBaseUrl(next: boolean) {
     customBaseUrl = next;
+    providerSource = upstream;
     baseUrl = '';
     providerName = '';
     providerError = null;
@@ -219,6 +258,7 @@
   }
 
   function updateProvider(value: string) {
+    if (!value.trim() || !providerName.trim()) providerSource = upstream;
     providerName = value;
     baseUrl = '';
     providerError = null;
@@ -231,7 +271,7 @@
     }
     resolvingProvider = true;
     const resolveProvider =
-      upstream === 'claude' ? resolveSub2ApiClaudeProvider : resolveSub2ApiCodexProvider;
+      providerSource === 'claude' ? resolveSub2ApiClaudeProvider : resolveSub2ApiCodexProvider;
     providerResolutionTimer = window.setTimeout(() => {
       providerResolutionTimer = undefined;
       void resolveProvider(candidate)
@@ -252,23 +292,37 @@
   async function save() {
     if (!canSave) return;
     const previousState = connectionState;
-    const submitted = {
+    const submitted: Sub2ApiConfigInput = {
       baseUrl: baseUrl.trim(),
       codexProvider: providerName.trim(),
+      ...(!customBaseUrl && providerSource !== upstream ? { providerSource } : {}),
       customBaseUrl,
-      email: email.trim(),
-      password,
+      mode,
+      email: mode === 'admin' ? email.trim() : '',
+      password: mode === 'admin' ? password : '',
+      ...(automaticKey
+        ? { useProviderKey: true }
+        : mode === 'subscription'
+          ? { apiKey: apiKey.trim() }
+          : {}),
       upstream,
-      billingMode,
     };
     const optimisticState: Sub2ApiConfigState = {
+      mode: submitted.mode,
+      useProviderKey: automaticKey,
+      otherMode:
+        submitted.mode === savedMode
+          ? previousState.otherMode
+          : previousState.configured
+            ? { ...previousState, otherMode: undefined }
+            : undefined,
       configured: true,
       baseUrl: submitted.baseUrl,
       codexProvider: submitted.codexProvider,
       customBaseUrl: submitted.customBaseUrl,
       email: submitted.email,
       upstream: submitted.upstream,
-      billingMode: submitted.billingMode,
+      providerSource: submitted.providerSource ?? submitted.upstream,
     };
     saving = true;
     error = null;
@@ -285,12 +339,15 @@
     } catch (cause) {
       connectionState = previousState;
       syncRememberedUpstream(previousState);
+      resetEditor(previousState);
       baseUrl = submitted.baseUrl;
       providerName = submitted.codexProvider;
       customBaseUrl = submitted.customBaseUrl;
+      mode = submitted.mode;
+      clearSavedKey = Boolean(submitted.useProviderKey);
       email = submitted.email;
       upstream = submitted.upstream;
-      billingMode = submitted.billingMode;
+      providerSource = submitted.providerSource ?? submitted.upstream;
       revealPassword = false;
       confirmingClear = false;
       open = true;
@@ -377,13 +434,18 @@
   }
 
   onMount(() => {
+    const initialState = connectionState;
     void getSub2ApiConfigState(providerId)
       .then((next) => {
+        if (connectionState !== initialState) return;
         connectionState = next;
         syncRememberedUpstream(next);
-        resetEditor(next);
+        // Add can open before the initial read completes. Keep the in-progress
+        // drafts when the backend confirms there was no saved connection.
+        if (next.configured || !open) resetEditor(next);
       })
       .catch((cause) => {
+        if (connectionState !== initialState) return;
         error = errorMessage(cause, 'The Sub2API connection could not be read.');
         open = true;
       });
@@ -400,30 +462,10 @@
   <div class="sub2api-config-card" role="list" aria-label="Connection configurations">
     <div class="sub2api-config-item" role="listitem" aria-label="Connection">
       <div class="sub2api-config-summary">
-        <ProviderIcon
-          {providerId}
-          upstreamProvider={open
-            ? upstream
-            : connectionState.configured
-              ? connectionState.upstream
-              : null}
-          size={18}
-        />
+        <ProviderIcon {providerId} upstreamProvider={summarySource} size={18} />
         <span>
-          <b
-            >{open
-              ? sub2ApiPublicName(upstream)
-              : connectionState.configured
-                ? sub2ApiPublicName(connectionState.upstream)
-                : 'Not configured'}</b
-          >
-          <small
-            >{open
-              ? email.trim() || 'Base URL and administrator login'
-              : connectionState.configured
-                ? connectionState.email
-                : 'Base URL and administrator login'}</small
-          >
+          <b>{summarySource ? sub2ApiPublicName(summarySource) : 'Not configured'}</b>
+          <small>{summaryDetail}</small>
         </span>
         <i class:missing={!connectionState.configured} aria-hidden="true"></i>
         <button bind:this={toggleButton} type="button" aria-expanded={open} onclick={toggleEditor}
@@ -437,6 +479,19 @@
       {#if open}
         <div class="sub2api-config-editor">
           <div class="config-group">
+            <div class="config-row">
+              <span>Track</span>
+              <SelectMenu
+                label="Track"
+                value={mode}
+                options={[
+                  { value: 'subscription', label: 'User subscription' },
+                  { value: 'admin', label: 'Upstream accounts (admin)' },
+                ]}
+                disabled={saving}
+                onChange={(value) => selectMode(value as Sub2ApiMode)}
+              />
+            </div>
             <div class="config-row">
               <span>Upstream</span>
               <SelectMenu
@@ -452,7 +507,7 @@
             </div>
             <div class="config-row address-switch-row">
               <span>Custom Base URL</span>
-              <label class="switch custom-base-url-switch">
+              <label class="switch connection-switch">
                 <input
                   type="checkbox"
                   role="switch"
@@ -485,8 +540,10 @@
                   value={providerName}
                   autocomplete="off"
                   spellcheck="false"
-                  placeholder={upstream === 'claude' ? 'Settings name' : 'Provider or profile'}
-                  aria-label={upstream === 'claude'
+                  placeholder={providerSource === 'claude'
+                    ? 'Settings name'
+                    : 'Provider or profile'}
+                  aria-label={providerSource === 'claude'
                     ? 'Claude settings provider'
                     : 'Codex provider or profile'}
                   disabled={saving}
@@ -510,76 +567,74 @@
               {/if}
             {/if}
           </div>
-          <div class="config-group">
-            <label class="config-row">
-              <span>Email</span>
-              <input
-                type="email"
-                bind:value={email}
-                autocomplete="username"
-                spellcheck="false"
-                placeholder="admin@example.com"
-                aria-label="Sub2API administrator email"
-                disabled={saving}
-              />
-            </label>
+          {#if mode === 'subscription'}
             <div class="config-row">
-              <span>Password</span>
+              <span>API key</span>
               <div class="password-field">
                 <input
-                  type={revealPassword ? 'text' : 'password'}
-                  bind:value={password}
-                  autocomplete="current-password"
-                  placeholder={canReuseSavedPassword ? 'Unchanged' : 'Password'}
-                  aria-label="Sub2API administrator password"
+                  type="password"
+                  value={apiKey}
+                  oninput={(event) => {
+                    apiKey = event.currentTarget.value;
+                    if (!customBaseUrl) clearSavedKey = true;
+                  }}
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder={keepSavedKey
+                    ? 'Unchanged'
+                    : customBaseUrl
+                      ? 'Subscription API key'
+                      : 'From provider (optional override)'}
+                  aria-label="Sub2API subscription API key"
                   disabled={saving}
                 />
-                <button
-                  type="button"
-                  aria-label={revealPassword ? 'Hide password' : 'Show password'}
-                  onclick={() => (revealPassword = !revealPassword)}
-                >
-                  <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
-                </button>
+                {#if !customBaseUrl && keepSavedKey}
+                  <button
+                    type="button"
+                    aria-label="Clear saved API key"
+                    title="Clear saved API key"
+                    disabled={saving}
+                    onclick={() => (clearSavedKey = true)}
+                    ><Icon name="clear-filled" size={14} /></button
+                  >
+                {/if}
               </div>
             </div>
-          </div>
-          <div class="config-row">
-            <span>Billing method</span>
-            <SelectMenu
-              label="Billing method"
-              value={billingMode}
-              options={[
-                { value: 'upstream', label: 'Upstream' },
-                { value: 'server', label: 'Sub2API' },
-              ]}
-              disabled={saving}
-              onChange={(value) => (billingMode = value as Sub2ApiBillingMode)}
-            />
-          </div>
-          {#if showsHistoryCoverage}
-            <div class="config-row history-row">
-              <span>Usage history</span>
-              {#if connectionState.historyComplete}
-                <small>All 30 days at upstream prices</small>
-              {:else if connectionState.historyBackfillPending}
-                <small>Backfilling…</small>
-              {:else}
-                <button
-                  type="button"
-                  disabled={saving || backfilling}
-                  onclick={() => void backfillHistory()}
-                  >{backfilling ? 'Starting…' : 'Backfill 30 Days'}</button
-                >
-              {/if}
+          {:else}
+            <div class="config-group">
+              <label class="config-row">
+                <span>Email</span>
+                <input
+                  type="email"
+                  bind:value={email}
+                  autocomplete="username"
+                  spellcheck="false"
+                  placeholder="admin@example.com"
+                  aria-label="Sub2API administrator email"
+                  disabled={saving}
+                />
+              </label>
+              <div class="config-row">
+                <span>Password</span>
+                <div class="password-field">
+                  <input
+                    type={revealPassword ? 'text' : 'password'}
+                    bind:value={password}
+                    autocomplete="current-password"
+                    placeholder={canReuseCredential ? 'Unchanged' : 'Password'}
+                    aria-label="Sub2API administrator password"
+                    disabled={saving}
+                  />
+                  <button
+                    type="button"
+                    aria-label={revealPassword ? 'Hide password' : 'Show password'}
+                    onclick={() => (revealPassword = !revealPassword)}
+                  >
+                    <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
+                  </button>
+                </div>
+              </div>
             </div>
-            {#if !connectionState.historyComplete}
-              <p class="config-note" role="status" aria-label="Usage history coverage">
-                {connectionState.historyBackfillPending
-                  ? 'Each refresh downloads up to 2,048 earlier records until the 30-day window is complete.'
-                  : `Upstream prices start ${localDateLabel(connectionState.historyPricedFrom ?? '')}. Earlier days use Sub2API's cost. Backfilling downloads every request record of the past 30 days.`}
-              </p>
-            {/if}
           {/if}
           <div class="sub2api-config-actions">
             {#if connectionState.configured}
@@ -609,7 +664,8 @@
             >
               <strong id="clear-sub2api-title">Clear connection?</strong>
               <span id="clear-sub2api-message"
-                >The Base URL and saved login will be removed. This account will remain.</span
+                >The saved connections and credentials for both tracking modes will be removed. This
+                account will remain.</span
               >
               <div>
                 <button
@@ -794,25 +850,6 @@
     justify-self: start;
   }
 
-  .history-row small {
-    color: var(--secondary);
-    font-size: 11px;
-  }
-
-  .history-row button {
-    min-height: 24px;
-    padding: 4px 8px;
-    border: 0;
-    border-radius: 6px;
-    color: var(--text);
-    background: var(--button-hover);
-    font-size: 10px;
-  }
-
-  .history-row button:disabled {
-    opacity: 0.5;
-  }
-
   .config-note {
     margin: 0;
     padding-block: 1px 2px;
@@ -823,14 +860,14 @@
     text-align: right;
   }
 
-  .custom-base-url-switch {
+  .connection-switch {
     position: relative;
     display: block;
     width: 28px;
     height: 16px;
   }
 
-  .custom-base-url-switch input {
+  .connection-switch input {
     position: absolute;
     z-index: 1;
     inset: 0;
@@ -843,7 +880,7 @@
     cursor: pointer;
   }
 
-  .custom-base-url-switch input:disabled {
+  .connection-switch input:disabled {
     cursor: default;
   }
 

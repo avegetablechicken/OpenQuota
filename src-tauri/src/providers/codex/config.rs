@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ffi::OsStr, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -33,6 +38,12 @@ struct CodexConfig {
 #[derive(Deserialize)]
 struct ModelProvider {
     base_url: Option<String>,
+    env_key: Option<String>,
+    experimental_bearer_token: Option<String>,
+    #[serde(default)]
+    http_headers: HashMap<String, String>,
+    #[serde(default)]
+    env_http_headers: HashMap<String, String>,
 }
 
 pub fn resolve_provider_base_url(name: &str) -> Result<String, CodexConfigError> {
@@ -40,34 +51,87 @@ pub fn resolve_provider_base_url(name: &str) -> Result<String, CodexConfigError>
 }
 
 fn codex_config_directory() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    crate::provider_environment::value("CODEX_HOME")
         .map(PathBuf::from)
-        .unwrap_or_default()
-        .join(".codex")
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
 }
 
 fn resolve_provider_base_url_in_directory(
     name: &str,
     directory: PathBuf,
 ) -> Result<String, CodexConfigError> {
+    resolve_model_provider(name, &directory).map(|(base, _)| base)
+}
+
+pub(crate) fn subscription_credentials(
+    name: &str,
+) -> Result<(String, Option<String>), CodexConfigError> {
+    let directory = codex_config_directory();
+    let (base, provider) = resolve_model_provider(name, &directory)?;
+    Ok((base, provider.api_key(&directory)))
+}
+
+impl ModelProvider {
+    fn api_key(&self, directory: &Path) -> Option<String> {
+        let lookup = |name: &str| crate::codex_environment::provider_key(directory, name.trim());
+        if let Some(key) = self.env_key.as_deref().and_then(lookup).or_else(|| {
+            self.experimental_bearer_token
+                .as_ref()
+                .filter(|v| !v.trim().is_empty())
+                .cloned()
+        }) {
+            return Some(key.trim().to_owned());
+        }
+        for name in ["Authorization", "x-api-key"] {
+            let header = |headers: &HashMap<String, String>| {
+                headers
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.clone())
+            };
+            let value = header(&self.env_http_headers)
+                .and_then(|var| lookup(&var))
+                .or_else(|| header(&self.http_headers));
+            if let Some(value) = value {
+                let value = value.trim();
+                let key = if name == "Authorization" {
+                    value
+                        .split_once(' ')
+                        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+                        .map(|(_, key)| key.trim())
+                } else {
+                    Some(value)
+                };
+                if let Some(key) = key.filter(|key| !key.is_empty()) {
+                    return Some(key.to_owned());
+                }
+            }
+        }
+        None
+    }
+}
+
+fn resolve_model_provider(
+    name: &str,
+    directory: &Path,
+) -> Result<(String, ModelProvider), CodexConfigError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(CodexConfigError::MissingName);
     }
-    let main = read_config(directory.join("config.toml"));
-    if let Ok(config) = &main {
-        if config.model_provider.as_deref() == Some(name)
-            || config.model_providers.contains_key(name)
-        {
-            return provider_base_url(config, name);
+    let main_error = match read_config(directory.join("config.toml")) {
+        Ok(config) => {
+            if config.model_provider.as_deref() == Some(name)
+                || config.model_providers.contains_key(name)
+            {
+                return provider_entry(config, name);
+            }
+            None
         }
-    }
-    let Some(profile_path) = exact_profile_path(&directory, name)? else {
-        return Err(match main {
-            Err(error @ (CodexConfigError::Unreadable | CodexConfigError::Invalid)) => error,
-            _ => CodexConfigError::NotFound(name.to_owned()),
-        });
+        Err(error) => Some(error),
+    };
+    let Some(profile_path) = exact_profile_path(directory, name)? else {
+        return Err(main_error.unwrap_or_else(|| CodexConfigError::NotFound(name.to_owned())));
     };
     let text = fs::read_to_string(profile_path)
         .map_err(|_| CodexConfigError::ProfileUnreadable(name.to_owned()))?;
@@ -77,8 +141,9 @@ fn resolve_provider_base_url_in_directory(
         .model_provider
         .as_deref()
         .filter(|provider| !provider.is_empty())
-        .ok_or_else(|| CodexConfigError::ProfileMissingProvider(name.to_owned()))?;
-    provider_base_url(&profile, provider)
+        .ok_or_else(|| CodexConfigError::ProfileMissingProvider(name.to_owned()))?
+        .to_owned();
+    provider_entry(profile, &provider)
 }
 
 fn read_config(path: PathBuf) -> Result<CodexConfig, CodexConfigError> {
@@ -86,10 +151,7 @@ fn read_config(path: PathBuf) -> Result<CodexConfig, CodexConfigError> {
     toml::from_str(&text).map_err(|_| CodexConfigError::Invalid)
 }
 
-fn exact_profile_path(
-    directory: &PathBuf,
-    name: &str,
-) -> Result<Option<PathBuf>, CodexConfigError> {
+fn exact_profile_path(directory: &Path, name: &str) -> Result<Option<PathBuf>, CodexConfigError> {
     let expected = format!("{name}.config.toml");
     let entries = fs::read_dir(directory).map_err(|_| CodexConfigError::Unreadable)?;
     Ok(entries
@@ -98,15 +160,20 @@ fn exact_profile_path(
         .map(|entry| entry.path()))
 }
 
-fn provider_base_url(config: &CodexConfig, provider: &str) -> Result<String, CodexConfigError> {
-    config
-        .model_providers
-        .get(provider)
-        .and_then(|provider| provider.base_url.as_deref())
+fn provider_entry(
+    mut config: CodexConfig,
+    name: &str,
+) -> Result<(String, ModelProvider), CodexConfigError> {
+    let missing = || CodexConfigError::ProviderMissingBaseUrl(name.to_owned());
+    let provider = config.model_providers.remove(name).ok_or_else(missing)?;
+    let base = provider
+        .base_url
+        .as_deref()
         .map(str::trim)
-        .filter(|base_url| !base_url.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| CodexConfigError::ProviderMissingBaseUrl(provider.to_owned()))
+        .filter(|url| !url.is_empty())
+        .ok_or_else(missing)?
+        .to_owned();
+    Ok((base, provider))
 }
 
 #[cfg(test)]
@@ -160,6 +227,36 @@ base_url = "https://profile.example.com"
         assert_eq!(
             resolve_provider_base_url_in_directory("work", directory.path().into()).unwrap(),
             "https://profile.example.com"
+        );
+    }
+
+    #[test]
+    fn selected_provider_resolves_its_key_and_follows_dotenv_rotation() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("work.config.toml"),
+            r#"
+model_provider = "relay"
+[model_providers.relay]
+base_url = "https://relay.example/v1"
+env_key = "OPENQUOTA_TEST_RELAY_KEY"
+experimental_bearer_token = "fixture-fallback"
+"#,
+        )
+        .unwrap();
+        let (_, provider) = super::resolve_model_provider("work", dir.path()).unwrap();
+        for value in ["first", "second"] {
+            fs::write(
+                dir.path().join(".env"),
+                format!("SOURCE={value}\nOPENQUOTA_TEST_RELAY_KEY=${{SOURCE}}\n"),
+            )
+            .unwrap();
+            assert_eq!(provider.api_key(dir.path()).as_deref(), Some(value));
+        }
+        fs::write(dir.path().join(".env"), "DIFFERENT_PROVIDER_KEY=unrelated").unwrap();
+        assert_eq!(
+            provider.api_key(dir.path()).as_deref(),
+            Some("fixture-fallback")
         );
     }
 

@@ -13,9 +13,9 @@ import sub2api from '../assets/provider-icons/sub2api.svg?raw';
 import zai from '../assets/provider-icons/zai.svg?raw';
 import { get } from 'svelte/store';
 import { sub2ApiUpstreams } from './sub2ApiUpstreams';
-import type { Sub2ApiUpstream } from './types';
+import type { Sub2ApiSource } from './types';
 
-const visuals: Record<string, { source: string; color: string | null }> = {
+const visuals: Record<string, { source: string; color: string | null; outlined?: boolean }> = {
   antigravity: { source: antigravity, color: '#4285F4' },
   claude: { source: claude, color: '#DE7356' },
   codex: { source: codex, color: null },
@@ -27,7 +27,7 @@ const visuals: Record<string, { source: string; color: string | null }> = {
   minimax: { source: minimax, color: '#E2167E' },
   opencode: { source: opencode, color: null },
   openrouter: { source: openrouter, color: null },
-  sub2api: { source: sub2api, color: '#39D9E7' },
+  sub2api: { source: sub2api, color: '#39D9E7', outlined: true },
   zai: { source: zai, color: null },
 };
 
@@ -52,20 +52,27 @@ export function providerIconPath(providerId: string) {
   return [...source.matchAll(/<path\b[^>]*\bd="([^"]+)"/g)].map((match) => match[1]).join(' ');
 }
 
+export function providerIconOutlined(providerId: string) {
+  return visuals[providerFamily(providerId)]?.outlined ?? false;
+}
+
 export function providerIconColor(providerId: string) {
   return visuals[providerFamily(providerId)]?.color ?? null;
 }
 
 export function providerSpendColorVariable(
   providerId: string,
-  upstream: Sub2ApiUpstream | undefined = get(sub2ApiUpstreams)[providerId],
+  upstream: Sub2ApiSource | undefined = get(sub2ApiUpstreams)[providerId],
 ) {
   if (providerId === OTHERS_SPEND_ID) return '--provider-others';
   if (providerId === UNPRICED_OTHERS_SPEND_ID) return '--provider-others-unpriced';
   const family = providerFamily(providerId);
   if (family !== 'sub2api') return `--provider-${family}`;
   const slot = sub2ApiColorSlot(providerId);
-  const base = upstream ? `--provider-sub2api-${upstream}` : '--provider-sub2api';
+  const base =
+    upstream && upstream !== 'subscription'
+      ? `--provider-sub2api-${upstream}`
+      : '--provider-sub2api';
   return slot === 1 ? base : `${base}-${slot}`;
 }
 

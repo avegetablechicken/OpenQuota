@@ -1,14 +1,13 @@
 mod cache;
 mod reported;
+mod subscription;
+pub(crate) use subscription::restore_subscription_windows;
 mod usage;
 
 use cache::UsageCache;
 use reported::AccountStats;
 
-use crate::{
-    pricing::{ModelPricing, PricingStore},
-    providers::daily_usage::DailyUsageAccumulator,
-};
+use crate::{pricing::PricingStore, providers::daily_usage::DailyUsageAccumulator};
 use std::{
     collections::HashMap,
     fs,
@@ -73,15 +72,32 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
                 true,
                 "S",
             ),
-            MetricDefinition::quota(
+            MetricDefinition::quota_or_value(
                 &metric_id("weekly"),
                 "Weekly",
                 "weekly",
-                false,
                 true,
                 MetricSection::AlwaysVisible,
                 true,
                 "W",
+            ),
+            MetricDefinition::quota_or_value(
+                &metric_id("daily"),
+                "Daily",
+                "daily",
+                false,
+                MetricSection::OnDemand,
+                false,
+                "D",
+            ),
+            MetricDefinition::quota_or_value(
+                &metric_id("monthly"),
+                "Monthly",
+                "monthly",
+                false,
+                MetricSection::OnDemand,
+                false,
+                "M",
             ),
             MetricDefinition::quota(
                 &metric_id("sonnet"),
@@ -181,15 +197,25 @@ pub fn metric_supported(
     else {
         return true;
     };
+    if upstream_provider_id == Some("subscription") {
+        return matches!(
+            suffix,
+            "daily" | "weekly" | "monthly" | "today" | "yesterday" | "last30" | "trend"
+        );
+    }
     match suffix {
-        "extra" => false,
+        "daily" | "monthly" | "extra" => false,
         "spark" | "sparkWeekly" | "rateLimitResets" => upstream_provider_id != Some("claude"),
         "sonnet" | "fable" => upstream_provider_id != Some("codex"),
         _ => true,
     }
 }
 
-pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<MetricLayout> {
+pub fn metric_template(
+    provider_id: &str,
+    upstream: Sub2ApiUpstream,
+    mode: Sub2ApiMode,
+) -> Vec<MetricLayout> {
     let metric = |suffix: &str, enabled: bool, section: MetricSection, pinned: bool| MetricLayout {
         id: format!("{provider_id}.{suffix}"),
         enabled,
@@ -198,6 +224,29 @@ pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<Metr
     };
     let always = MetricSection::AlwaysVisible;
     let demand = MetricSection::OnDemand;
+    if mode == Sub2ApiMode::Subscription {
+        let mut template = vec![
+            metric("daily", true, always, true),
+            metric("weekly", true, always, true),
+            metric("monthly", true, always, false),
+            metric("trend", true, always, false),
+            metric("today", true, demand, false),
+            metric("yesterday", true, demand, false),
+            metric("last30", true, demand, false),
+        ];
+        for suffix in [
+            "session",
+            "sonnet",
+            "fable",
+            "extra",
+            "spark",
+            "sparkWeekly",
+            "rateLimitResets",
+        ] {
+            template.push(metric(suffix, false, demand, false));
+        }
+        return template;
+    }
     match upstream {
         Sub2ApiUpstream::Claude => vec![
             metric("session", true, always, true),
@@ -230,26 +279,33 @@ pub fn metric_template(provider_id: &str, upstream: Sub2ApiUpstream) -> Vec<Metr
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// Older admin snapshots can contain instance-priced daily summaries.
+const ADMIN_CACHE_KEY: &str = "sub2api-upstream-price-v2";
+const SUBSCRIPTION_CACHE_KEY: &str = "sub2api-subscription-v1";
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Sub2ApiBillingMode {
+pub enum Sub2ApiMode {
     #[default]
-    Upstream,
-    Server,
+    Subscription,
+    Admin,
 }
 
-impl Sub2ApiBillingMode {
-    fn cache_key(self) -> &'static str {
-        match self {
-            Self::Upstream => "sub2api-upstream-price-v1",
-            Self::Server => "sub2api-server-price-v1",
-        }
-    }
+fn legacy_admin_mode() -> Sub2ApiMode {
+    Sub2ApiMode::Admin
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sub2ApiConfigInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_source: Option<Sub2ApiUpstream>,
+    #[serde(default)]
+    pub use_provider_key: bool,
+    #[serde(default = "legacy_admin_mode")]
+    pub mode: Sub2ApiMode,
+    #[serde(default)]
+    pub api_key: String,
     pub base_url: String,
     #[serde(default)]
     // Legacy wire key shared by both upstreams for stored-configuration compatibility.
@@ -260,19 +316,24 @@ pub struct Sub2ApiConfigInput {
     pub password: String,
     #[serde(default)]
     pub upstream: Sub2ApiUpstream,
-    #[serde(default)]
-    pub billing_mode: Sub2ApiBillingMode,
 }
 
 impl Drop for Sub2ApiConfigInput {
     fn drop(&mut self) {
         self.password.zeroize();
+        self.api_key.zeroize();
     }
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Sub2ApiConfigState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_source: Option<Sub2ApiUpstream>,
+    pub use_provider_key: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_mode: Option<Box<Sub2ApiConfigState>>,
+    pub mode: Sub2ApiMode,
     pub configured: bool,
     pub base_url: String,
     // Legacy wire key shared by both upstreams for stored-configuration compatibility.
@@ -280,11 +341,6 @@ pub struct Sub2ApiConfigState {
     pub custom_base_url: bool,
     pub email: String,
     pub upstream: Sub2ApiUpstream,
-    pub billing_mode: Sub2ApiBillingMode,
-    /// First local date priced from request records; earlier days use the server summary.
-    pub history_priced_from: Option<String>,
-    pub history_complete: bool,
-    pub history_backfill_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -334,8 +390,14 @@ impl std::fmt::Display for Sub2ApiUpstream {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct StoredConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_source: Option<Sub2ApiUpstream>,
+    #[serde(default = "legacy_admin_mode")]
+    mode: Sub2ApiMode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    api_key: String,
     base_url: String,
     #[serde(default)]
     codex_provider: String,
@@ -346,23 +408,43 @@ struct StoredConfig {
     #[serde(default)]
     upstream: Sub2ApiUpstream,
     #[serde(default)]
-    billing_mode: Sub2ApiBillingMode,
-    #[serde(default)]
     metric_template_version: u8,
 }
 
-impl Clone for StoredConfig {
-    fn clone(&self) -> Self {
-        Self {
-            base_url: self.base_url.clone(),
-            codex_provider: self.codex_provider.clone(),
-            custom_base_url: self.custom_base_url,
-            email: self.email.clone(),
-            password: self.password.clone(),
-            upstream: self.upstream,
-            billing_mode: self.billing_mode,
-            metric_template_version: self.metric_template_version,
+/// Keep the active fields at the top level so existing single-mode keychain records
+/// deserialize directly. Both modes are replaced together in a single secure write.
+#[derive(Serialize, Deserialize)]
+struct StoredConnections {
+    #[serde(flatten)]
+    active: StoredConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    other: Option<StoredConfig>,
+}
+
+impl StoredConnections {
+    fn for_mode(&self, mode: Sub2ApiMode) -> Option<&StoredConfig> {
+        if self.active.mode == mode {
+            Some(&self.active)
+        } else {
+            self.other.as_ref().filter(|config| config.mode == mode)
         }
+    }
+
+    fn with_active(active: StoredConfig, previous: Option<Self>) -> Self {
+        let other = previous.and_then(|old| {
+            if old.active.mode == active.mode {
+                old.other
+            } else {
+                Some(old.active)
+            }
+        });
+        Self { active, other }
+    }
+
+    fn state(&self) -> Sub2ApiConfigState {
+        let mut state = self.active.state();
+        state.other_mode = self.other.as_ref().map(|config| Box::new(config.state()));
+        state
     }
 }
 
@@ -374,20 +456,59 @@ pub struct Sub2ApiConfigSaveOutcome {
 impl Drop for StoredConfig {
     fn drop(&mut self) {
         self.password.zeroize();
+        self.api_key.zeroize();
     }
 }
 
 impl StoredConfig {
+    fn subscription_key(&self) -> Result<Zeroizing<String>, Sub2ApiError> {
+        if !self.api_key.is_empty() {
+            return Ok(Zeroizing::new(self.api_key.clone()));
+        }
+        if self.custom_base_url || self.codex_provider.is_empty() {
+            return Err(Sub2ApiError::MissingApiKey);
+        }
+        let (url, key) = match self.provider_source.unwrap_or(self.upstream) {
+            Sub2ApiUpstream::Codex => {
+                let (url, key) =
+                    super::codex::config::subscription_credentials(&self.codex_provider)?;
+                (normalized_codex_provider_base_url_text(&url)?, key)
+            }
+            Sub2ApiUpstream::Claude => {
+                let (url, key) =
+                    super::claude::config::subscription_credentials(&self.codex_provider)?;
+                (normalized_base_url_text(&url)?, key)
+            }
+        };
+        if url != self.base_url {
+            return Err(Sub2ApiError::ProviderEndpointChanged);
+        }
+        key.map(Zeroizing::new)
+            .ok_or(Sub2ApiError::MissingProviderKey)
+    }
+
+    fn cache_key(&self) -> &'static str {
+        match self.mode {
+            Sub2ApiMode::Subscription => SUBSCRIPTION_CACHE_KEY,
+            Sub2ApiMode::Admin => ADMIN_CACHE_KEY,
+        }
+    }
+
     fn state(&self) -> Sub2ApiConfigState {
         Sub2ApiConfigState {
+            provider_source: self.provider_source,
+            use_provider_key: self.mode == Sub2ApiMode::Subscription
+                && !self.custom_base_url
+                && self.api_key.is_empty(),
             configured: true,
+            mode: self.mode,
             base_url: self.base_url.clone(),
             codex_provider: self.codex_provider.clone(),
             custom_base_url: self.custom_base_url
                 || (self.upstream == Sub2ApiUpstream::Claude && self.codex_provider.is_empty()),
             email: self.email.clone(),
             upstream: self.upstream,
-            billing_mode: self.billing_mode,
+
             ..Sub2ApiConfigState::default()
         }
     }
@@ -399,6 +520,18 @@ enum Sub2ApiError {
     MissingConfig,
     #[error("Enter a valid Base URL, email, and password.")]
     InvalidConfig,
+    #[error("Enter an API key for this Sub2API subscription.")]
+    MissingApiKey,
+    #[error("No API key was found for this provider. Check its credentials or enter an API key.")]
+    MissingProviderKey,
+    #[error(
+        "The provider Base URL has changed. Save the connection again to use the new endpoint."
+    )]
+    ProviderEndpointChanged,
+    #[error("Sub2API rejected the API key or denied access to its subscription.")]
+    ApiKeyRejected,
+    #[error("This API key does not report subscription details. Use a key linked to a subscription without key-level limits.")]
+    NoSubscription,
     #[error("Clear Provider when using a custom Base URL.")]
     ProviderWithCustomBaseUrl,
     #[error(transparent)]
@@ -407,7 +540,13 @@ enum Sub2ApiError {
     ClaudeConfig(#[from] ClaudeConfigError),
     #[error("The Sub2API connection could not be read or updated securely.")]
     CredentialStorage,
-    #[error("Sub2API rejected the administrator email or password.")]
+    #[error(
+        "Sub2API rejected the administrator login. Check the instance address and login details."
+    )]
+    LoginRejected,
+    #[error("The relay requires a Bearer API token before it can forward a password login. In Custom Base URL, enter the Sub2API instance address.")]
+    RelayRequiresKey,
+    #[error("Sub2API rejected the session token for an administrator request.")]
     Authentication,
     #[error("This Sub2API login does not have administrator access.")]
     Permission,
@@ -419,7 +558,7 @@ enum Sub2ApiError {
     RequestFailed(u16),
     #[error("Could not reach Sub2API. Check the Base URL and connection.")]
     ConnectionFailed,
-    #[error("Sub2API usage history backfill continues on the next refresh.")]
+    #[error("Sub2API usage history sync continues on the next refresh.")]
     HistorySyncPending,
     #[error("The local Sub2API usage cache is unavailable.")]
     HistoryCache,
@@ -433,18 +572,24 @@ impl From<Sub2ApiError> for ProviderError {
 
         let kind = match error {
             Sub2ApiError::MissingConfig
+            | Sub2ApiError::LoginRejected
+            | Sub2ApiError::RelayRequiresKey
             | Sub2ApiError::Authentication
+            | Sub2ApiError::ApiKeyRejected
+            | Sub2ApiError::MissingApiKey
+            | Sub2ApiError::MissingProviderKey
             | Sub2ApiError::TwoFactorRequired => Kind::Authentication,
             Sub2ApiError::Permission => Kind::Permission,
             Sub2ApiError::CredentialStorage => Kind::CredentialStorage,
             Sub2ApiError::HistorySyncPending
             | Sub2ApiError::HistoryCache
+            | Sub2ApiError::ProviderEndpointChanged
             | Sub2ApiError::CodexConfig(_)
             | Sub2ApiError::ClaudeConfig(_) => Kind::LocalData,
             Sub2ApiError::RateLimited => Kind::RateLimited,
             Sub2ApiError::RequestFailed(_) | Sub2ApiError::ConnectionFailed => Kind::Network,
             Sub2ApiError::InvalidConfig | Sub2ApiError::ProviderWithCustomBaseUrl => Kind::Internal,
-            Sub2ApiError::InvalidResponse => Kind::InvalidResponse,
+            Sub2ApiError::InvalidResponse | Sub2ApiError::NoSubscription => Kind::InvalidResponse,
         };
         ProviderError::from_display(kind, error)
     }
@@ -527,6 +672,23 @@ impl Sub2ApiClient {
             .send()
             .map_err(|error| transport_error("login", &error))?;
         let status = response.status();
+        if status == StatusCode::UNAUTHORIZED {
+            let body = response.json::<Value>().ok();
+            let message = body
+                .as_ref()
+                .and_then(|body| body.pointer("/error/message"))
+                .and_then(Value::as_str);
+            if matches!(
+                message,
+                Some("An API Bearer token is required." | "A configured Bearer token is required.")
+            ) {
+                return Err(Sub2ApiError::RelayRequiresKey);
+            }
+            return Err(Sub2ApiError::LoginRejected);
+        }
+        if status == StatusCode::FORBIDDEN {
+            return Err(Sub2ApiError::LoginRejected);
+        }
         if !status.is_success() {
             return Err(classify_status(status));
         }
@@ -534,7 +696,7 @@ impl Sub2ApiClient {
             .json::<Envelope<LoginData>>()
             .map_err(|_| Sub2ApiError::InvalidResponse)?;
         if envelope.code != 0 {
-            return Err(Sub2ApiError::Authentication);
+            return Err(Sub2ApiError::LoginRejected);
         }
         let data = envelope.data.ok_or(Sub2ApiError::InvalidResponse)?;
         if data.requires_2fa {
@@ -700,83 +862,6 @@ fn transport_error(stage: &str, error: &reqwest::Error) -> Sub2ApiError {
     Sub2ApiError::ConnectionFailed
 }
 
-/// Model row for days before Upstream coverage, priced by the Sub2API instance.
-const REPORTED_MODEL: &str = "Before sync (Sub2API cost)";
-
-/// First local date of the 30-day window: today and the previous 29 local dates.
-fn history_window_start(now: chrono::DateTime<Utc>) -> chrono::NaiveDate {
-    now.with_timezone(&chrono::Local)
-        .date_naive()
-        .checked_sub_days(chrono::Days::new(29))
-        .unwrap_or(chrono::NaiveDate::MIN)
-}
-
-fn cache_scope(config: &StoredConfig) -> String {
-    crate::hashing::sha256_hex(
-        format!("{}\0{}\0{}", config.base_url, config.email, config.upstream).as_bytes(),
-    )
-}
-
-enum ConnectionHistory {
-    Upstream {
-        pricing: Arc<ModelPricing>,
-        total: DailyUsageAccumulator,
-    },
-    Server(AccountStats),
-}
-
-impl ConnectionHistory {
-    fn fetch_account(
-        &mut self,
-        client: &Sub2ApiClient,
-        token: &str,
-        account: &Sub2ApiAccount,
-        upstream: Sub2ApiUpstream,
-        now: chrono::DateTime<Utc>,
-        cache: &mut UsageCache,
-    ) -> Result<UsageHistory, Sub2ApiError> {
-        match self {
-            Self::Upstream { pricing, total } => {
-                let (rows, covered) =
-                    client.priced_usage(token, account, upstream, now, pricing, cache)?;
-                let mut history = DailyUsageAccumulator::default();
-                for row in rows {
-                    row.add_to(&mut history);
-                    row.add_to(total);
-                }
-                let since = history_window_start(now);
-                if covered > since {
-                    // Days before local coverage use the server's own summary instead of
-                    // downloading every request record of the month.
-                    let stats = client.past_stats(token, account, now, cache)?;
-                    for (date, tokens, cost) in stats.days_before(since, covered) {
-                        for target in [&mut history, &mut *total] {
-                            match cost {
-                                Some(cost) => target.add_exact(date, tokens, cost, REPORTED_MODEL),
-                                None => target.add_unpriced(date, tokens, REPORTED_MODEL),
-                            }
-                        }
-                    }
-                }
-                Ok(history.build(now, SOURCE))
-            }
-            Self::Server(total) => {
-                let stats = client.cached_stats(token, account, now, cache)?;
-                let account = stats.clone().into_history(now);
-                total.extend(stats);
-                Ok(account)
-            }
-        }
-    }
-
-    fn finish(self, now: chrono::DateTime<Utc>) -> UsageHistory {
-        match self {
-            Self::Upstream { total, .. } => total.build(now, SOURCE),
-            Self::Server(total) => total.into_history(now),
-        }
-    }
-}
-
 pub struct Sub2ApiProvider {
     pricing: Arc<PricingStore>,
     provider_id: String,
@@ -784,6 +869,7 @@ pub struct Sub2ApiProvider {
     configured_marker: PathBuf,
     configured: AtomicBool,
     session: Mutex<Option<CachedSession>>,
+    model_families: Mutex<Option<subscription::CachedModelFamilies>>,
     history_lock: Mutex<()>,
 }
 
@@ -802,41 +888,16 @@ impl Sub2ApiProvider {
             configured_marker,
             configured: AtomicBool::new(configured),
             session: Mutex::new(None),
+            model_families: Mutex::new(None),
             history_lock: Mutex::new(()),
         }
     }
 
     pub fn config_state(&self) -> Result<Sub2ApiConfigState, ProviderError> {
-        let Some(config) = self.load_config()? else {
-            return Ok(Sub2ApiConfigState::default());
-        };
-        let mut state = config.state();
-        let since = history_window_start(Utc::now());
-        let coverage = {
-            let _guard = self
-                .history_lock
-                .lock()
-                .map_err(|_| Sub2ApiError::HistoryCache)?;
-            UsageCache::coverage_summary(&self.cache_path(), &cache_scope(&config), since)?
-        };
-        state.history_priced_from = coverage.priced_from.map(|day| day.to_string());
-        state.history_complete = coverage.priced_from.is_some_and(|day| day <= since);
-        state.history_backfill_pending = coverage.backfill_pending;
-        Ok(state)
-    }
-
-    /// Asks later refreshes to download the remaining request records of the 30-day
-    /// window, a bounded number of pages per refresh. The caller starts a refresh.
-    pub fn request_history_backfill(&self) -> Result<Sub2ApiConfigState, ProviderError> {
-        let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
-        {
-            let _guard = self
-                .history_lock
-                .lock()
-                .map_err(|_| Sub2ApiError::HistoryCache)?;
-            UsageCache::request_backfill(&self.cache_path(), &cache_scope(&config))?;
-        }
-        self.config_state()
+        Ok(self
+            .load_connections()?
+            .map(|connections| connections.state())
+            .unwrap_or_default())
     }
 
     fn cache_path(&self) -> PathBuf {
@@ -847,47 +908,67 @@ impl Sub2ApiProvider {
         &self,
         input: Sub2ApiConfigInput,
     ) -> Result<Sub2ApiConfigSaveOutcome, ProviderError> {
-        let previous = self.load_config()?;
-        let password = password_for_save(&input, previous.as_ref())?;
-        let apply_metric_template = should_apply_metric_template(previous.as_ref(), input.upstream);
+        let previous = self.load_connections()?;
+        let apply_metric_template = should_apply_metric_template(
+            previous.as_ref().map(|saved| &saved.active),
+            input.mode,
+            input.upstream,
+        );
         let (base_url, codex_provider, custom_base_url) = connection_target(
             &input,
             resolve_codex_provider_base_url,
             resolve_claude_provider_base_url,
         )?;
+        let secret = credential_for_save(
+            &input,
+            &base_url,
+            previous
+                .as_ref()
+                .and_then(|saved| saved.for_mode(input.mode)),
+        )?;
+        let (email, password, api_key) = match input.mode {
+            Sub2ApiMode::Admin => (input.email.trim().to_owned(), secret, String::new()),
+            Sub2ApiMode::Subscription => (String::new(), String::new(), secret),
+        };
         let config = StoredConfig {
+            provider_source: input.provider_source,
+            mode: input.mode,
+            api_key,
             base_url,
             codex_provider,
             custom_base_url,
-            email: input.email.trim().to_owned(),
+            email,
             password,
             upstream: input.upstream,
-            billing_mode: input.billing_mode,
             metric_template_version: if apply_metric_template {
                 0
             } else {
                 METRIC_TEMPLATE_VERSION
             },
         };
-        if config.email.is_empty() || config.password.is_empty() {
-            return Err(Sub2ApiError::InvalidConfig.into());
-        }
 
-        self.write_config(&config)?;
-        self.set_configuration_marker(Some(config.billing_mode))?;
+        if config.mode == Sub2ApiMode::Subscription && config.api_key.is_empty() {
+            // Validate locally, then resolve again on refresh to follow key rotations.
+            config.subscription_key()?;
+        }
+        let connections = StoredConnections::with_active(config, previous);
+        self.write_connections(&connections)?;
+        self.set_configuration_marker(Some(connections.active.cache_key()))?;
         if let Ok(mut cached) = self.session.lock() {
             *cached = None;
         }
         Ok(Sub2ApiConfigSaveOutcome {
-            state: config.state(),
+            state: connections.state(),
             apply_metric_template,
         })
     }
 
     pub fn mark_metric_template_applied(&self) -> Result<(), ProviderError> {
-        let mut config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
-        config.metric_template_version = METRIC_TEMPLATE_VERSION;
-        self.write_config(&config).map_err(ProviderError::from)
+        let mut config = self
+            .load_connections()?
+            .ok_or(Sub2ApiError::MissingConfig)?;
+        config.active.metric_template_version = METRIC_TEMPLATE_VERSION;
+        self.write_connections(&config).map_err(ProviderError::from)
     }
 
     pub fn delete_config(&self) -> Result<Sub2ApiConfigState, ProviderError> {
@@ -950,6 +1031,15 @@ impl Sub2ApiProvider {
         preview: &dyn Fn(ProviderSnapshot),
     ) -> Result<ProviderSnapshot, Sub2ApiError> {
         let client = Sub2ApiClient::for_provider(&config.base_url, &self.provider_id)?;
+        if config.mode == Sub2ApiMode::Subscription {
+            let key = config.subscription_key()?;
+            let mut snapshot =
+                client.subscription_snapshot(&key, self.empty_snapshot(Vec::new()))?;
+            snapshot.upstream_provider_id = client
+                .subscription_icon(&key, &self.model_families)
+                .map(str::to_owned);
+            return Ok(snapshot);
+        }
         let mut session = self.session(config)?;
         let accounts = self.with_session(config, &mut session, |token| {
             client.accounts(token, config.upstream)
@@ -968,26 +1058,37 @@ impl Sub2ApiProvider {
         }
         preview(self.connection_snapshot(snapshots.clone(), UsageHistory::default()));
 
-        let mut histories = match config.billing_mode {
-            Sub2ApiBillingMode::Upstream => ConnectionHistory::Upstream {
-                pricing: self.pricing.current(),
-                total: DailyUsageAccumulator::default(),
-            },
-            Sub2ApiBillingMode::Server => ConnectionHistory::Server(AccountStats::default()),
-        };
-        let mut cache = UsageCache::open(&self.cache_path(), &cache_scope(config))?;
+        let pricing = self.pricing.current();
+        let mut total = DailyUsageAccumulator::default();
+        let mut complete = true;
+        let mut cache =
+            UsageCache::for_connection(&self.cache_path(), &config.base_url, &config.email)?;
         for (account, snapshot) in accounts.iter().zip(&mut snapshots) {
-            let history = self.with_session(config, &mut session, |token| {
-                histories.fetch_account(&client, token, account, config.upstream, now, &mut cache)
-            })?;
-            snapshot.snapshot.usage_histories = UsageHistories::account(history);
+            let rows = match self.with_session(config, &mut session, |token| {
+                client.priced_usage(token, account, config.upstream, now, &pricing, &mut cache)
+            }) {
+                Ok(rows) => rows,
+                Err(Sub2ApiError::HistorySyncPending) => {
+                    complete = false;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let mut history = DailyUsageAccumulator::default();
+            for row in rows {
+                row.add_to(&mut history);
+                row.add_to(&mut total);
+            }
+            snapshot.snapshot.usage_histories = UsageHistories::account(history.build(now, SOURCE));
         }
-        if config.billing_mode == Sub2ApiBillingMode::Upstream {
-            cache.finish_backfill()?;
-        }
-        // Publish only complete connection snapshots. The service retains the last successful
-        // in-memory and persisted snapshot when any upstream request fails.
-        Ok(self.connection_snapshot(snapshots, histories.finish(now)))
+        // Quotas and fully synced accounts stay visible during the initial sync. A
+        // connection total is meaningful only when it includes every active account.
+        let history = if complete {
+            total.build(now, SOURCE)
+        } else {
+            UsageHistory::default()
+        };
+        Ok(self.connection_snapshot(snapshots, history))
     }
 
     /// Runs one administrator request, logging in again once if the cached token expired.
@@ -1026,6 +1127,7 @@ impl Sub2ApiProvider {
 
     fn empty_snapshot(&self, warnings: Vec<String>) -> ProviderSnapshot {
         ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: self.provider_id.clone(),
             plan: None,
@@ -1074,6 +1176,7 @@ impl Sub2ApiProvider {
         };
         let quotas = normalize_refreshed_quotas(config.upstream, quotas, now);
         Ok(ProviderSnapshot {
+            upstream_provider_id: Some(config.upstream.provider_id().into()),
             accounts: None,
             provider_id: self.provider_id.clone(),
             plan,
@@ -1095,17 +1198,14 @@ impl Sub2ApiProvider {
         }
     }
 
-    fn set_configuration_marker(
-        &self,
-        mode: Option<Sub2ApiBillingMode>,
-    ) -> Result<(), Sub2ApiError> {
-        if let Some(mode) = mode {
+    fn set_configuration_marker(&self, cache_key: Option<&str>) -> Result<(), Sub2ApiError> {
+        if let Some(cache_key) = cache_key {
             let parent = self
                 .configured_marker
                 .parent()
                 .ok_or(Sub2ApiError::CredentialStorage)?;
             fs::create_dir_all(parent).map_err(|_| Sub2ApiError::CredentialStorage)?;
-            fs::write(&self.configured_marker, mode.cache_key())
+            fs::write(&self.configured_marker, cache_key)
                 .map_err(|_| Sub2ApiError::CredentialStorage)?;
         } else {
             match fs::remove_file(&self.configured_marker) {
@@ -1114,11 +1214,15 @@ impl Sub2ApiProvider {
                 Err(_) => return Err(Sub2ApiError::CredentialStorage),
             }
         }
-        self.configured.store(mode.is_some(), Ordering::SeqCst);
+        self.configured.store(cache_key.is_some(), Ordering::SeqCst);
         Ok(())
     }
 
     fn load_config(&self) -> Result<Option<StoredConfig>, Sub2ApiError> {
+        Ok(self.load_connections()?.map(|saved| saved.active))
+    }
+
+    fn load_connections(&self) -> Result<Option<StoredConnections>, Sub2ApiError> {
         let Some(bytes) = read_owned_password(CREDENTIAL_SERVICE, self.credential_account())
             .map_err(|_| Sub2ApiError::CredentialStorage)?
         else {
@@ -1130,7 +1234,7 @@ impl Sub2ApiProvider {
             .map_err(|_| Sub2ApiError::CredentialStorage)
     }
 
-    fn write_config(&self, config: &StoredConfig) -> Result<(), Sub2ApiError> {
+    fn write_connections(&self, config: &StoredConnections) -> Result<(), Sub2ApiError> {
         let bytes = Zeroizing::new(
             serde_json::to_vec(config).map_err(|_| Sub2ApiError::CredentialStorage)?,
         );
@@ -1231,15 +1335,15 @@ impl UsageProvider for Sub2ApiProvider {
         self.display_name.clone()
     }
 
-    // A configured connection shows its last snapshot until the next refresh
-    // reprices it in the chosen billing mode, whichever mode or release wrote
-    // it: an older figure beats an empty card while the instance is unreachable.
     fn cache_identity(&self) -> CacheIdentity<'_> {
-        if self.configured.load(Ordering::SeqCst) {
-            CacheIdentity::Unresolved
-        } else {
-            CacheIdentity::Resolved("sub2api-unconfigured")
+        if !self.configured.load(Ordering::SeqCst) {
+            return CacheIdentity::Resolved("sub2api-unconfigured");
         }
+        let key = match fs::read_to_string(&self.configured_marker).as_deref() {
+            Ok(SUBSCRIPTION_CACHE_KEY) => SUBSCRIPTION_CACHE_KEY,
+            _ => ADMIN_CACHE_KEY,
+        };
+        CacheIdentity::Resolved(key)
     }
 
     fn supports_connection_configuration(&self) -> bool {
@@ -1251,7 +1355,10 @@ impl UsageProvider for Sub2ApiProvider {
         self.load_config()
             .ok()
             .flatten()
-            .map(|config| config.upstream.provider_id())
+            .map(|config| match config.mode {
+                Sub2ApiMode::Subscription => "subscription",
+                Sub2ApiMode::Admin => config.upstream.provider_id(),
+            })
     }
 
     fn refresh_for_service(&self) -> Result<super::ProviderRefresh, ProviderError> {
@@ -1267,7 +1374,7 @@ impl UsageProvider for Sub2ApiProvider {
             .lock()
             .map_err(|_| Sub2ApiError::HistoryCache)?;
         let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
-        let cache_identity = config.billing_mode.cache_key();
+        let cache_identity = config.cache_key();
         let snapshot = self.refresh_snapshot_with_preview(&config, &|snapshot| {
             preview(super::ProviderRefresh {
                 snapshot,
@@ -1328,7 +1435,7 @@ fn connection_target(
     resolve_claude: impl FnOnce(&str) -> Result<String, Sub2ApiError>,
 ) -> Result<(String, String, bool), Sub2ApiError> {
     let provider_name = input.codex_provider.trim().to_owned();
-    match input.upstream {
+    match input.provider_source.unwrap_or(input.upstream) {
         _ if input.custom_base_url => {
             if !provider_name.is_empty() {
                 return Err(Sub2ApiError::ProviderWithCustomBaseUrl);
@@ -1344,18 +1451,52 @@ fn connection_target(
     }
 }
 
-fn password_for_save(
+fn credential_for_save(
     input: &Sub2ApiConfigInput,
+    base_url: &str,
     previous: Option<&StoredConfig>,
 ) -> Result<String, Sub2ApiError> {
-    let password = input.password.trim();
-    if !password.is_empty() {
-        return Ok(password.to_owned());
+    let previous = previous.filter(|config| {
+        config.base_url == base_url
+            && config.mode == input.mode
+            && (input.mode == Sub2ApiMode::Admin
+                || config.provider_source.unwrap_or(config.upstream)
+                    == input.provider_source.unwrap_or(input.upstream)
+                || (config.custom_base_url && input.custom_base_url))
+    });
+    match input.mode {
+        Sub2ApiMode::Admin => {
+            if input.email.trim().is_empty() {
+                return Err(Sub2ApiError::InvalidConfig);
+            }
+            if !input.password.trim().is_empty() {
+                return Ok(input.password.clone());
+            }
+            previous
+                .map(|config| &config.password)
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .ok_or(Sub2ApiError::InvalidConfig)
+        }
+        Sub2ApiMode::Subscription => {
+            let entered = input.api_key.trim();
+            if !entered.is_empty() {
+                return Ok(entered.to_owned());
+            }
+            if let Some(saved) = previous.filter(|config| {
+                !input.use_provider_key
+                    && config.custom_base_url == input.custom_base_url
+                    && config.codex_provider == input.codex_provider.trim()
+                    && !config.api_key.is_empty()
+            }) {
+                return Ok(saved.api_key.clone());
+            }
+            if input.custom_base_url {
+                return Err(Sub2ApiError::MissingApiKey);
+            }
+            Ok(String::new())
+        }
     }
-    previous
-        .filter(|config| config.upstream == input.upstream)
-        .map(|config| config.password.clone())
-        .ok_or(Sub2ApiError::InvalidConfig)
 }
 
 fn session_scope(config: &StoredConfig) -> String {
@@ -1374,10 +1515,13 @@ fn session_scope(config: &StoredConfig) -> String {
 
 fn should_apply_metric_template(
     previous: Option<&StoredConfig>,
+    mode: Sub2ApiMode,
     upstream: Sub2ApiUpstream,
 ) -> bool {
     previous.is_none_or(|previous| {
-        previous.upstream != upstream || previous.metric_template_version < METRIC_TEMPLATE_VERSION
+        previous.metric_template_version < METRIC_TEMPLATE_VERSION
+            || previous.mode != mode
+            || (mode == Sub2ApiMode::Admin && previous.upstream != upstream)
     })
 }
 
@@ -1441,10 +1585,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        connection_target, default_display_name_for_slot, definition_for, metric_template,
-        normalize_base_url, normalize_refreshed_quotas, normalized_codex_provider_base_url_text,
-        password_for_save, session_scope, should_apply_metric_template, StoredConfig,
-        Sub2ApiClient, Sub2ApiConfigInput, Sub2ApiError, Sub2ApiProvider, Sub2ApiProviders,
+        connection_target, credential_for_save, default_display_name_for_slot, definition_for,
+        metric_template, normalize_base_url, normalize_refreshed_quotas,
+        normalized_codex_provider_base_url_text, session_scope, should_apply_metric_template,
+        StoredConfig, Sub2ApiClient, Sub2ApiConfigInput, Sub2ApiError, Sub2ApiProvider,
+        Sub2ApiProviders,
     };
     use crate::providers::{
         codex::{client::UsageResponse, mapper::map_usage},
@@ -1488,32 +1633,6 @@ mod tests {
                 "output_tokens":500,"total_cost":70,"actual_cost":60,"account_stats_cost":50,"rate_multiplier":0.1}),
         ];
         serde_json::json!({"code":0,"data":{"items":items,"total":2}}).to_string()
-    }
-
-    /// Today's request records, as returned for a newly covered account.
-    fn usage_today(account: i64, now: chrono::DateTime<Utc>) -> String {
-        let mut body: serde_json::Value = serde_json::from_str(&usage_data(account, now)).unwrap();
-        body["data"]["items"].as_array_mut().unwrap().remove(0);
-        body["data"]["total"] = 1.into();
-        body.to_string()
-    }
-
-    /// The one-day and 30-day summaries for days before Upstream coverage: yesterday
-    /// used 1000 tokens that the instance billed at $0.05.
-    fn past_stats(now: chrono::DateTime<Utc>) -> [String; 2] {
-        let yesterday = now
-            .with_timezone(&chrono::Local)
-            .date_naive()
-            .pred_opt()
-            .unwrap();
-        [
-            r#"{"code":0,"data":{"history":[],"models":[]}}"#.to_owned(),
-            serde_json::json!({"code":0,"data":{
-                "history":[{"date":yesterday.to_string(),"tokens":1000,"actual_cost":0.05}],
-                "models":[{"model":"claude-haiku-4-5","tokens":1000,"actual_cost":0.05}]
-            }})
-            .to_string(),
-        ]
     }
 
     pub(super) fn serve_sequence(
@@ -1635,7 +1754,7 @@ mod tests {
                 "extra",
             ),
         ] {
-            let template = metric_template("sub2api@2", upstream);
+            let template = metric_template("sub2api@2", upstream, super::Sub2ApiMode::Admin);
             for definition in native.metrics {
                 let suffix = definition.id.split_once('.').unwrap().1;
                 if suffix == unsupported {
@@ -1660,14 +1779,22 @@ mod tests {
             }
         }
 
-        let claude = metric_template("sub2api@2", super::Sub2ApiUpstream::Claude);
+        let claude = metric_template(
+            "sub2api@2",
+            super::Sub2ApiUpstream::Claude,
+            super::Sub2ApiMode::Admin,
+        );
         assert!(claude
             .iter()
             .filter(|metric| metric.id.ends_with("spark")
                 || metric.id.ends_with("sparkWeekly")
                 || metric.id.ends_with("rateLimitResets"))
             .all(|metric| !metric.enabled));
-        let codex = metric_template("sub2api@2", super::Sub2ApiUpstream::Codex);
+        let codex = metric_template(
+            "sub2api@2",
+            super::Sub2ApiUpstream::Codex,
+            super::Sub2ApiMode::Admin,
+        );
         assert!(codex
             .iter()
             .filter(|metric| metric.id.ends_with("sonnet") || metric.id.ends_with("fable"))
@@ -1739,31 +1866,48 @@ mod tests {
     #[test]
     fn metric_template_runs_once_per_version_or_upstream_change() {
         let mut config = StoredConfig {
+            provider_source: None,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url: "https://sub2api.example.com".into(),
             codex_provider: String::new(),
             custom_base_url: true,
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Codex,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: 0,
         };
 
         assert!(should_apply_metric_template(
             Some(&config),
+            super::Sub2ApiMode::Admin,
             super::Sub2ApiUpstream::Codex
         ));
         config.metric_template_version = super::METRIC_TEMPLATE_VERSION;
         assert!(!should_apply_metric_template(
             Some(&config),
+            super::Sub2ApiMode::Admin,
             super::Sub2ApiUpstream::Codex
         ));
         assert!(should_apply_metric_template(
             Some(&config),
+            super::Sub2ApiMode::Admin,
             super::Sub2ApiUpstream::Claude
         ));
         assert!(should_apply_metric_template(
             None,
+            super::Sub2ApiMode::Admin,
+            super::Sub2ApiUpstream::Claude
+        ));
+        assert!(should_apply_metric_template(
+            Some(&config),
+            super::Sub2ApiMode::Subscription,
+            config.upstream
+        ));
+        config.mode = super::Sub2ApiMode::Subscription;
+        assert!(!should_apply_metric_template(
+            Some(&config),
+            config.mode,
             super::Sub2ApiUpstream::Claude
         ));
     }
@@ -1771,13 +1915,15 @@ mod tests {
     #[test]
     fn cached_sessions_are_scoped_to_the_saved_password() {
         let mut config = StoredConfig {
+            provider_source: None,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url: "https://sub2api.example.com".into(),
             codex_provider: String::new(),
             custom_base_url: true,
             email: "admin@example.com".into(),
             password: "first-password".into(),
             upstream: super::Sub2ApiUpstream::Codex,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
         let first = session_scope(&config);
@@ -1830,7 +1976,7 @@ mod tests {
         assert!(provider.account_identity().is_none());
 
         provider
-            .set_configuration_marker(Some(super::Sub2ApiBillingMode::Upstream))
+            .set_configuration_marker(Some(super::ADMIN_CACHE_KEY))
             .unwrap();
         assert!(provider.has_local_credentials());
         assert!(provider.supports_account_names());
@@ -1846,6 +1992,7 @@ mod tests {
         let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
         storage
             .save_snapshot(&ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: "sub2api".into(),
                 plan: None,
@@ -1872,11 +2019,12 @@ mod tests {
     }
 
     #[test]
-    fn configured_slots_keep_snapshots_from_any_billing_mode() {
+    fn old_admin_billing_markers_never_restore_mixed_price_snapshots() {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         storage
             .save_snapshot(&ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: "sub2api@2".into(),
                 plan: Some("Old plan".into()),
@@ -1901,21 +2049,144 @@ mod tests {
             .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
             .unwrap()
             .is_none());
-        // Written before billing modes, without a mode: kept until the next refresh.
-        for mode in [
-            super::Sub2ApiBillingMode::Upstream,
-            super::Sub2ApiBillingMode::Server,
-        ] {
-            provider.set_configuration_marker(Some(mode)).unwrap();
+        for key in ["sub2api-upstream-price-v1", "sub2api-server-price-v1"] {
+            provider.set_configuration_marker(Some(key)).unwrap();
             assert_eq!(
-                storage
-                    .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
-                    .unwrap()
-                    .and_then(|snapshot| snapshot.plan)
-                    .as_deref(),
-                Some("Old plan"),
+                provider.cache_identity(),
+                crate::providers::CacheIdentity::Resolved(super::ADMIN_CACHE_KEY)
             );
+            assert!(storage
+                .load_snapshot_for_identity("sub2api@2", provider.cache_identity())
+                .unwrap()
+                .is_none());
         }
+    }
+
+    #[test]
+    fn switching_modes_preserves_both_profiles_in_one_credential_record() {
+        use super::{StoredConnections, Sub2ApiMode};
+        let legacy = r#"{"base_url":"https://admin.example","email":"admin@example.com","password":"test-password","upstream":"claude","billing_mode":"server"}"#;
+        let admin: StoredConnections = serde_json::from_str(legacy).unwrap();
+        let subscription: StoredConfig = serde_json::from_str(r#"{"mode":"subscription","base_url":"https://user.example","api_key":"test-user-key","email":"","password":""}"#).unwrap();
+        let saved = StoredConnections::with_active(subscription, Some(admin));
+        let saved: StoredConnections =
+            serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        let admin = saved.for_mode(Sub2ApiMode::Admin).unwrap().clone();
+        assert_eq!(admin.password, "test-password");
+        assert_eq!(admin.email, "admin@example.com");
+        assert_eq!(admin.upstream, super::Sub2ApiUpstream::Claude);
+        assert_eq!(admin.cache_key(), super::ADMIN_CACHE_KEY);
+        let active = StoredConnections::with_active(admin, Some(saved));
+        let saved = StoredConnections::with_active(active.active.clone(), Some(active));
+        assert_eq!(
+            saved.for_mode(Sub2ApiMode::Subscription).unwrap().api_key,
+            "test-user-key"
+        );
+        let state = saved.state();
+        assert_eq!(state.mode, Sub2ApiMode::Admin);
+        assert_eq!(
+            state.other_mode.as_ref().unwrap().base_url,
+            "https://user.example"
+        );
+        let public = serde_json::to_string(&state).unwrap();
+        assert!(!public.contains("test-user-key") && !public.contains("test-password"));
+    }
+
+    #[test]
+    fn relay_authentication_error_is_distinct_from_rejected_admin_login() {
+        let (url, _requests, worker) = serve_sequence_with_status(vec![
+            (
+                401,
+                r#"{"error":{"message":"An API Bearer token is required."}}"#.into(),
+            ),
+            (401, r#"{"message":"Login failed"}"#.into()),
+        ]);
+        let client = Sub2ApiClient::new(&url).unwrap();
+        assert!(matches!(
+            client.login("admin@example.com", "secret"),
+            Err(Sub2ApiError::RelayRequiresKey)
+        ));
+        assert!(matches!(
+            client.login("admin@example.com", "secret"),
+            Err(Sub2ApiError::LoginRejected)
+        ));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn subscription_reads_key_usage_and_caches_its_advertised_model_families() {
+        let day = chrono::Local::now().date_naive();
+        let body = serde_json::json!({
+            "planName": "Example plan",
+            "subscription": {
+                "daily_usage_usd": 2.5, "daily_limit_usd": 10,
+                "weekly_usage_usd": 0, "weekly_limit_usd": 50,
+                "monthly_usage_usd": 11, "monthly_limit_usd": null,
+                "expires_at": "2028-01-01T00:00:00Z"
+            },
+            "daily_usage": [{"date": day, "total_tokens": 120, "actual_cost": 0, "cost": 4}]
+        });
+        let (base, requests, worker) = serve_sequence(vec![
+            body.to_string(),
+            r#"{"data":[{"id":"gpt-test"},{"id":"o3-mini"}]}"#.into(),
+            body.to_string(),
+        ]);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("marker"),
+            false,
+            test_pricing(),
+        );
+        let config: StoredConfig = serde_json::from_value(serde_json::json!({
+            "base_url": format!("{base}/relay/v1"), "mode": "subscription", "api_key": "user-test-key", "email": "", "password": ""
+        })).unwrap();
+        let snapshot = provider.refresh_snapshot(&config).unwrap();
+        let again = provider.refresh_snapshot(&config).unwrap();
+        assert_eq!(again.upstream_provider_id, snapshot.upstream_provider_id);
+        worker.join().unwrap();
+        let request = requests.recv().unwrap();
+        assert!(request.starts_with("GET /relay/v1/usage?"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer user-test-key"));
+        assert!(requests
+            .recv()
+            .unwrap()
+            .starts_with("GET /relay/v1/models "));
+        assert!(requests.recv().unwrap().starts_with("GET /relay/v1/usage?"));
+        assert_eq!(snapshot.upstream_provider_id.as_deref(), Some("codex"));
+        assert_eq!(snapshot.plan.as_deref(), Some("Example plan"));
+        assert!(snapshot.accounts.is_none());
+        assert_eq!(snapshot.quotas.len(), 3);
+        assert!(snapshot.value_metrics.is_empty());
+        assert_eq!(
+            snapshot.quotas[2].format,
+            crate::models::QuotaFormat::UnlimitedDollars
+        );
+        assert_eq!(snapshot.quotas[2].used_value, Some(11.0));
+        assert_eq!(snapshot.quotas[2].limit_value, None);
+        assert_eq!(
+            snapshot.quotas[0].format,
+            crate::models::QuotaFormat::Percent
+        );
+        assert_eq!(snapshot.quotas[0].used_percent, 25.0);
+        assert_eq!(snapshot.quotas[1].used_value, Some(0.0));
+        assert!(snapshot.status_metrics.is_empty());
+        assert_eq!(snapshot.quotas[2].label, "Monthly");
+        let mut cached = snapshot.clone();
+        cached.quotas[2].label = "Monthly quota".into();
+        cached.quotas[0].format = crate::models::QuotaFormat::Dollars;
+        super::restore_subscription_windows(&mut cached);
+        assert_eq!(cached.quotas, snapshot.quotas);
+        let today = snapshot.usage_histories.account.unwrap().today.unwrap();
+        assert_eq!(today.tokens, 120);
+        assert_eq!(today.estimated_cost_usd, Some(0.0));
+        assert!(!serde_json::to_string(&config.state())
+            .unwrap()
+            .contains("user-test-key"));
+        assert!(!provider.cache_path().exists());
     }
 
     #[test]
@@ -1934,13 +2205,15 @@ mod tests {
             test_pricing(),
         );
         let config = StoredConfig {
+            provider_source: None,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url,
             codex_provider: String::new(),
             custom_base_url: true,
             email: "admin@example.com".into(),
             password: "secret-password".into(),
             upstream: super::Sub2ApiUpstream::Codex,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
 
@@ -1980,13 +2253,16 @@ mod tests {
     #[test]
     fn codex_connection_targets_cannot_override_resolved_provider_urls() {
         let input = Sub2ApiConfigInput {
+            provider_source: None,
+            use_provider_key: false,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url: "https://ignored.example.com".into(),
             codex_provider: " exact-provider ".into(),
             custom_base_url: false,
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Codex,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
 
         let target = connection_target(
@@ -2010,15 +2286,40 @@ mod tests {
     }
 
     #[test]
+    fn changing_the_tracked_platform_preserves_the_provider_used_for_the_address() {
+        let input: Sub2ApiConfigInput = serde_json::from_value(serde_json::json!({
+            "mode":"admin","upstream":"claude","providerSource":"codex","codexProvider":"work",
+            "baseUrl":"https://relay.example","email":"admin@example.com","password":""
+        }))
+        .unwrap();
+        assert_eq!(
+            connection_target(
+                &input,
+                |name| {
+                    assert_eq!(name, "work");
+                    Ok("https://relay.example".to_owned())
+                },
+                |_| unreachable!()
+            )
+            .unwrap()
+            .0,
+            "https://relay.example"
+        );
+    }
+
+    #[test]
     fn custom_codex_urls_reject_provider_names() {
         let input = Sub2ApiConfigInput {
+            provider_source: None,
+            use_provider_key: false,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url: "https://custom.example.com".into(),
             codex_provider: "provider-must-be-empty".into(),
             custom_base_url: true,
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Codex,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
 
         assert_eq!(
@@ -2043,42 +2344,118 @@ mod tests {
     }
 
     #[test]
-    fn saved_passwords_are_reused_only_for_the_same_upstream() {
+    fn named_subscription_prefers_entered_then_saved_key_and_defaults_to_provider() {
+        let previous: StoredConfig = serde_json::from_value(serde_json::json!({
+            "mode":"subscription", "api_key":"saved", "codex_provider":"relay",
+            "base_url":"https://relay.example", "custom_base_url":false, "email":"", "password":""
+        }))
+        .unwrap();
+        let mut input: Sub2ApiConfigInput = serde_json::from_value(serde_json::json!({
+            "mode":"subscription", "codexProvider":"relay", "baseUrl":"https://relay.example", "email":"", "password":""
+        })).unwrap();
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, None).unwrap(),
+            ""
+        );
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            "saved"
+        );
+        input.upstream = super::Sub2ApiUpstream::Claude;
+        input.provider_source = Some(super::Sub2ApiUpstream::Codex);
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            "saved"
+        );
+        input.provider_source = Some(super::Sub2ApiUpstream::Claude);
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            ""
+        );
+        input.provider_source = Some(super::Sub2ApiUpstream::Codex);
+        input.use_provider_key = true;
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            ""
+        );
+        input.api_key = "  override  ".into();
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            "override"
+        );
+        input.api_key.clear();
+        input.use_provider_key = false;
+        input.codex_provider = "another-provider".into();
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn admin_password_follows_the_instance_while_subscription_keys_stay_scoped() {
         let previous = StoredConfig {
+            provider_source: None,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url: "https://claude.example.com".into(),
             codex_provider: String::new(),
             custom_base_url: true,
             email: "old@example.com".into(),
             password: "old-password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
-        let same_upstream = Sub2ApiConfigInput {
+        let mut same_upstream = Sub2ApiConfigInput {
+            provider_source: None,
+            use_provider_key: false,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url: "https://claude.example.com".into(),
             codex_provider: String::new(),
             custom_base_url: true,
             email: "new@example.com".into(),
             password: String::new(),
             upstream: super::Sub2ApiUpstream::Claude,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
         assert_eq!(
-            password_for_save(&same_upstream, Some(&previous)).unwrap(),
+            credential_for_save(&same_upstream, &same_upstream.base_url, Some(&previous)).unwrap(),
             "old-password"
         );
 
+        assert_eq!(
+            credential_for_save(&same_upstream, "https://other.example", Some(&previous)),
+            Err(Sub2ApiError::InvalidConfig)
+        );
+        same_upstream.upstream = super::Sub2ApiUpstream::Codex;
+        assert_eq!(
+            credential_for_save(&same_upstream, &previous.base_url, Some(&previous)).unwrap(),
+            "old-password"
+        );
+        same_upstream.mode = super::Sub2ApiMode::Subscription;
+        assert_eq!(
+            credential_for_save(&same_upstream, &previous.base_url, Some(&previous)),
+            Err(Sub2ApiError::MissingApiKey)
+        );
+
         let changed_upstream = Sub2ApiConfigInput {
+            provider_source: None,
+            use_provider_key: false,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url: "https://codex.example.com".into(),
             codex_provider: String::new(),
             custom_base_url: true,
             email: "new@example.com".into(),
             password: String::new(),
             upstream: super::Sub2ApiUpstream::Codex,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
         assert_eq!(
-            password_for_save(&changed_upstream, Some(&previous)),
+            credential_for_save(
+                &changed_upstream,
+                &changed_upstream.base_url,
+                Some(&previous)
+            ),
             Err(Sub2ApiError::InvalidConfig)
         );
     }
@@ -2086,13 +2463,16 @@ mod tests {
     #[test]
     fn claude_provider_is_required_and_resolved_again_on_save() {
         let mut input = Sub2ApiConfigInput {
+            provider_source: None,
+            use_provider_key: false,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url: "https://ignored.example.com".into(),
             codex_provider: " work ".into(),
             custom_base_url: false,
             email: "admin@example.com".into(),
             password: "secret".into(),
             upstream: super::Sub2ApiUpstream::Claude,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
         };
         assert_eq!(
             connection_target(
@@ -2169,9 +2549,7 @@ mod tests {
             r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
             r#"{"code":0,"data":{"items":[{"id":7,"name":"Same name"},{"id":8,"name":"Same name"}],"total":2}}"#.into(),
             // All quotas come first so they can be shown before usage history loads.
-            quota.clone(), quota, usage_today(7, now), past_stats(now)[0].clone(),
-            past_stats(now)[1].clone(), usage_today(8, now), past_stats(now)[0].clone(),
-            past_stats(now)[1].clone(),
+            quota.clone(), quota, usage_data(7, now), usage_data(8, now),
             r#"{"code":0,"data":{"items":[{"id":9,"name":"Unavailable"}],"total":1}}"#.into(),
             r#"{"code":1}"#.into(),
             r#"{"code":0,"data":{"items":[],"total":0}}"#.into(),
@@ -2185,13 +2563,15 @@ mod tests {
             test_pricing(),
         );
         let config = StoredConfig {
+            provider_source: None,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url,
             codex_provider: String::new(),
             custom_base_url: true,
             email: "admin@example.com".into(),
             password: "password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
         let snapshot = provider.refresh_snapshot(&config).unwrap();
@@ -2236,9 +2616,7 @@ mod tests {
         let (base_url, requests, worker) = serve_sequence(vec![
             r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
             r#"{"code":0,"data":{"items":[{"id":7,"name":"First"},{"id":8,"name":"Second"}],"total":2}}"#.into(),
-            quota.clone(), quota, usage_today(7, now), past_stats(now)[0].clone(),
-            past_stats(now)[1].clone(), usage_today(8, now), past_stats(now)[0].clone(),
-            past_stats(now)[1].clone(),
+            quota.clone(), quota, usage_data(7, now), usage_data(8, now),
         ]);
         let directory = tempdir().unwrap();
         let provider = Sub2ApiProvider::new(
@@ -2249,13 +2627,15 @@ mod tests {
             test_pricing(),
         );
         let config = StoredConfig {
+            provider_source: None,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url,
             codex_provider: String::new(),
             custom_base_url: true,
             email: "admin@example.com".into(),
             password: "password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
         let previews = std::sync::Mutex::new(Vec::new());
@@ -2317,6 +2697,12 @@ mod tests {
             }
         }
 
+        let boundary = |id, now| {
+            let mut body: serde_json::Value = serde_json::from_str(&usage_data(id, now)).unwrap();
+            body["data"]["items"].as_array_mut().unwrap().remove(0);
+            body["data"]["page_size"] = 1.into();
+            body.to_string()
+        };
         // Discovery, a later account's quota, and history must all preserve the same cache.
         for failed_stage in 0..3 {
             let page = r#"{"code":0,"data":{"items":[{"id":7,"name":"First"},{"id":8,"name":"Second"}],"total":2}}"#.to_owned();
@@ -2330,15 +2716,15 @@ mod tests {
                 (200, page.clone()),
                 (200, quota.clone()),
                 (200, quota.clone()),
-                (200, usage_today(7, now)),
+                (200, usage_data(7, now)),
             ];
-            responses.extend(past_stats(now).map(|body| (200, body)));
-            responses.push((200, usage_today(8, now)));
-            responses.extend(past_stats(now).map(|body| (200, body)));
+
+            responses.push((200, usage_data(8, now)));
+
             if failed_stage > 0 {
                 responses.extend([(200, page), (200, quota.clone())]);
                 if failed_stage == 2 {
-                    responses.extend([(200, quota.clone()), (200, usage_today(7, now))]);
+                    responses.extend([(200, quota.clone()), (200, boundary(7, now))]);
                 }
             }
             responses.push((503, "temporary outage".into()));
@@ -2348,7 +2734,7 @@ mod tests {
                     r#"{"code":0,"data":{"items":[{"id":8,"name":"Recovered"}],"total":1}}"#.into(),
                 ),
                 (200, quota),
-                (200, usage_today(8, now)),
+                (200, boundary(8, now)),
                 (200, r#"{"code":0,"data":{"items":[],"total":0}}"#.into()),
             ]);
             let (base_url, _requests, worker) = serve_sequence_with_status(responses);
@@ -2364,13 +2750,15 @@ mod tests {
                         tokio::task::spawn_blocking(test_pricing).await.unwrap(),
                     ),
                     config: StoredConfig {
+                        provider_source: None,
+                        mode: super::Sub2ApiMode::Admin,
+                        api_key: String::new(),
                         base_url,
                         codex_provider: String::new(),
                         custom_base_url: true,
                         email: "admin@example.com".into(),
                         password: "password".into(),
                         upstream: super::Sub2ApiUpstream::Claude,
-                        billing_mode: super::Sub2ApiBillingMode::Upstream,
                         metric_template_version: super::METRIC_TEMPLATE_VERSION,
                     },
                 })])
@@ -2532,11 +2920,7 @@ mod tests {
         let (base_url, requests, worker) = serve_sequence(vec![usage_data(42, now)]);
         let client = Sub2ApiClient::new(&base_url).unwrap();
         let mut cache = super::UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
-        // A completed backfill covers the whole window.
-        cache
-            .set_coverage(42, super::history_window_start(now))
-            .unwrap();
-        let (rows, _) = client
+        let rows = client
             .priced_usage(
                 "admin-jwt",
                 &super::Sub2ApiAccount {
@@ -2578,15 +2962,13 @@ mod tests {
     }
 
     #[test]
-    fn claude_refresh_combines_quota_with_server_usage_history() {
+    fn claude_refresh_combines_quota_with_upstream_priced_history() {
         let now = Utc::now();
         let responses = vec![
             r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
             r#"{"code":0,"message":"success","data":{"items":[{"id":7,"name":"Claude upstream"}],"total":1,"page":1,"page_size":1,"pages":1}}"#.into(),
             format!(r#"{{"code":0,"message":"success","data":{CLAUDE_USAGE_DATA}}}"#),
-            usage_today(7, now),
-            past_stats(now)[0].clone(),
-            past_stats(now)[1].clone(),
+            usage_data(7, now),
         ];
         let (base_url, requests, worker) = serve_sequence(responses);
         let directory = tempdir().unwrap();
@@ -2598,13 +2980,15 @@ mod tests {
             test_pricing(),
         );
         let config = StoredConfig {
+            provider_source: None,
+            mode: super::Sub2ApiMode::Admin,
+            api_key: String::new(),
             base_url,
             codex_provider: String::new(),
             custom_base_url: true,
             email: "admin@example.com".into(),
             password: "secret-password".into(),
             upstream: super::Sub2ApiUpstream::Claude,
-            billing_mode: super::Sub2ApiBillingMode::Upstream,
             metric_template_version: super::METRIC_TEMPLATE_VERSION,
         };
 
@@ -2637,150 +3021,19 @@ mod tests {
     }
 
     #[test]
-    fn switching_billing_methods_reuses_both_caches_and_still_refreshes_quota() {
-        let accounts = r#"{"code":0,"data":{"items":[{"id":7,"name":"One","last_used_at":"2026-11-01T00:00:00Z"}],"total":1}}"#;
-        let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
-        let stats = r#"{"code":0,"data":{"history":[],"models":[]}}"#;
-        let mut responses =
-            vec![r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.to_owned()];
-        let modes = [
-            super::Sub2ApiBillingMode::Upstream,
-            super::Sub2ApiBillingMode::Server,
-            super::Sub2ApiBillingMode::Upstream,
-            super::Sub2ApiBillingMode::Server,
-        ];
-        for index in 0..modes.len() {
-            responses.extend([accounts.to_owned(), quota.clone()]);
-            // Upstream's first sync downloads today's records and reads the server
-            // summary for earlier days, which the Sub2API method then reuses.
-            if index == 0 {
-                responses.extend([
-                    usage_today(7, Utc::now()),
-                    stats.to_owned(),
-                    stats.to_owned(),
-                ]);
-            }
-        }
-        let (base_url, requests, worker) = serve_sequence(responses);
-        let directory = tempdir().unwrap();
-        let provider = Sub2ApiProvider::new(
-            "sub2api".into(),
-            "Sub2API".into(),
-            directory.path().join("configured"),
-            true,
-            test_pricing(),
-        );
-        let mut config = StoredConfig {
-            base_url,
-            codex_provider: String::new(),
-            custom_base_url: true,
-            email: "test@example.test".into(),
-            password: "test".into(),
-            upstream: super::Sub2ApiUpstream::Claude,
-            billing_mode: modes[0],
-            metric_template_version: 1,
-        };
-        for mode in modes {
-            config.billing_mode = mode;
-            let snapshot = provider.refresh_snapshot(&config).unwrap();
-            assert!(!snapshot.quotas.is_empty());
-            assert_eq!(
-                snapshot
-                    .usage_histories
-                    .account
-                    .unwrap()
-                    .last_30_days
-                    .is_some(),
-                mode == super::Sub2ApiBillingMode::Upstream
-            );
-        }
-        worker.join().unwrap();
-        let paths: Vec<_> = requests
-            .try_iter()
-            .map(|r| r.split_whitespace().nth(1).unwrap().to_string())
-            .collect();
-        assert_eq!(
-            paths
-                .iter()
-                .filter(|p| p.starts_with("/api/v1/admin/usage?"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            paths
-                .iter()
-                .filter(|p| p.as_str() == "/api/v1/admin/accounts/7/usage")
-                .count(),
-            4
-        );
-    }
-
-    #[test]
-    fn server_method_uses_account_stats_and_preserves_free_or_missing_costs() {
-        let now = Utc::now();
-        let date = now.with_timezone(&chrono::Local).date_naive();
-        let response = |amount: serde_json::Value, fallback: serde_json::Value| {
-            serde_json::json!({"code":0,"data":{
-                "history":[{"date":date,"tokens":100,"actual_cost":amount,"cost":fallback,"user_cost":99}],
-                "models":[{"model":"unknown-model","total_tokens":100,"actual_cost":amount,"cost":fallback}]
-            }}).to_string()
-        };
-        let responses = [
-            response(0.into(), 10.into()),
-            response(serde_json::Value::Null, 2.5.into()),
-            response(serde_json::Value::Null, serde_json::Value::Null),
-        ]
-        .into_iter()
-        .flat_map(|response| [response.clone(), response])
-        .collect();
-        let (base, requests, worker) = serve_sequence(responses);
-        let mut cache = super::UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
-        let client = Sub2ApiClient::new(&base).unwrap();
-        let mut histories = super::ConnectionHistory::Server(Default::default());
-        for (id, expected) in [(1, Some(0.0)), (2, Some(2.5)), (3, None)] {
-            let history = histories
-                .fetch_account(
-                    &client,
-                    "token",
-                    &super::Sub2ApiAccount {
-                        id,
-                        name: String::new(),
-                        last_used_at: None,
-                    },
-                    super::Sub2ApiUpstream::Codex,
-                    now,
-                    &mut cache,
-                )
-                .unwrap();
-            let today = history.today.unwrap();
-            assert_eq!(today.estimated_cost_usd, expected);
-            assert!(!today.cost_estimated);
-            assert_eq!(today.estimate_complete, expected.is_some());
-            for days in [1, 30] {
-                assert!(requests.recv().unwrap().starts_with(&format!(
-                    "GET /api/v1/admin/accounts/{id}/stats?days={days} "
-                )));
-            }
-        }
-        worker.join().unwrap();
-        let monthly = histories.finish(now).last_30_days.unwrap();
-        assert_eq!(monthly.tokens, 300);
-        assert_eq!(monthly.estimated_cost_usd, None);
-        assert_eq!(monthly.model_breakdown.unwrap().models[0].cost_usd, None);
-    }
-
-    #[test]
     fn stored_connections_without_an_upstream_remain_codex_connections() {
         let config: StoredConfig = serde_json::from_str(
             r#"{"base_url":"https://sub2api.example.com","email":"admin@example.com","password":"secret"}"#,
         )
         .unwrap();
 
-        assert_eq!(config.upstream, super::Sub2ApiUpstream::Codex);
+        assert_eq!(config.mode, super::Sub2ApiMode::Admin);
         assert_eq!(
-            config.state().billing_mode,
-            super::Sub2ApiBillingMode::Upstream
+            super::Sub2ApiConfigState::default().mode,
+            super::Sub2ApiMode::Subscription
         );
+        assert_eq!(config.upstream, super::Sub2ApiUpstream::Codex);
+        assert_eq!(config.cache_key(), super::ADMIN_CACHE_KEY);
         assert!(config.codex_provider.is_empty());
         assert!(config.custom_base_url);
         assert_eq!(config.metric_template_version, 0);

@@ -4,7 +4,7 @@ import type {
   ProviderDefinition,
   ProviderSnapshot,
   UsageHistory,
-  Sub2ApiUpstream,
+  Sub2ApiSource,
   UsageScope,
 } from './types';
 import { sub2ApiDisplayName, sub2ApiPublicName } from './sub2ApiUpstreams';
@@ -60,7 +60,7 @@ export class ProviderCatalogIndex {
   configurationDisplayName(
     id: string,
     providerNames?: Record<string, string>,
-    upstream?: Sub2ApiUpstream,
+    upstream?: Sub2ApiSource,
   ) {
     const customName = providerNames?.[id]?.trim();
     if (customName) return customName;
@@ -90,10 +90,6 @@ export class ProviderCatalogIndex {
 
   supportsConnectionConfiguration(id: string) {
     return this.#connectionConfigProviderIds.has(id);
-  }
-
-  connectionConfigurationLabel() {
-    return 'Relay Account';
   }
 
   localUsageSourceNote(id: string, displayName?: string) {

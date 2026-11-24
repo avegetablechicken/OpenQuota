@@ -6,20 +6,26 @@
     title: string;
     breakdown: ModelUsageBreakdown;
     top: number;
+    tokensOnly?: boolean;
     onEnter: () => void;
     onLeave: () => void;
   }
 
-  let { title, breakdown, top, onEnter, onLeave }: Props = $props();
+  let { title, breakdown, top, onEnter, onLeave, tokensOnly = false }: Props = $props();
 
+  const models = $derived(
+    tokensOnly
+      ? [...breakdown.models].sort(
+          (a, b) => b.totalTokens - a.totalTokens || a.model.localeCompare(b.model),
+        )
+      : breakdown.models,
+  );
   const shares = $derived.by(() => {
-    const allPriced = breakdown.models.every((model) => model.costUsd !== null);
-    const costTotal = breakdown.models.reduce((sum, model) => sum + (model.costUsd ?? 0), 0);
-    const tokenTotal = breakdown.models.reduce((sum, model) => sum + model.totalTokens, 0);
-    if (allPriced && costTotal > 0) {
-      return breakdown.models.map((model) => Math.max(0, (model.costUsd ?? 0) / costTotal));
-    }
-    return breakdown.models.map((model) =>
+    const costs = !tokensOnly && models.every((model) => model.costUsd !== null);
+    const costTotal = costs ? models.reduce((sum, model) => sum + (model.costUsd ?? 0), 0) : 0;
+    if (costTotal > 0) return models.map((model) => Math.max(0, (model.costUsd ?? 0) / costTotal));
+    const tokenTotal = models.reduce((sum, model) => sum + model.totalTokens, 0);
+    return models.map((model) =>
       tokenTotal > 0 ? Math.max(0, model.totalTokens / tokenTotal) : 0,
     );
   });
@@ -51,15 +57,15 @@
 >
   <h3>{title}</h3>
   <div class="model-usage-list">
-    {#each breakdown.models as model, index (model.model)}
+    {#each models as model, index (model.model)}
       <div class="model-usage-row">
         <div class="model-usage-primary">
           <strong title={model.model}>{model.model}</strong>
-          <span
-            >{model.costUsd === null
-              ? '—'
-              : formatMetricNumber(model.costUsd, 'dollars', 'row')}</span
-          >
+          {#if !tokensOnly}<span
+              >{model.costUsd === null
+                ? '—'
+                : formatMetricNumber(model.costUsd, 'dollars', 'row')}</span
+            >{/if}
         </div>
         <div class="model-usage-secondary">
           <span>{percents[index]}%</span><span
@@ -72,7 +78,7 @@
       </div>
     {/each}
   </div>
-  <p>{breakdown.sourceNote}</p>
+  <p>{tokensOnly ? 'Token usage reported for this API key' : breakdown.sourceNote}</p>
 </div>
 
 <style>

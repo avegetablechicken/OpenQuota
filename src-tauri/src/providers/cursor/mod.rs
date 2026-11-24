@@ -441,6 +441,7 @@ fn snapshot(
     refreshed_at: chrono::DateTime<Utc>,
 ) -> ProviderSnapshot {
     ProviderSnapshot {
+        upstream_provider_id: None,
         accounts: None,
         provider_id: "cursor".into(),
         plan: mapped.plan,

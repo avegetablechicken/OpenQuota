@@ -154,6 +154,7 @@ impl KimiProvider {
             .map(|local| local.history("kimi", "Kimi", ZCodeProvider::Kimi, now, &mut warnings))
             .unwrap_or_default();
         Ok(ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "kimi".into(),
             plan: mapped.plan,

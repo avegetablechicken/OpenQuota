@@ -183,9 +183,8 @@ impl Sub2ApiClient {
         envelope.data.ok_or(Sub2ApiError::InvalidResponse)
     }
 
-    /// Prices request records from the account's covered local date onward and returns
-    /// that date. Days before it are left to the caller, which uses the server's
-    /// summary. A requested backfill extends coverage within a per-refresh page budget.
+    /// Persist complete pages as they arrive. Publish totals only once all records
+    /// for this account's 30-day window are available.
     pub(super) fn priced_usage(
         &self,
         token: &str,
@@ -194,20 +193,17 @@ impl Sub2ApiClient {
         now: DateTime<Utc>,
         pricing: &ModelPricing,
         cache: &mut UsageCache,
-    ) -> Result<(Vec<PricedUsage>, NaiveDate), Sub2ApiError> {
+    ) -> Result<Vec<PricedUsage>, Sub2ApiError> {
         let today = now.with_timezone(&Local).date_naive();
         let since = today
             .checked_sub_days(Days::new(29))
             .unwrap_or(NaiveDate::MIN);
         let account_id = account.id;
-        let window_start = utc_start(since);
+        let start = utc_start(since);
         let end = now.date_naive();
-        cache.db.execute(
-            "DELETE FROM records WHERE day < ?1",
-            [window_start.to_string()],
-        )?;
-        let mut covered = cache.coverage(account_id, since, today)?;
-        let mut start = utc_start(covered);
+        cache
+            .db
+            .execute("DELETE FROM records WHERE day < ?1", [start.to_string()])?;
         // Older servers may omit last_used_at. A one-row boundary check also catches
         // retention/administrative changes periodically on servers that expose it.
         let fresh: bool = cache.db.query_row(
@@ -221,30 +217,7 @@ impl Sub2ApiClient {
             cache
                 .db
                 .execute("DELETE FROM synced WHERE account=?1", [account_id])?;
-            self.sync_range(token, account_id, start, end, cache, false)?;
-        }
-        let mut complete = true;
-        if covered > since && cache.backfill_requested() {
-            // Earlier days form a closed range, so a partial backfill is a stable prefix
-            // that the next refresh resumes. Its rows are priced only once it completes.
-            let synced = match start.pred_opt().filter(|last| *last >= window_start) {
-                Some(last) => self.sync_range(token, account_id, window_start, last, cache, true),
-                None => Ok(()),
-            };
-            match synced {
-                Ok(()) => {
-                    cache.set_coverage(account_id, since)?;
-                    covered = since;
-                    start = window_start;
-                }
-                Err(Sub2ApiError::HistorySyncPending) => {
-                    cache.mark_backfill_incomplete();
-                    complete = false;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        if !fresh && complete {
+            self.sync_range(token, account_id, start, end, cache)?;
             if let Some(activity) = &account.last_used_at {
                 cache.db.execute(
                     "INSERT INTO synced(account,activity,start,end,checked) VALUES(?1,?2,?3,?4,?5)",
@@ -268,12 +241,11 @@ impl Sub2ApiClient {
             let payload: String = record.get(0)?;
             let row: UsageLog =
                 serde_json::from_str(&payload).map_err(|_| Sub2ApiError::HistoryCache)?;
-            if row.created_at <= now && row.created_at.with_timezone(&Local).date_naive() >= covered
-            {
+            if row.created_at <= now && row.created_at.with_timezone(&Local).date_naive() >= since {
                 priced.extend(row.priced(upstream, pricing));
             }
         }
-        Ok((priced, covered))
+        Ok(priced)
     }
 
     fn sync_range(
@@ -283,7 +255,6 @@ impl Sub2ApiClient {
         from: NaiveDate,
         to: NaiveDate,
         cache: &mut UsageCache,
-        budgeted: bool,
     ) -> Result<(), Sub2ApiError> {
         let start = from.to_string();
         let end = to.to_string();
@@ -325,7 +296,7 @@ impl Sub2ApiClient {
                     // so a deletion on one day cannot invalidate the rest of the month.
                     let mut day = from;
                     loop {
-                        self.sync_range(token, account_id, day, day, cache, budgeted)?;
+                        self.sync_range(token, account_id, day, day, cache)?;
                         if day == to {
                             return Ok(());
                         }
@@ -343,9 +314,7 @@ impl Sub2ApiClient {
             total = 0;
         }
         if offset == 0 {
-            if budgeted {
-                cache.take_page()?;
-            }
+            cache.take_page()?;
             let first = self.usage_page(&url, token, 1, PAGE_SIZE)?;
             total = first.total;
             offset = first.items.len();
@@ -354,14 +323,13 @@ impl Sub2ApiClient {
                 return Err(Sub2ApiError::InvalidResponse);
             }
             if first.items.is_empty() {
+                cache.refund_empty_page();
                 return Ok(());
             }
             last_id = store_page(cache, account_id, &start, &end, last_id, first.items)?;
         }
         while offset < total {
-            if budgeted {
-                cache.take_page()?;
-            }
+            cache.take_page()?;
             // Choose an aligned size so the first returned row is exactly the first
             // missing offset, including on servers that only support page/page_size.
             let mut size = PAGE_SIZE;
@@ -505,10 +473,10 @@ mod tests {
             fetch(Some("A"), now),
             Err(Sub2ApiError::InvalidResponse)
         ));
-        assert_eq!(fetch(Some("A"), now).unwrap().0.len(), 131);
-        assert_eq!(fetch(Some("A"), now).unwrap().0.len(), 131); // Another restart, no request.
-        assert_eq!(fetch(Some("B"), now).unwrap().0.len(), 132);
-        assert_eq!(fetch(None, now).unwrap().0.len(), 132); // Legacy server: one row verifies the cache.
+        assert_eq!(fetch(Some("A"), now).unwrap().len(), 131);
+        assert_eq!(fetch(Some("A"), now).unwrap().len(), 131); // Another restart, no request.
+        assert_eq!(fetch(Some("B"), now).unwrap().len(), 132);
+        assert_eq!(fetch(None, now).unwrap().len(), 132); // Legacy server: one row verifies the cache.
         worker.join().unwrap();
         let sizes_and_pages: Vec<_> = requests
             .try_iter()
@@ -544,100 +512,6 @@ mod tests {
     }
 
     #[test]
-    fn a_new_account_syncs_only_today_and_backfills_the_month_only_on_request() {
-        let now = Utc::now();
-        let past = now - chrono::Duration::days(5);
-        let today = now.with_timezone(&Local).date_naive();
-        let since = today.checked_sub_days(Days::new(29)).unwrap();
-        let (base, requests, worker) = super::super::tests::serve_sequence(vec![
-            usage_page([1000], 1, now),
-            usage_page(1..=128, 200, past), // The budget ends after this page.
-            usage_page([128], 200, past),
-            usage_page(129..=192, 200, past),
-            usage_page(193..=200, 200, past),
-        ]);
-        let client = Sub2ApiClient::new(&base).unwrap();
-        let pricing = test_bundled_pricing();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("usage.sqlite3");
-        let account = super::super::Sub2ApiAccount {
-            id: 7,
-            name: "test".into(),
-            last_used_at: Some("A".into()),
-        };
-        let fetch = |cache: &mut UsageCache| {
-            client
-                .priced_usage(
-                    "token",
-                    &account,
-                    Sub2ApiUpstream::Codex,
-                    now,
-                    &pricing,
-                    cache,
-                )
-                .unwrap()
-        };
-
-        let (rows, covered) = fetch(&mut UsageCache::open(&path, "scope").unwrap());
-        assert_eq!((rows.len(), covered), (1, today));
-        let summary = UsageCache::coverage_summary(&path, "scope", since).unwrap();
-        assert_eq!(summary.priced_from, Some(today));
-        assert!(!summary.backfill_pending);
-
-        UsageCache::request_backfill(&path, "scope").unwrap();
-        let mut cache = UsageCache::open(&path, "scope").unwrap();
-        for _ in 0..15 {
-            cache.take_page().unwrap();
-        }
-        let (rows, covered) = fetch(&mut cache);
-        assert_eq!((rows.len(), covered), (1, today)); // Partial pages stay unpriced.
-        cache.finish_backfill().unwrap();
-        assert!(
-            UsageCache::coverage_summary(&path, "scope", since)
-                .unwrap()
-                .backfill_pending
-        );
-
-        let mut cache = UsageCache::open(&path, "scope").unwrap();
-        let (rows, covered) = fetch(&mut cache);
-        assert_eq!((rows.len(), covered), (201, since));
-        cache.finish_backfill().unwrap();
-        let summary = UsageCache::coverage_summary(&path, "scope", since).unwrap();
-        assert_eq!(summary.priced_from, Some(since));
-        assert!(!summary.backfill_pending);
-        assert!(!UsageCache::open(&path, "scope")
-            .unwrap()
-            .backfill_requested());
-
-        worker.join().unwrap();
-        let seen: Vec<_> = requests.try_iter().collect();
-        assert_eq!(seen.len(), 5);
-        assert!(seen[0].contains(&format!("start_date={}&", utc_start(today))));
-        let last_uncovered = utc_start(today).pred_opt().unwrap();
-        assert!(seen[1].contains(&format!(
-            "start_date={}&end_date={last_uncovered}&",
-            utc_start(since)
-        )));
-        assert!(seen[2].contains("page_size=1&") && seen[2].contains("page=128 "));
-    }
-
-    #[test]
-    fn an_account_an_earlier_version_fully_synced_keeps_its_whole_window() {
-        let cache = UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
-        let today = Local::now().date_naive();
-        let since = today.checked_sub_days(Days::new(29)).unwrap();
-        cache
-            .db
-            .execute(
-                "INSERT INTO synced(account,activity,start,end,checked) VALUES(7,'A','x','y',0)",
-                [],
-            )
-            .unwrap();
-        assert_eq!(cache.coverage(7, since, today).unwrap(), since);
-        assert_eq!(cache.coverage(8, since, today).unwrap(), today);
-    }
-
-    #[test]
     fn a_pruned_day_is_repaired_without_reloading_unchanged_days() {
         let now = Utc::now();
         let day = now.date_naive();
@@ -657,9 +531,7 @@ mod tests {
             (day, day),
             (prev.date_naive(), day),
         ] {
-            client
-                .sync_range("token", 7, from, to, &mut cache, false)
-                .unwrap();
+            client.sync_range("token", 7, from, to, &mut cache).unwrap();
         }
         let ids: Vec<i64> = cache
             .db
@@ -677,34 +549,51 @@ mod tests {
     }
 
     #[test]
-    fn a_limited_backfill_resumes_at_the_saved_offset() {
+    fn automatic_history_sync_resumes_the_full_window_without_publishing_partial_usage() {
         let now = Utc::now();
+        let past = now - chrono::Duration::days(10);
         let (base, requests, worker) = super::super::tests::serve_sequence(vec![
-            usage_page(1..=128, 129, now),
-            usage_page([128], 129, now),
+            usage_page(1..=128, 129, past),
+            usage_page([128], 129, past),
             usage_page([129], 129, now),
         ]);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.db");
         let client = Sub2ApiClient::new(&base).unwrap();
+        let pricing = test_bundled_pricing();
+        let account = super::super::Sub2ApiAccount {
+            id: 7,
+            name: String::new(),
+            last_used_at: Some("A".into()),
+        };
+        let fetch = |cache: &mut UsageCache| {
+            client.priced_usage(
+                "token",
+                &account,
+                Sub2ApiUpstream::Codex,
+                now,
+                &pricing,
+                cache,
+            )
+        };
         let mut cache = UsageCache::open(&path, "test").unwrap();
         for _ in 0..15 {
             cache.take_page().unwrap();
         }
-        let day = now.date_naive();
-        assert_eq!(
-            client.sync_range("token", 7, day, day, &mut cache, true),
+        assert!(matches!(
+            fetch(&mut cache),
             Err(Sub2ApiError::HistorySyncPending)
-        );
+        ));
         drop(cache);
         let mut cache = UsageCache::open(&path, "test").unwrap();
-        client
-            .sync_range("token", 7, day, day, &mut cache, true)
-            .unwrap();
+        assert_eq!(fetch(&mut cache).unwrap().len(), 129);
         worker.join().unwrap();
         let requests: Vec<_> = requests.try_iter().collect();
+        let since = now.with_timezone(&Local).date_naive() - Days::new(29);
+        assert!(requests[0].contains(&format!("start_date={}&", utc_start(since))));
         assert!(requests[2].contains("page=129 "));
     }
+
     #[test]
     fn rejects_foreign_rows_and_contradictory_pages_without_saving_them() {
         let now = Utc::now();
@@ -720,14 +609,7 @@ mod tests {
         let mut cache = UsageCache::open(std::path::Path::new(":memory:"), "test").unwrap();
         for _ in 0..2 {
             assert_eq!(
-                client.sync_range(
-                    "token",
-                    7,
-                    now.date_naive(),
-                    now.date_naive(),
-                    &mut cache,
-                    false
-                ),
+                client.sync_range("token", 7, now.date_naive(), now.date_naive(), &mut cache),
                 Err(Sub2ApiError::InvalidResponse)
             );
             assert_eq!(
@@ -739,14 +621,7 @@ mod tests {
             );
         }
         client
-            .sync_range(
-                "token",
-                7,
-                now.date_naive(),
-                now.date_naive(),
-                &mut cache,
-                false,
-            )
+            .sync_range("token", 7, now.date_naive(), now.date_naive(), &mut cache)
             .unwrap();
         worker.join().unwrap();
     }

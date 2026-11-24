@@ -15,7 +15,13 @@
   import type { SpendProjection } from './totalSpend';
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
-  import { sub2ApiUpstreamAccountName } from './sub2ApiUpstreams';
+  import {
+    isSub2ApiSubscription,
+    showSub2ApiMetric,
+    sub2ApiUpstreamAccountName,
+    sub2ApiPinAllowed,
+    sub2ApiUpstreams,
+  } from './sub2ApiUpstreams';
   import { popupMenu, type NativeMenuEntry } from './nativeMenu';
   import {
     shouldShowProviderForMode,
@@ -246,7 +252,7 @@
         const error = state?.error ? providerMessage(provider.id, state.error) : null;
         const warnings = snapshot.warnings.map((warning) => providerMessage(provider.id, warning));
         const visibleMetrics = provider.metrics.filter((metric) => {
-          if (!metric.enabled) return false;
+          if (!metric.enabled || !showSub2ApiMetric(snapshot, metric.id)) return false;
           const source = metricDefinition(metric.id)?.source.kind;
           const metricScope = metricUsageScope(metric);
           if (
@@ -425,7 +431,12 @@
     const entries: NativeMenuEntry[] = [
       { text: 'Hide', action: () => patchMetric(providerId, metricId, { enabled: false }) },
     ];
-    if (metricDefinition(metricId)?.pinnable) {
+    const snapshot = viewState.providers[providerId]?.snapshot;
+    const source = isSub2ApiSubscription(snapshot) ? 'subscription' : $sub2ApiUpstreams[providerId];
+    if (
+      metricDefinition(metricId)?.pinnable &&
+      (metric.pinned || sub2ApiPinAllowed(metricId, source))
+    ) {
       entries.push({
         text: metric.pinned ? 'Unstar' : 'Star for menu bar',
         // At most two stars per provider.
@@ -571,6 +582,7 @@
 {/if}
 
 {#each dashboardGroups as { provider, state, error, warnings, displayName, rows } (provider.id)}
+  {@const tokensOnly = isSub2ApiSubscription(state?.snapshot)}
   <div
     class="provider-reorder-shell"
     class:provider-reorder-shell--content-morph={demandMorphing}
@@ -752,6 +764,7 @@
                     {catalog}
                     viewMode={usageViewMode}
                     usageScope={row.usageScope}
+                    {tokensOnly}
                     {onSettingsChange}
                   />
                 </div>
@@ -823,6 +836,7 @@
                           {catalog}
                           viewMode={usageViewMode}
                           usageScope={row.usageScope}
+                          {tokensOnly}
                           {onSettingsChange}
                         />
                       </div>

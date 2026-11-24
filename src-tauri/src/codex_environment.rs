@@ -17,6 +17,20 @@ pub fn proxy_value(names: &[&str]) -> Option<String> {
     )
 }
 
+/// Resolve the variable explicitly selected by a model provider. A desktop launch
+/// may not inherit shell variables, so consult that config directory's .env too.
+pub(crate) fn provider_key(directory: &Path, name: &str) -> Option<String> {
+    if name.is_empty() || name.contains(['=', '\0']) {
+        return None;
+    }
+    let process = |name: &str| std::env::var(name).ok();
+    std::fs::File::open(directory.join(".env"))
+        .ok()
+        .and_then(|file| dotenv::load(file, process).remove(name))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| process(name).filter(|value| !value.trim().is_empty()))
+}
+
 fn resolve_value(
     path: Option<&Path>,
     names: &[&str],

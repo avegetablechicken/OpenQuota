@@ -1,5 +1,7 @@
 import { writable } from 'svelte/store';
-import type { Sub2ApiUpstream } from './types';
+import type { ProviderSnapshot, Sub2ApiSource } from './types';
+
+export const sub2ApiSnapshotContext = Symbol('Sub2API snapshot');
 
 const storageKey = 'openquota.sub2api-upstreams';
 const endpointStorageKey = 'openquota.sub2api-endpoints';
@@ -13,13 +15,13 @@ function storage() {
   }
 }
 
-function loadUpstreams(): Record<string, Sub2ApiUpstream> {
+function loadUpstreams(): Record<string, Sub2ApiSource> {
   try {
     const parsed = JSON.parse(storage()?.getItem(storageKey) ?? '{}') as Record<string, unknown>;
     return Object.fromEntries(
       Object.entries(parsed).filter(
-        (entry): entry is [string, Sub2ApiUpstream] =>
-          entry[1] === 'codex' || entry[1] === 'claude',
+        (entry): entry is [string, Sub2ApiSource] =>
+          entry[1] === 'codex' || entry[1] === 'claude' || entry[1] === 'subscription',
       ),
     );
   } catch {
@@ -54,6 +56,17 @@ function sub2ApiSlotDisplayName(providerId: string) {
   return match[1] ? `Sub2API ${match[1]}` : 'Sub2API';
 }
 
+/** Inspect the connection snapshot, before flattening its administrator account rows. */
+export function isSub2ApiSubscription(snapshot: ProviderSnapshot | null | undefined) {
+  return Boolean(snapshot && sub2ApiSlotDisplayName(snapshot.providerId) && !snapshot.accounts);
+}
+
+export function showSub2ApiMetric(snapshot: ProviderSnapshot, metricId: string) {
+  if (metricId !== `${snapshot.providerId}.monthly` || !isSub2ApiSubscription(snapshot))
+    return true;
+  return snapshot.quotas.some((window) => window.id === 'monthly' && (window.limitValue ?? 0) > 0);
+}
+
 export function sub2ApiDisplayName(providerId: string, customName?: string) {
   const slotName = sub2ApiSlotDisplayName(providerId);
   if (!slotName) return null;
@@ -61,23 +74,32 @@ export function sub2ApiDisplayName(providerId: string, customName?: string) {
   return slotName;
 }
 
-export function sub2ApiUpstreamLabel(upstream: Sub2ApiUpstream) {
+export function sub2ApiUpstreamLabel(upstream: Sub2ApiSource) {
+  if (upstream === 'subscription') return 'User subscription';
   return upstream === 'claude' ? 'Claude' : 'Codex';
 }
 
-export function sub2ApiPublicName(upstream?: Sub2ApiUpstream) {
+export function sub2ApiPublicName(upstream?: Sub2ApiSource) {
   return upstream ? `Sub2API · ${sub2ApiUpstreamLabel(upstream)}` : 'Account name';
+}
+
+export function sub2ApiPinAllowed(metricId: string, source?: Sub2ApiSource) {
+  return source !== 'subscription' || /\.(daily|weekly|monthly)$/.test(metricId);
 }
 
 export function sub2ApiMetricSupported(
   providerId: string,
   metricId: string,
-  upstream?: Sub2ApiUpstream,
+  upstream?: Sub2ApiSource,
 ) {
   if (sub2ApiDisplayName(providerId) === null) return true;
   const prefix = `${providerId}.`;
   if (!metricId.startsWith(prefix)) return true;
   const suffix = metricId.slice(prefix.length);
+  if (upstream === 'subscription') {
+    return ['daily', 'weekly', 'monthly', 'today', 'yesterday', 'last30', 'trend'].includes(suffix);
+  }
+  if (['daily', 'monthly'].includes(suffix)) return false;
   if (suffix === 'extra') return false;
   if (!upstream) return true;
   if (upstream === 'claude') {
@@ -86,7 +108,7 @@ export function sub2ApiMetricSupported(
   return !['sonnet', 'fable'].includes(suffix);
 }
 
-function persist(upstreams: Record<string, Sub2ApiUpstream>) {
+function persist(upstreams: Record<string, Sub2ApiSource>) {
   try {
     storage()?.setItem(storageKey, JSON.stringify(upstreams));
   } catch {
@@ -112,7 +134,7 @@ function endpointLabel(baseUrl: string) {
 
 export function rememberSub2ApiUpstream(
   providerId: string,
-  upstream: Sub2ApiUpstream,
+  upstream: Sub2ApiSource,
   baseUrl?: string,
 ) {
   sub2ApiUpstreams.update((current) => {

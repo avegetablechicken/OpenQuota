@@ -11,7 +11,7 @@
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
   import { canRenameProvider } from './providerNames';
-  import { sub2ApiMetricSupported, sub2ApiUpstreams } from './sub2ApiUpstreams';
+  import { sub2ApiPinAllowed, sub2ApiMetricSupported, sub2ApiUpstreams } from './sub2ApiUpstreams';
 
   interface Props {
     settings: AppSettings;
@@ -67,8 +67,15 @@
       metrics: provider.metrics.map((item) => (item.id === metric.id ? metric : item)),
     });
   }
+  function canTogglePin(metric: MetricLayout) {
+    return (
+      metricDefinition(metric.id)?.pinnable &&
+      metricSupported(metric.id) &&
+      (metric.pinned || sub2ApiPinAllowed(metric.id, $sub2ApiUpstreams[providerId]))
+    );
+  }
   function togglePin(metric: MetricLayout, button: HTMLButtonElement) {
-    if (!provider || !metricSupported(metric.id) || !metricDefinition(metric.id)?.pinnable) return;
+    if (!provider || !canTogglePin(metric)) return;
     if (!metric.pinned && provider.metrics.filter((item) => item.pinned).length >= 2) {
       showMessage('Up to 2 stars per provider', 'denied');
       if (!reducedMotion) {
@@ -207,7 +214,7 @@
                 >{metricDefinition(metric.id)?.label ?? metric.id}</span
               >
               <span class="customize-metric-pin-slot">
-                {#if metricSupported(metric.id) && metricDefinition(metric.id)?.pinnable}<button
+                {#if canTogglePin(metric)}<button
                     class:pinned={metric.pinned}
                     class="pin-button"
                     type="button"

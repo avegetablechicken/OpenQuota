@@ -214,6 +214,7 @@ impl GrokProvider {
             &mut warnings,
         );
         Ok(ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "grok".into(),
             plan,

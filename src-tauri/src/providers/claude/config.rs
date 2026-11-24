@@ -35,6 +35,34 @@ fn resolve_provider_base_url_in_directory(
     name: &str,
     directory: &Path,
 ) -> Result<String, ClaudeConfigError> {
+    let document = provider_document(name, directory)?;
+    provider_url(&document)
+}
+
+pub(crate) fn subscription_credentials(
+    name: &str,
+) -> Result<(String, Option<String>), ClaudeConfigError> {
+    let settings = settings_path();
+    let document = provider_document(name, settings.parent().unwrap_or(Path::new(".")))?;
+    let base = provider_url(&document)?;
+    let key = [document.get("env"), Some(&document)]
+        .into_iter()
+        .flatten()
+        .find_map(|env| {
+            ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
+                .into_iter()
+                .find_map(|name| {
+                    env.get(name)?
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_owned)
+                })
+        });
+    Ok((base, key))
+}
+
+fn provider_document(name: &str, directory: &Path) -> Result<Value, ClaudeConfigError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(ClaudeConfigError::MissingName);
@@ -82,7 +110,10 @@ fn resolve_provider_base_url_in_directory(
         _ => return Err(ClaudeConfigError::Ambiguous(name.into())),
     };
     let text = fs::read_to_string(path).map_err(|_| ClaudeConfigError::FileUnreadable)?;
-    let document: Value = serde_json::from_str(&text).map_err(|_| ClaudeConfigError::Invalid)?;
+    serde_json::from_str(&text).map_err(|_| ClaudeConfigError::Invalid)
+}
+
+fn provider_url(document: &Value) -> Result<String, ClaudeConfigError> {
     // Only this explicitly selected file may supply the endpoint; never use ambient values.
     document
         .get("env")

@@ -40,6 +40,36 @@ describe('UsageMetric model detail', () => {
     expect(detail).toHaveTextContent('25%');
   });
 
+  it('ranks subscription model details by token share and keeps fees out of the card', async () => {
+    vi.useFakeTimers();
+    render(UsageMetric, {
+      label: 'Last 30 Days',
+      tokensOnly: true,
+      period: {
+        tokens: 1000,
+        estimatedCostUsd: 100,
+        costEstimated: false,
+        estimateComplete: true,
+        modelBreakdown: {
+          sourceNote: 'Costs reported by Sub2API for this API key',
+          models: [
+            { model: 'costly', totalTokens: 100, costUsd: 95 },
+            { model: 'frequent', totalTokens: 900, costUsd: 5 },
+          ],
+        },
+      },
+    });
+    const row = screen.getByRole('button', { name: '1K tokens' });
+    await fireEvent.mouseEnter(row);
+    await vi.advanceTimersByTimeAsync(400);
+    const detail = screen.getByRole('tooltip', { name: 'Last 30 Days model usage' });
+    expect(detail).not.toHaveTextContent('$');
+    expect(detail.querySelector('.model-usage-row')).toHaveTextContent(
+      /frequent\s*90%\s*900 tokens/,
+    );
+    expect(detail).toHaveTextContent('Token usage reported for this API key');
+  });
+
   it('shows positive sub-cent totals and model costs without rounding them to zero', async () => {
     vi.useFakeTimers();
     render(UsageMetric, {

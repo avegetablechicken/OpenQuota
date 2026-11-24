@@ -158,6 +158,7 @@ impl DevinProvider {
         require_success(&response)?;
         let mapped = map_user_status_response(&response.body)?;
         Ok(ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "devin".into(),
             plan: mapped.plan,

@@ -13,7 +13,7 @@ pub(super) fn load_proxy_values(
     values
 }
 
-fn load(
+pub(super) fn load(
     reader: impl std::io::Read,
     process: impl Fn(&str) -> Option<String>,
 ) -> HashMap<String, String> {

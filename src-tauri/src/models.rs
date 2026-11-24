@@ -134,6 +134,7 @@ pub enum QuotaFormat {
     #[default]
     Percent,
     Dollars,
+    UnlimitedDollars,
     Count,
 }
 
@@ -333,6 +334,8 @@ pub struct AccountSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounts: Option<Vec<AccountSnapshot>>,
     pub provider_id: String,
     pub plan: Option<String>,
@@ -351,6 +354,12 @@ pub struct ProviderSnapshot {
     pub usage_histories: UsageHistories,
     pub warnings: Vec<String>,
     pub refreshed_at: DateTime<Utc>,
+}
+
+impl ProviderSnapshot {
+    pub fn is_sub2api_subscription(&self) -> bool {
+        self.provider_id.split('@').next() == Some("sub2api") && self.accounts.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

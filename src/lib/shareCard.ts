@@ -1,7 +1,8 @@
 import type { ProviderCatalogIndex } from './metrics';
+import { showSub2ApiMetric } from './sub2ApiUpstreams';
 import {
-  formatMetricNumber,
   formatMetricValue,
+  formatUsageReading,
   formatSpendValue,
   totalSpendRingCenter,
 } from './metricFormat';
@@ -11,6 +12,7 @@ import {
   UNPRICED_OTHERS_SPEND_ID,
   providerIconColor,
   providerIconPath,
+  providerIconOutlined,
   providerIconViewBox,
   providerSpendColorVariable,
 } from './providerIconPaths';
@@ -24,7 +26,6 @@ import type {
   ProviderSnapshot,
   QuotaWindow,
   UsageHistory,
-  UsagePeriod,
   UsageViewMode,
 } from './types';
 
@@ -77,7 +78,7 @@ export type ShareRow =
       trailing: string;
       fillPercent: number;
       severity: 'normal' | 'warning' | 'critical';
-      paceLabel: string | null;
+      headingDetail: string | null;
     }
   | { kind: 'text'; label: string; value: string; condensed: boolean }
   | { kind: 'trend'; label: string; daily: DailyUsage[] };
@@ -95,6 +96,7 @@ interface SharePalette {
 }
 
 interface ProviderShareCardOptions {
+  upstreamProviderId?: string | null;
   providerId: string;
   providerNames?: Record<string, string>;
   plan: string | null;
@@ -115,6 +117,7 @@ export function buildProviderShareRows(
   settings: AppSettings,
   now: number,
   viewMode: UsageViewMode = 'localDevice',
+  tokensOnly = false,
 ) {
   const alwaysVisible = layout.metrics.filter(
     (metric) => metric.enabled && metric.section === 'alwaysVisible',
@@ -134,24 +137,25 @@ export function buildProviderShareRows(
 
   for (const metric of visible) {
     const definition = catalog.metric(metric.id);
-    if (!definition) continue;
+    if (!definition || !showSub2ApiMetric(snapshot, metric.id)) continue;
     const source = definition.source;
     if (source.kind === 'quota' || source.kind === 'quotaOrValue') {
       const quota = snapshot.quotas.find((item) => item.id === source.sourceId);
-      if (quota) {
+      const valueMetric =
+        !quota && source.kind === 'quotaOrValue'
+          ? snapshot.valueMetrics.find((item) => item.id === source.sourceId)
+          : undefined;
+      if (quota && quota.format !== 'unlimitedDollars') {
         rows.push(quotaShareRow(quota, settings, now, source.sessionWindow));
-      } else if (source.kind === 'quotaOrValue') {
-        const valueMetric = snapshot.valueMetrics.find((item) => item.id === source.sourceId);
+      } else if (valueMetric) {
         rows.push({
           kind: 'text',
           label: definition.label,
-          value: valueMetric
-            ? valueMetric.values
-                .map((value) =>
-                  formatMetricValue(value.number, value.kind, 'row', value.label ?? undefined),
-                )
-                .join(' · ')
-            : 'No data',
+          value: valueMetric.values
+            .map((value) =>
+              formatMetricValue(value.number, value.kind, 'row', value.label ?? undefined),
+            )
+            .join(' · '),
           condensed: previousTextSection === metric.section,
         });
         previousTextSection = metric.section;
@@ -161,10 +165,15 @@ export function buildProviderShareRows(
           kind: 'quota',
           label: definition.label,
           reading: 'No data',
-          trailing: 'Reset unavailable',
+          trailing: formatReset(
+            quota?.resetsAt ?? null,
+            quota ? quotaNow(quota, now) : now,
+            settings.resetDisplay,
+            settings.timeFormat,
+          ),
           fillPercent: 0,
           severity: 'normal',
-          paceLabel: null,
+          headingDetail: null,
         });
       }
       previousTextSection = null;
@@ -226,7 +235,7 @@ export function buildProviderShareRows(
           scopedHistories.length > 1
             ? `${definition.label} · ${PROVIDER_USAGE_SCOPE_LABELS[scoped.scope]}`
             : definition.label,
-        value: usageReading(period),
+        value: formatUsageReading(period, tokensOnly),
         condensed: previousTextSection === metric.section,
       });
     }
@@ -274,6 +283,7 @@ export function renderProviderShareCard(
     options.providerId,
     options.providerNames,
     options.plan,
+    options.upstreamProviderId,
   );
   const cardTop = OUTER_PADDING + HEADER_HEIGHT + CONTENT_GAP;
   const cardHeight =
@@ -426,7 +436,7 @@ function quotaShareRow(
       : formatReset(quota.resetsAt, serverNow, settings.resetDisplay, settings.timeFormat),
     fillPercent: clamp(fillPercent, 0, 100),
     severity,
-    paceLabel,
+    headingDetail: paceLabel,
   };
 }
 
@@ -434,13 +444,6 @@ function usagePeriod(history: UsageHistory, sourceId: string) {
   if (sourceId === 'today') return history.today;
   if (sourceId === 'yesterday') return history.yesterday;
   return history.last30Days;
-}
-
-function usageReading(period: UsagePeriod | null) {
-  if (!period) return 'No data';
-  const tokens = formatMetricValue(period.tokens, 'count', 'row', 'tokens');
-  if (period.estimatedCostUsd === null) return tokens;
-  return `${formatMetricNumber(period.estimatedCostUsd, 'dollars', 'row')} · ${tokens}`;
 }
 
 function shareRowHeight(row: ShareRow) {
@@ -494,9 +497,31 @@ function drawProviderHeader(
   providerId: string,
   providerNames: Record<string, string> | undefined,
   plan: string | null,
+  upstreamProviderId?: string | null,
 ) {
   const iconColor = providerIconColor(providerId) ?? palette.text;
-  drawProviderMark(context, providerId, OUTER_PADDING, OUTER_PADDING, 22, iconColor);
+  const outlined = providerIconOutlined(providerId);
+  const composite = upstreamProviderId && providerIconPath(upstreamProviderId);
+  drawProviderMark(
+    context,
+    providerId,
+    OUTER_PADDING,
+    OUTER_PADDING,
+    composite ? 22 * 0.684 : 22,
+    iconColor,
+    outlined,
+  );
+  if (composite) {
+    const inset = OUTER_PADDING + 22 * 0.44;
+    drawProviderMark(
+      context,
+      upstreamProviderId,
+      inset,
+      inset,
+      22 * 0.56,
+      providerIconColor(upstreamProviderId) ?? palette.text,
+    );
+  }
   const name = catalog.resolvedDisplayName(providerId, providerNames);
   context.fillStyle = palette.text;
   context.font = '600 15px system-ui';
@@ -539,19 +564,17 @@ function drawShareRow(
   if (row.kind === 'quota') {
     context.fillStyle = palette.text;
     context.font = '600 13px system-ui';
-    fitText(context, row.label, left, top + 23, row.paceLabel ? 150 : right - left);
-    if (row.paceLabel) {
+    fitText(context, row.label, left, top + 23, row.headingDetail ? 150 : right - left);
+    if (row.headingDetail) {
       context.fillStyle = palette.secondary;
       context.font = '12px system-ui';
       context.textAlign = 'right';
-      context.fillText(row.paceLabel, right, top + 23);
+      context.fillText(row.headingDetail, right, top + 23);
       context.textAlign = 'left';
     }
     drawRoundedRect(context, left, top + 31, right - left, 5, 3, palette.track);
-    const fillWidth = Math.max(
-      row.fillPercent > 0 ? 5 : 0,
-      ((right - left) * row.fillPercent) / 100,
-    );
+    const percent = row.fillPercent;
+    const fillWidth = Math.max(percent > 0 ? 5 : 0, ((right - left) * percent) / 100);
     if (fillWidth > 0) {
       const fill =
         row.severity === 'critical'
@@ -753,6 +776,7 @@ function drawProviderMark(
   y: number,
   size: number,
   color: string,
+  outline = false,
 ) {
   const path = providerIconPath(providerId);
   if (!path || typeof Path2D === 'undefined') return;
@@ -761,7 +785,15 @@ function drawProviderMark(
   context.translate(placement.x, placement.y);
   context.scale(placement.scale, placement.scale);
   context.fillStyle = color;
-  context.fill(new Path2D(path));
+  if (outline) {
+    context.strokeStyle = color;
+    context.lineWidth = 2.7;
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.stroke(new Path2D(path));
+  } else {
+    context.fill(new Path2D(path));
+  }
   context.restore();
 }
 

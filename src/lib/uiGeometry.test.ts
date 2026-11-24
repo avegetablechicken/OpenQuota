@@ -86,13 +86,13 @@ describe('popover geometry contract', () => {
     );
   });
 
-  it('confines the new Base URL switch hit target without changing shared switches', () => {
+  it('confines connection switch hit targets without changing shared switches', () => {
     expect(layoutCss).not.toMatch(/\.switch\s*{[^}]*position: relative;/s);
     expect(coLocatedComponentCss).toMatch(
-      /\.custom-base-url-switch\s*{[^}]*position: relative;[^}]*width: 28px;[^}]*height: 16px;/s,
+      /\.connection-switch\s*{[^}]*position: relative;[^}]*width: 28px;[^}]*height: 16px;/s,
     );
     expect(coLocatedComponentCss).toMatch(
-      /\.custom-base-url-switch input\s*{[^}]*position: absolute;[^}]*inset: 0;[^}]*width: 100%;[^}]*height: 100%;[^}]*margin: 0;/s,
+      /\.connection-switch input\s*{[^}]*position: absolute;[^}]*inset: 0;[^}]*width: 100%;[^}]*height: 100%;[^}]*margin: 0;/s,
     );
   });
 

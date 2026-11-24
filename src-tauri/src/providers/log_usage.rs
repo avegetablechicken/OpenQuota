@@ -246,6 +246,7 @@ mod tests {
 
     fn codex_snapshot(usage: UsageHistory) -> ProviderSnapshot {
         ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: None,

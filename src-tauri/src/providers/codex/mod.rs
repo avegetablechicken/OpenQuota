@@ -303,6 +303,7 @@ impl CodexProvider {
         );
         Self::ensure_candidate_source_current(auth, account_identity)?;
         Ok(ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: mapped.plan,
@@ -616,6 +617,7 @@ mod account_tests {
             ..UsageHistory::default()
         };
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: Some("Plus".into()),

@@ -188,6 +188,7 @@ impl CopilotProvider {
                     mapped.value_metrics = self.org_billing_metrics(token.as_str());
                 }
                 ControlFlow::Break(Ok(ProviderSnapshot {
+                    upstream_provider_id: None,
                     accounts: None,
                     provider_id: "copilot".into(),
                     plan: mapped.plan,

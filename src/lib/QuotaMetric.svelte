@@ -1,13 +1,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
-  import {
-    formatLimit,
-    formatReset,
-    isUnstartedSession,
-    paceTooltip,
-    projectPace,
-    quotaNow,
-  } from './pacing';
+  import QuotaReset from './QuotaReset.svelte';
+  import { formatLimit, isUnstartedSession, paceTooltip, projectPace, quotaNow } from './pacing';
   import type { QuotaWindow } from './types';
 
   interface Props {
@@ -129,16 +123,6 @@
         ? 100 - pace.evenPacePercent
         : pace.evenPacePercent,
   );
-  const resetTooltip = $derived(
-    quota.resetsAt
-      ? formatReset(
-          quota.resetsAt,
-          serverNow,
-          resetDisplay === 'countdown' ? 'exact' : 'countdown',
-          timeFormat,
-        )
-      : null,
-  );
 </script>
 
 <section class="metric" aria-label={`${quota.label} quota`}>
@@ -216,9 +200,13 @@
     {#if notStarted}
       <span>Not started</span>
     {:else}
-      <button type="button" data-tooltip={resetTooltip ?? undefined} onclick={onToggleReset}>
-        {formatReset(quota.resetsAt, serverNow, resetDisplay, timeFormat)}
-      </button>
+      <QuotaReset
+        resetsAt={quota.resetsAt}
+        now={serverNow}
+        {resetDisplay}
+        {timeFormat}
+        {onToggleReset}
+      />
     {/if}
   </div>
 </section>
@@ -282,11 +270,6 @@
       border-radius: 2px;
       background: var(--secondary);
       transform: translateX(-1px);
-    }
-
-    .metric__reading strong {
-      color: var(--text);
-      font-weight: 450;
     }
 
     .metric__reading button {

@@ -1,4 +1,4 @@
-import type { AppSettings } from './types';
+import type { AppSettings, UsagePeriod } from './types';
 
 export type MetricNumberKind = 'percent' | 'dollars' | 'count';
 export type MetricNumberStyle = 'tray' | 'row' | 'full';
@@ -65,6 +65,13 @@ export function formatMetricValue(
     ? preciseCreditFormatter.format(value)
     : formatMetricNumber(value, kind, style);
   return label ? `${formatted} ${label}` : formatted;
+}
+
+export function formatUsageReading(period: UsagePeriod | null, tokensOnly: boolean) {
+  if (!period) return 'No data';
+  const tokens = formatMetricValue(period.tokens, 'count', 'row', 'tokens');
+  if (tokensOnly || period.estimatedCostUsd === null) return tokens;
+  return `${formatMetricNumber(period.estimatedCostUsd, 'dollars', 'row')} · ${tokens}`;
 }
 
 export function formatSpendValue(

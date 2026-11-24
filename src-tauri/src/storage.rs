@@ -553,6 +553,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: Some("Plus".into()),
@@ -603,6 +604,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "claude".into(),
             plan: Some("Max".into()),
@@ -737,6 +739,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "cursor".into(),
             plan: None,

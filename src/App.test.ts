@@ -4,6 +4,7 @@ import App from './App.svelte';
 import { chooseMenuItem, menuLabels, openMenu } from './test/nativeMenu';
 import { selectOption } from './test/selectOption';
 import * as shareCard from './lib/shareCard';
+import { ProviderCatalogIndex } from './lib/metrics';
 import type { PanelHeightMode } from './lib/backend';
 import type {
   AppSettings,
@@ -190,6 +191,145 @@ describe('OpenQuota dashboard', () => {
     await chooseMenuItem('Settings');
     expect(mocks.invoke).toHaveBeenCalledWith('get_app_settings');
   });
+
+  it.each([true, false])(
+    'uses standard subscription quota rows with a capped month=%s',
+    async (cappedMonth) => {
+      const id = 'sub2api@2';
+      const ids = ['daily', 'weekly', 'monthly'];
+      const labels = ['Daily', 'Weekly', 'Monthly'];
+      const base = providerCatalog.providers[0];
+      const metrics = ids.map((sourceId, i) => ({
+        ...base.metrics[0],
+        id: `${id}.${sourceId}`,
+        label: labels[i],
+        source: { kind: 'quotaOrValue' as const, sourceId, sessionWindow: false },
+      }));
+      const catalog = {
+        providers: [{ ...base, id, displayName: 'Sub2API', metrics }],
+        connectionConfigProviderIds: [id],
+      };
+      const snapshot = structuredClone(codexState.snapshot!);
+      snapshot.providerId = id;
+      snapshot.quotas = ids.map((sourceId, i) => {
+        const capped = i === 0 || (i === 2 && cappedMonth);
+        return {
+          ...snapshot.quotas[0],
+          id: sourceId,
+          label: labels[i],
+          usedPercent: capped ? 25 : 0,
+          usedValue: 5,
+          limitValue: capped ? 20 : null,
+          format: capped ? 'percent' : 'unlimitedDollars',
+          resetsAt: i === 1 ? '2099-01-01T00:00:00Z' : null,
+        };
+      });
+      const layout = {
+        ...settingsState.settings.providers[0],
+        id,
+        expanded: true,
+        metrics: metrics.map(({ id }) => ({
+          id,
+          enabled: true,
+          section: 'alwaysVisible' as const,
+          pinned: false,
+        })),
+      };
+      const settings = {
+        ...settingsState.settings,
+        usageDisplay: 'used' as const,
+        providers: [layout],
+      };
+      const original = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(async (command, args) =>
+        command === 'get_bootstrap_state'
+          ? {
+              catalog,
+              usage: { providers: { [id]: { ...codexState, snapshot } } },
+              settings: { ...settingsState, settings },
+            }
+          : original(command, args),
+      );
+      render(App);
+      await screen.findByRole('heading', { name: 'Daily' });
+      const daily = screen.getByRole('region', { name: 'Daily quota' });
+      expect(daily.querySelector('.metric__heading')).toHaveTextContent(/^Daily$/);
+      expect(daily.querySelector('.metric__reading')).toHaveTextContent('25% used');
+      const weekly = screen.getByRole('region', { name: 'Weekly quota' });
+      expect(weekly).toHaveClass('metric--no-data');
+      expect(weekly).not.toHaveTextContent('$');
+      expect(within(weekly).getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
+      expect(within(weekly).getByText('No data')).toBeVisible();
+      expect(within(weekly).getByRole('button', { name: /Resets/ })).toBeVisible();
+      expect(Boolean(screen.queryByRole('heading', { name: 'Monthly' }))).toBe(cappedMonth);
+
+      const rows = shareCard.buildProviderShareRows(
+        new ProviderCatalogIndex(catalog),
+        snapshot,
+        layout,
+        settings,
+        Date.now(),
+      );
+      expect(rows.map((row) => row.label)).toEqual(cappedMonth ? labels : labels.slice(0, 2));
+      expect(rows[0]).toMatchObject({ reading: '25% used', headingDetail: null });
+      expect(rows[1]).toMatchObject({ reading: 'No data', headingDetail: null, fillPercent: 0 });
+    },
+  );
+
+  it.each(['subscription', 'admin'])(
+    'keeps the recorded 30-day cost in Total Spend for a Sub2API %s connection',
+    async (mode) => {
+      const id = 'sub2api@2';
+      const definition = providerCatalog.providers.find((provider) => provider.id === 'codex')!;
+      const metric = {
+        ...definition.metrics.find((metric) => metric.id === 'codex.last30')!,
+        id: id + '.last30',
+      };
+      const snapshot = structuredClone(codexState.snapshot!);
+      snapshot.providerId = id;
+      snapshot.usageHistories = { account: snapshot.usageHistories.localDevice };
+      if (mode === 'admin') {
+        snapshot.accounts = [
+          { id: '7', name: 'Sub2API · Codex · Upstream', snapshot: structuredClone(snapshot) },
+        ];
+      }
+      const original = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(async (command, args) => {
+        if (command !== 'get_bootstrap_state') return original(command, args);
+        return {
+          catalog: {
+            providers: [{ ...definition, id, displayName: 'Sub2API', metrics: [metric] }],
+            connectionConfigProviderIds: [id],
+          },
+          usage: { providers: { [id]: { ...codexState, snapshot } } },
+          settings: {
+            ...settingsState,
+            settings: {
+              ...settingsState.settings,
+              showTotalSpend: true,
+              totalSpendMetric: 'cost',
+              totalSpendPeriod: 'last30Days',
+              providers: [
+                {
+                  id,
+                  enabled: true,
+                  detected: true,
+                  expanded: true,
+                  metrics: [{ id: metric.id, enabled: true, section: 'onDemand', pinned: false }],
+                },
+              ],
+            },
+          },
+        };
+      });
+      const { container } = render(App);
+      const total = await screen.findByRole('region', { name: 'Accounts Spend' });
+      expect(within(total).getByText('$5.11')).toBeVisible();
+      const card = container.querySelector<HTMLElement>(`[data-provider-id="${id}"]`)!;
+      const reading = mode === 'admin' ? '$5.11 · 3M tokens' : '3M tokens';
+      expect(within(card).getByRole('button', { name: reading })).toBeVisible();
+    },
+  );
 
   it.each([0, 1, 3])('renders exactly %i returned upstream accounts', async (count) => {
     const original = mocks.invoke.getMockImplementation()!;

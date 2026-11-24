@@ -661,6 +661,7 @@ mod tests {
             )
             .unwrap();
             ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: "codex".into(),
                 plan: mapped.plan,

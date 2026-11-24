@@ -3,22 +3,37 @@
     providerFamily,
     providerIconColor,
     providerIconPath,
+    providerIconOutlined,
     providerIconViewBox,
   } from './providerIconPaths';
-  import { sub2ApiUpstreams } from './sub2ApiUpstreams';
+  import { getContext } from 'svelte';
+  import type { ProviderSnapshot } from './types';
+  import { sub2ApiUpstreams, sub2ApiSnapshotContext } from './sub2ApiUpstreams';
 
   interface Props {
     providerId: string;
     size?: number;
-    upstreamProvider?: 'codex' | 'claude' | null;
+    upstreamProvider?: import('./types').Sub2ApiSource | null;
   }
 
   let { providerId, size = 18, upstreamProvider }: Props = $props();
   const family = $derived(providerFamily(providerId));
-  const resolvedUpstream = $derived(
-    upstreamProvider === null ? undefined : (upstreamProvider ?? $sub2ApiUpstreams[providerId]),
+  const snapshotFor = getContext<((id: string) => ProviderSnapshot | null | undefined) | undefined>(
+    sub2ApiSnapshotContext,
   );
-  const composite = $derived(family === 'sub2api' && resolvedUpstream !== undefined);
+  const resolvedUpstream = $derived.by(() => {
+    if (family !== 'sub2api' || upstreamProvider === null) return undefined;
+    const snapshot = snapshotFor?.(providerId);
+    // An explicit upstream in the editor previews the draft. Otherwise prefer the
+    // latest snapshot, including a neutral icon when discovery is inconclusive.
+    if (upstreamProvider === 'subscription')
+      return snapshot?.accounts ? undefined : snapshot?.upstreamProviderId;
+    if (upstreamProvider) return upstreamProvider;
+    if (snapshot && !snapshot.accounts) return snapshot.upstreamProviderId;
+    const saved = $sub2ApiUpstreams[providerId];
+    return snapshot?.upstreamProviderId ?? (saved === 'subscription' ? undefined : saved);
+  });
+  const composite = $derived(Boolean(resolvedUpstream && providerIconPath(resolvedUpstream)));
   const path = $derived(providerIconPath(providerId));
   const upstreamPath = $derived(resolvedUpstream ? providerIconPath(resolvedUpstream) : '');
   const upstreamColor = $derived(resolvedUpstream ? providerIconColor(resolvedUpstream) : null);
@@ -38,10 +53,17 @@
         stroke-linejoin="round"
       />
     </g>
-    <g data-icon-layer="upstream" transform="translate(44 44) scale(.56)">
+    <svg
+      data-icon-layer="upstream"
+      x="44"
+      y="44"
+      width="56"
+      height="56"
+      viewBox={providerIconViewBox(resolvedUpstream ?? '')}
+    >
       <path d={upstreamPath} fill={upstreamColor ?? 'currentColor'} />
-    </g>
-  {:else if family === 'sub2api'}
+    </svg>
+  {:else if providerIconOutlined(providerId)}
     <path
       d={path}
       fill="none"

@@ -301,6 +301,10 @@ impl NotificationEvaluator {
                     metric_id: metric_definition.id.clone(),
                     account_id: account_id.map(str::to_owned),
                 };
+                if window.format == QuotaFormat::UnlimitedDollars {
+                    states.remove(&state_key);
+                    continue;
+                }
                 let projection = project(window, now);
                 let state = states.entry(state_key.clone()).or_default();
                 let previous_severity = state.previous;
@@ -938,6 +942,7 @@ mod tests {
             ..AppSettings::default()
         };
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "custom".into(),
             plan: None,
@@ -1109,6 +1114,7 @@ mod tests {
         let now = Utc::now();
         let resets_at = now + Duration::hours(4);
         let snapshot = |source_id: &str, label: &str, used_percent: f64| ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "switching".into(),
             plan: None,

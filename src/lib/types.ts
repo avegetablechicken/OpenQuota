@@ -5,7 +5,7 @@ export interface QuotaWindow {
   usedPercent: number;
   resetsAt: string | null;
   periodSeconds: number;
-  format: 'percent' | 'dollars' | 'count';
+  format: 'percent' | 'dollars' | 'unlimitedDollars' | 'count';
   usedValue: number | null;
   limitValue: number | null;
   unit?: string | null;
@@ -114,6 +114,7 @@ export interface UsageHistories {
 }
 
 export interface ProviderSnapshot {
+  upstreamProviderId?: string | null;
   accounts?: Array<{ id: string; name: string; snapshot: ProviderSnapshot }>;
   providerId: string;
   plan: string | null;
@@ -196,32 +197,35 @@ export interface ApiKeyMutationOutcome extends ProviderApiKeyState {
   warning?: string;
 }
 
+export type Sub2ApiMode = 'subscription' | 'admin';
+export type Sub2ApiSource = 'subscription' | Sub2ApiUpstream;
+
 export interface Sub2ApiConfigState {
+  useProviderKey?: boolean;
+  otherMode?: Sub2ApiConfigState;
+  mode: Sub2ApiMode;
   configured: boolean;
   baseUrl: string;
   codexProvider: string;
   customBaseUrl: boolean;
   email: string;
   upstream: Sub2ApiUpstream;
-  billingMode: Sub2ApiBillingMode;
-  /** First local date (YYYY-MM-DD) priced from request records with Upstream billing. */
-  historyPricedFrom?: string | null;
-  historyComplete?: boolean;
-  historyBackfillPending?: boolean;
+  providerSource?: Sub2ApiUpstream | null;
 }
-
-export type Sub2ApiBillingMode = 'upstream' | 'server';
 
 export type Sub2ApiUpstream = 'codex' | 'claude';
 
 export interface Sub2ApiConfigInput {
+  useProviderKey?: boolean;
+  mode: Sub2ApiMode;
+  apiKey?: string;
   baseUrl: string;
   codexProvider: string;
   customBaseUrl: boolean;
   email: string;
   password: string;
   upstream: Sub2ApiUpstream;
-  billingMode: Sub2ApiBillingMode;
+  providerSource?: Sub2ApiUpstream | null;
 }
 
 export interface ProviderDefinition {

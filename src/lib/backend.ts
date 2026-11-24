@@ -76,10 +76,6 @@ export function saveSub2ApiConfig(providerId: string, config: Sub2ApiConfigInput
   return invoke<Sub2ApiConfigState>('save_sub2api_config', { providerId, config });
 }
 
-export function backfillSub2ApiHistory(providerId: string) {
-  return invoke<Sub2ApiConfigState>('backfill_sub2api_history', { providerId });
-}
-
 export function clearSub2ApiConfig(providerId: string) {
   return invoke<Sub2ApiConfigState>('clear_sub2api_config', { providerId });
 }

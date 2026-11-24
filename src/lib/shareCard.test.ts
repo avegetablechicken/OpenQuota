@@ -145,6 +145,37 @@ describe('share card layout', () => {
     });
   });
 
+  it('exports an empty unlimited meter and token-only history while preserving recorded spend', () => {
+    const snapshot = structuredClone(codexState.snapshot!);
+    snapshot.quotas[0] = {
+      ...snapshot.quotas[0],
+      format: 'unlimitedDollars',
+      usedValue: 75,
+      limitValue: null,
+      resetsAt: null,
+    };
+    const rows = buildProviderShareRowsWithCatalog(
+      providerCatalogIndex,
+      snapshot,
+      { ...settingsState.settings.providers[0], expanded: true },
+      settingsState.settings,
+      Date.now(),
+      'all',
+      true,
+    );
+    expect(rows[0]).toMatchObject({
+      kind: 'quota',
+      headingDetail: null,
+      reading: 'No data',
+      trailing: 'Reset unavailable',
+      fillPercent: 0,
+    });
+    expect(rows.find((row) => row.kind === 'text' && row.label === 'Last 30 Days')).toMatchObject({
+      value: '3M tokens',
+    });
+    expect(snapshot.usageHistories.localDevice?.last30Days?.estimatedCostUsd).toBe(5.11);
+  });
+
   it('keeps provider-supplied count units in exported quota rows', () => {
     const snapshot = structuredClone(codexState.snapshot!);
     snapshot.quotas[0] = {
@@ -230,7 +261,7 @@ describe('share card layout', () => {
     );
 
     expect(rows.find((row) => row.kind === 'quota' && row.label === 'Weekly')).toMatchObject({
-      paceLabel: null,
+      headingDetail: null,
     });
   });
 

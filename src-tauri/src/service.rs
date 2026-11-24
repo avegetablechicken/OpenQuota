@@ -98,6 +98,7 @@ impl ProviderService {
             {
                 Ok(Some(mut snapshot)) => {
                     crate::app_debug!("cache", "loaded cached snapshot for {id}");
+                    crate::providers::sub2api::restore_subscription_windows(&mut snapshot);
                     normalize_quota_availability(definition, &mut snapshot);
                     ProviderViewState::from_cache(snapshot)
                 }
@@ -161,7 +162,18 @@ impl ProviderService {
         &self,
         provider_id: &str,
     ) -> Result<(), crate::storage::StorageError> {
+        // A request started with the previous credentials may still be in flight.
+        // Serialize invalidation with publication to both memory and disk.
+        let mut flight = self.refresh_flights.get(provider_id).map(|flight| {
+            flight
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        });
         self.storage.delete_snapshot(provider_id)?;
+        if let Some(state) = flight.as_mut() {
+            state.data_revision += 1;
+        }
         self.update_state(provider_id, |state| {
             *state = ProviderViewState::default();
         });
@@ -276,21 +288,25 @@ impl ProviderService {
         };
         let mut force = initial_force;
         loop {
-            let generation = flight
-                .state
-                .lock()
-                .ok()
-                .and_then(|state| state.attempt_generation)
-                .unwrap_or_default();
             let started = Instant::now();
             let tag = format!("plugin:{provider_id}");
             crate::app_info!(&tag, "refresh start (force={force})");
-            self.update_state(&provider_id, |state| {
-                state.refreshing = true;
-                state.error = None;
-                state.error_kind = None;
-                state.last_attempt_at = Some(Utc::now());
-            });
+            let (generation, data_revision) = {
+                let flight_state = flight
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                self.update_state(&provider_id, |state| {
+                    state.refreshing = true;
+                    state.error = None;
+                    state.error_kind = None;
+                    state.last_attempt_at = Some(Utc::now());
+                });
+                (
+                    flight_state.attempt_generation.unwrap_or_default(),
+                    flight_state.data_revision,
+                )
+            };
             let worker_provider = provider.clone();
             // Unofficial providers relay through servers whose latency is unknown, so their
             // fast quota data is shown as soon as it arrives instead of waiting for history.
@@ -322,7 +338,10 @@ impl ProviderService {
                         }
                     },
                     Some(preview) = preview_rx.recv() => {
-                        self.apply_preview(&provider_id, preview, started);
+                        let flight_state = flight.state.lock().unwrap_or_else(|error| error.into_inner());
+                        if flight_state.data_revision == data_revision {
+                            self.apply_preview(&provider_id, preview, started);
+                        }
                     }
                     _ = &mut deadline => {
                         crate::app_warn!(
@@ -356,16 +375,24 @@ impl ProviderService {
                     error.kind()
                 ),
             }
-            let state = self.apply_refresh_result(&provider_id, refresh_result);
-            if state.error.is_none() {
-                if let Ok(mut last) = self.last_live_refresh.lock() {
-                    last.insert(provider_id.clone(), Instant::now());
+            {
+                let flight_state = flight
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if flight_state.data_revision == data_revision {
+                    let state = self.apply_refresh_result(&provider_id, refresh_result);
+                    if state.error.is_none() {
+                        if let Ok(mut last) = self.last_live_refresh.lock() {
+                            last.insert(provider_id.clone(), Instant::now());
+                        }
+                        if let Ok(mut failures) = self.last_failed_refresh.lock() {
+                            failures.remove(&provider_id);
+                        }
+                    } else if let Ok(mut failures) = self.last_failed_refresh.lock() {
+                        failures.insert(provider_id.clone(), Instant::now());
+                    }
                 }
-                if let Ok(mut failures) = self.last_failed_refresh.lock() {
-                    failures.remove(&provider_id);
-                }
-            } else if let Ok(mut failures) = self.last_failed_refresh.lock() {
-                failures.insert(provider_id.clone(), Instant::now());
             }
 
             let run_follow_up = if let Some(worker) = late_worker {
@@ -717,6 +744,7 @@ struct RefreshFlight {
 
 #[derive(Default)]
 struct RefreshFlightState {
+    data_revision: u64,
     runner_active: bool,
     attempt_generation: Option<u64>,
     requested_generation: u64,
@@ -1286,6 +1314,7 @@ mod tests {
                 id: "7".into(),
                 name: "Upstream".into(),
                 snapshot: ProviderSnapshot {
+                    upstream_provider_id: None,
                     accounts: None,
                     ..snapshot.clone()
                 },
@@ -1458,6 +1487,7 @@ mod tests {
 
     fn test_snapshot(provider_id: &str) -> ProviderSnapshot {
         ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: provider_id.into(),
             plan: None,
@@ -1502,6 +1532,7 @@ mod tests {
     #[test]
     fn failed_refresh_preserves_last_successful_snapshot_without_forcing_stale() {
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: None,
@@ -1789,6 +1820,38 @@ mod tests {
         assert_eq!(state.providers["sub2api@2"].source, SnapshotSource::None);
         assert!(storage.load_snapshot("sub2api").unwrap().is_some());
         assert!(storage.load_snapshot("sub2api@2").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_refresh_using_previous_credentials_cannot_repopulate_a_cleared_connection() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("cache.db")).unwrap());
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(GatedProvider {
+            id: "sub2api",
+            gate: gate.clone(),
+            calls: calls.clone(),
+            active: Default::default(),
+            maximum: Default::default(),
+        }) as Arc<dyn UsageProvider>;
+        let registry = Arc::new(ProviderRegistry::new(vec![provider]).unwrap());
+        let service = Arc::new(ProviderService::new(registry, storage.clone()));
+        let worker = service.clone();
+        let running = tokio::spawn(async move { worker.refresh("sub2api", true).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        service.clear_provider_data("sub2api").unwrap();
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert!(running.await.unwrap().snapshot.is_none());
+        assert!(storage.load_snapshot("sub2api").unwrap().is_none());
+        assert!(service.refresh("sub2api", true).await.snapshot.is_some());
     }
 
     #[test]

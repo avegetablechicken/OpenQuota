@@ -1,8 +1,24 @@
 # Sub2API
 
-OpenQuota shows quota and upstream usage estimates for active Codex or Claude OAuth accounts on self-hosted Sub2API instances.
+Each Sub2API connection tracks either a user subscription or the upstream accounts managed by an administrator. Choose **Customize → Unofficial → Add Account → Connection → Add**, then use **Track** to select a mode.
 
-## What it tracks
+## User subscription
+
+New connections default to **User subscription**. Choose the Codex or Claude configuration that supplies your Base URL, or enable **Custom Base URL** to enter the address manually. With a named provider, leave **API key** empty to use the key from that provider, or enter a key to override it. To remove a saved override, use the clear button in the key field and select **Save**. A custom Base URL requires a manually entered key.
+
+For Codex, OpenQuota resolves the selected provider or standalone profile under `CODEX_HOME` (default `~/.codex`). It looks up the provider’s `env_key` in that directory’s `.env`, then in the process environment. Other supported sources in the selected provider are `experimental_bearer_token` and Bearer Authorization or X-API-Key headers in `env_http_headers` or `http_headers`. For Claude, OpenQuota reads `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` from the selected settings file’s `env` object, then its top-level fields. Automatic mode reads the key again on refresh. If the provider endpoint changes, save the connection again.
+
+OpenQuota uses `GET /v1/models` to choose the subscription icon. A catalog that identifies one supported model family gets its mark alongside Sub2API’s. Mixed or unrecognized catalogs use the Sub2API mark.
+
+OpenQuota reads `GET /v1/usage` using that key. The dashboard shows the plan name and quota percentages. The percentage appears below the bar. Unlimited daily and weekly windows show an empty bar with **No data** in the percentage position. The monthly row appears only when the server reports a positive monthly limit. The menu bar shows only used percentages for capped subscription windows. A weekly window also shows its next reset when the server supplies the window start. The **Today**, **Yesterday**, and **Last 30 Days** rows show token counts for this API key. The model breakdown ranks models by tokens. **Monthly** shows usage across the subscription since its current monthly window started. The window can reset partway through the last 30 days. For the key’s rolling 30-day cost, open **Total Spend**, select **Accounts**, **30 Days** and **Cost**. The subscription’s entry in Total Spend uses the daily fees reported for that key. Usage Trend plots the daily token totals for this API key relative to the largest daily total in view. Missing dates appear as zero, and an endpoint that returns only the today summary has no daily trend.
+
+Wallet-only keys and keys with their own quota or rate limits can return a different view from this endpoint. If the response omits the subscription, OpenQuota displays a message explaining which key is needed. Manually entered keys are stored in the operating system credential store. Editing a saved subscription leaves the key field blank. Supply a new key when changing the endpoint. Each item remembers the connection and credentials for both tracking modes. Switching **Track** keeps the selected **Upstream**, including before the first save. Each mode has its own provider, Base URL and credentials. A new mode starts with an empty address, and switching back restores its draft. Select **Save** to activate it. **Clear connection** removes both saved connections.
+
+## Upstream accounts (admin)
+
+Choose **Upstream accounts (admin)** to see the active Codex or Claude OAuth accounts managed by the instance. Connections saved by earlier versions open in this mode.
+
+### What it tracks
 
 | Metric            | Meaning                                                 |
 | ----------------- | ------------------------------------------------------- |
@@ -11,63 +27,34 @@ OpenQuota shows quota and upstream usage estimates for active Codex or Claude OA
 | Spark             | Spark session window, when reported                     |
 | Spark Weekly      | Spark weekly window, when reported                      |
 | Rate Limit Resets | Available reset credits, shown as read-only information |
-| Today, Yesterday, Last 30 Days | Token counts and cost using the selected billing method |
+| Today, Yesterday, Last 30 Days | Token counts and cost for the upstream accounts |
 | Model breakdown | Token counts and cost per model and account |
 
 An account's Session starts on first use. When the upstream reports it unused, the dashboard shows
 0% used and **Not started** instead of a reset countdown, and the menu bar omits the value.
 
-The last field in the connection editor is **Billing method**. **Upstream** is the default,
-including for existing connections. **Sub2API** reads the instance's 30-day account statistics
-from `/api/v1/admin/accounts/:id/stats`. It uses the account's reported `actual_cost`, including
-zero, or `cost` when the actual amount is unavailable. Days with usage but no amount make the
-period cost unknown. The daily buckets follow the server's calendar. Saving a change refreshes
-the account and connection totals.
+OpenQuota automatically prices the last 30 days of request records from
+`/api/v1/admin/usage` for each upstream account. It uses the model reported by the
+upstream response, then the model forwarded upstream, then the request model when
+no mapping is recorded. Each estimate uses the request timestamp, speed tier and
+input, output, cache-read and cache-write tokens. Unknown model rates or unsupported
+image charges leave the estimate incomplete. The window includes today and the
+previous 29 local dates. See [historical pricing](../pricing-history.md).
 
-With **Upstream**, OpenQuota reads paginated request records from `/api/v1/admin/usage` for each account. It uses the
-model reported by the upstream response, then the model forwarded upstream, then the request model
-when no mapping is recorded. Each estimate uses the request timestamp, speed tier, and input,
-output, cache-read and cache-write tokens. An unknown rate or unsupported image charge leaves an
-incomplete estimate. The 30-day window includes today and the previous 29 local dates.
-Instance markups and account multipliers apply separately to the instance's own billing.
-See [historical pricing](../pricing-history.md).
+Quota is shown first. Each refresh syncs up to 16 pages of request records across
+the connection and saves each complete page. OpenQuota resumes from the cached
+records on subsequent refreshes. An account’s history becomes available once its
+window is complete, and the connection total includes every active account.
 
-OpenQuota keeps a local history cache for each connection and upstream account. Switching
-billing methods or restarting the app reuses the data already synced for each method.
-Quota and account discovery still refresh normally.
+### Administrator setup
 
-Each refresh reads every account's quota first and shows it right away. Usage history
-loads afterwards, and the previous history stays on screen until it finishes, so a slow
-or busy instance never delays the quota. If loading history fails, the new quota is
-kept and the error is shown on the card.
-
-- **Upstream** stores the fields needed for pricing. A newly discovered account
-  downloads only today's request records, then later syncs request new records after
-  the saved position. Days before that are shown with the instance's own token counts
-  and cost from `/api/v1/admin/accounts/:id/stats`, under the model row
-  **Before sync (Sub2API cost)**, read once per day. Coverage grows by one day each
-  day until it spans the 30-day window. Accounts that an earlier version had already
-  synced completely keep their full window.
-- To price the whole window now, select **Backfill 30 Days** under **Usage history** in
-  the connection editor. This downloads every request record of the past 30 days, which
-  can be a lot of data on a busy instance, so it never starts on its own. Each refresh
-  downloads up to 16 pages of 128 records and saves each complete page; the earlier
-  days stay on the server summary until the backfill completes. If the server removes
-  records, OpenQuota checks the affected dates before rebuilding them.
-- **Sub2API** stores the server's summary and updates the current day's contribution
-  when usage changes. It refreshes the 30-day summary when the calendar window
-  changes or when the daily and monthly figures cannot be reconciled.
-- When the server reports the same account activity timestamp, routine refreshes reuse
-  the history cache. OpenQuota periodically checks for delayed changes and uses a
-  lightweight history check on instances that omit the timestamp.
-
-## Setup
-
-In **Customize**, select **+ Sub2API** to create an independent account. In its **Connection**
-card, select **Add** to configure the instance address and administrator login. Select **Save** to
+In **Customize**, select **Add Account** under **Unofficial** to create an independent account. In its **Connection**
+card, select **Add**, choose **Upstream accounts (admin)**, and configure the instance address and administrator login. Select **Save** to
 collapse the form, or **Done** to discard edits. Use **Edit** to reopen a configured connection. OpenQuota signs in through
 `/api/v1/auth/login`, discovers the active OAuth accounts for the selected upstream, and reads Codex quota from
 `/api/v1/admin/openai/accounts/:id/quota` or Claude quota from `/api/v1/admin/accounts/:id/usage`.
+
+Changing **Upstream** changes which accounts OpenQuota tracks on the instance. It keeps the current address, login and named provider configuration. A saved password is reused only for the same instance. To choose another named provider using the newly selected platform’s configuration, clear the Provider field and enter the new name.
 
 For a Codex upstream, enter a **Provider** that exactly matches the top-level `model_provider` value,
 a name under `[model_providers]` in `~/.codex/config.toml`, or a standalone profile file named
@@ -112,6 +99,7 @@ On Ubuntu, install a trusted PEM CA certificate as a `.crt` file under
 OpenQuota. A locally trusted self-signed server certificate with `CA:TRUE` is supported
 through native verification. OpenQuota does not disable certificate or hostname checks.
 
+- **Relay requires a Bearer API token** — select **Custom Base URL** in administrator mode and enter the instance’s own address. The subscription mode can keep using the relay.
 - **Login rejected** — verify the administrator email and password in the Sub2API admin panel.
 - **Administrator access required** — the configured login must be a Sub2API administrator.
 - **Two-factor authentication required** — this initial integration does not complete a 2FA login.

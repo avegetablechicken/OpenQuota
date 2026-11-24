@@ -1997,6 +1997,7 @@ mod tests {
             )
             .unwrap();
         let snapshot = ProviderSnapshot {
+            upstream_provider_id: None,
             accounts: None,
             provider_id: "codex".into(),
             plan: Some("Plus".into()),

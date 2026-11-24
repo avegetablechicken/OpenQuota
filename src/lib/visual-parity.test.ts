@@ -1,7 +1,11 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ProviderIcon from './ProviderIcon.svelte';
-import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
+import {
+  forgetSub2ApiUpstream,
+  rememberSub2ApiUpstream,
+  sub2ApiSnapshotContext,
+} from './sub2ApiUpstreams';
 import UsageTrend from './UsageTrend.svelte';
 
 afterEach(() => {
@@ -89,6 +93,26 @@ describe('native visual contract', () => {
       '#39D9E7',
     );
   });
+
+  it.each(['codex', 'claude', 'grok'])(
+    'draws the detected %s mark for a user subscription',
+    (upstreamProviderId) => {
+      const icon = render(ProviderIcon, {
+        props: { providerId: 'sub2api@2', upstreamProvider: 'subscription' },
+        context: new Map([[sub2ApiSnapshotContext, () => ({ upstreamProviderId })]]),
+      });
+      const reference = render(ProviderIcon, { providerId: upstreamProviderId });
+      expect(icon.container.querySelector('[data-icon-layer="sub2api"] path')).toBeInTheDocument();
+      expect(icon.container.querySelector('[data-icon-layer="upstream"] path')).toHaveAttribute(
+        'd',
+        reference.container.querySelector('path')!.getAttribute('d'),
+      );
+      expect(icon.container.querySelector('[data-icon-layer="upstream"]')).toHaveAttribute(
+        'viewBox',
+        reference.container.querySelector('svg')!.getAttribute('viewBox'),
+      );
+    },
+  );
 
   it('updates a Sub2API item icon from its remembered upstream', () => {
     rememberSub2ApiUpstream('sub2api@2', 'claude');

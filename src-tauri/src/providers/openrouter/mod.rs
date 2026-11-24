@@ -231,6 +231,7 @@ impl OpenRouterProvider {
                 })
                 .unwrap_or_default();
             return Ok(ProviderSnapshot {
+                upstream_provider_id: None,
                 accounts: None,
                 provider_id: "openrouter".into(),
                 plan,

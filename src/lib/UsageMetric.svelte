@@ -1,29 +1,28 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import Icon from './Icon.svelte';
-  import { formatMetricNumber, formatMetricValue } from './metricFormat';
+  import { formatMetricNumber, formatMetricValue, formatUsageReading } from './metricFormat';
   import ModelUsageDetail from './ModelUsageDetail.svelte';
   import type { UsagePeriod } from './types';
 
   interface Props {
     label: string;
     period: UsagePeriod | null;
+    tokensOnly?: boolean;
   }
-  let { label, period }: Props = $props();
+  let { label, period, tokensOnly = false }: Props = $props();
   let open = $state(false);
   let detailTop = $state(8);
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function reading(value: UsagePeriod | null) {
-    if (!value) return 'No data';
-    const tokens = formatMetricValue(value.tokens, 'count', 'row', 'tokens');
-    if (value.estimatedCostUsd === null) return tokens;
-    return `${formatMetricNumber(value.estimatedCostUsd, 'dollars', 'row')} · ${tokens}`;
-  }
   function valueTooltip(value: UsagePeriod | null) {
     if (!value) return undefined;
     if (value.modelBreakdown?.models.length) return undefined;
+    if (tokensOnly)
+      return value.tokens >= 1000
+        ? formatMetricValue(value.tokens, 'count', 'full', 'tokens')
+        : undefined;
     const note =
       value.estimatedCostUsd !== null && value.costEstimated
         ? 'Estimated locally, so it may be off'
@@ -76,7 +75,7 @@
 
 <div class="usage-row">
   <span
-    >{label}{#if period?.unknownModels?.length}<i
+    >{label}{#if !tokensOnly && period?.unknownModels?.length}<i
         class="usage-label-warning"
         data-tooltip={unknownModelTooltip(period.unknownModels)}
         aria-label="This period used a model with unknown pricing"
@@ -91,12 +90,13 @@
     onmouseenter={scheduleShow}
     onmouseleave={scheduleHide}
     onfocus={scheduleShow}
-    onblur={scheduleHide}>{reading(period)}</button
+    onblur={scheduleHide}>{formatUsageReading(period, tokensOnly)}</button
   >
 </div>
 
 {#if open && period?.modelBreakdown}
   <ModelUsageDetail
+    {tokensOnly}
     title={label}
     breakdown={period.modelBreakdown}
     top={detailTop}
