@@ -102,33 +102,6 @@ impl ModelPricing {
         Some(super::history::active(rows, at).and_then(|row| row.rates(tier, prompt, at)))
     }
 
-    /// Prices a metered upstream request, including an explicitly reported speed tier.
-    pub(crate) fn upstream_cost_at(
-        &self,
-        provider: &str,
-        model: &str,
-        at: chrono::DateTime<chrono::Utc>,
-        tokens: TokenBreakdown,
-        tier: ServiceTier,
-    ) -> Option<f64> {
-        let rates = match self.historical_rates(provider, model, at, tier, tokens.prompt_tokens()) {
-            Some(rates) => rates?,
-            None => match tier {
-                ServiceTier::Standard => self.resolve(model)?,
-                ServiceTier::Fast => {
-                    let canonical = self.supplement.canonical_name(model).unwrap_or(model);
-                    if canonical.ends_with("-fast") {
-                        self.resolve(canonical)?
-                    } else {
-                        self.resolve(&format!("{canonical}-fast"))?
-                    }
-                }
-                _ => return None,
-            },
-        };
-        Some(rates.cost_dollars(tokens, true))
-    }
-
     pub fn estimated_cost_at(
         &self,
         provider: &str,

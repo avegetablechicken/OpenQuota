@@ -8,7 +8,8 @@ fn tls_client_builder() -> ClientBuilder {
     // Select explicitly: other dependencies can also enable reqwest's Rustls feature.
     // Use the native trust verifier (Security Framework / SChannel / OpenSSL),
     // including locally trusted self-signed server certificates with CA:TRUE.
-    Client::builder().tls_backend_native()
+    // Providers opt in to compression where supported by their API.
+    Client::builder().tls_backend_native().gzip(false)
 }
 
 /// Persisted override: absent means system routing, `direct` disables every proxy,

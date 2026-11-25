@@ -1,5 +1,7 @@
 use super::reported::{AccountStatsDay, AccountStatsModel, ReportedUsage};
-use super::{classify_status, transport_error, AccountStats, Sub2ApiClient, Sub2ApiError};
+use super::{
+    classify_status, decode_response, transport_error, AccountStats, Sub2ApiClient, Sub2ApiError,
+};
 use crate::models::{MetricValueKind, ProviderSnapshot, QuotaFormat, QuotaWindow, UsageHistories};
 use chrono::{DateTime, Days, Local, Utc};
 use reqwest::StatusCode;
@@ -158,7 +160,7 @@ impl Sub2ApiClient {
             status if !status.is_success() => return Err(classify_status(status)),
             _ => {}
         }
-        let usage: UsageResponse = response.json().map_err(|_| Sub2ApiError::InvalidResponse)?;
+        let usage: UsageResponse = decode_response("subscription", response)?;
         let subscription = usage.subscription.ok_or(Sub2ApiError::NoSubscription)?;
         snapshot.plan = usage.plan;
         let mut history = AccountStats {

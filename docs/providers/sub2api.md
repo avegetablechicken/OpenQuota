@@ -58,22 +58,24 @@ An account's Session starts on first use, as does an Antigravity account's Claud
 the upstream reports it unused, the dashboard shows 0% used and **Not started** instead of a reset
 countdown, and the menu bar omits the value.
 
-OpenQuota automatically prices the last 30 days of request records from
-`/api/v1/admin/usage` for each upstream account. It uses the model reported by the
-upstream response, then the model forwarded upstream, then the request model when
-no mapping is recorded. Each estimate uses the request timestamp, speed tier and
-input, output, cache-read and cache-write tokens. Unknown model rates or unsupported
-image charges leave the estimate incomplete. The window includes today and the
-previous 29 local dates. Antigravity requests to Claude models use Claude's rates, and
-other Antigravity models use Antigravity's. Grok requests use Grok's rates.
-See [historical pricing](../pricing-history.md).
+OpenQuota reads each account's 30-day daily and model summaries from
+`/api/v1/admin/accounts/:id/stats?days=30`. Upstream account costs use the
+server's standard `cost` field, before user or account multipliers. Missing
+standard costs remain unknown; OpenQuota never substitutes an adjusted
+`actual_cost`. These are the instance's recorded prices, not an independent
+recalculation using OpenQuota's historical price catalog. Daily buckets follow
+the server's calendar, and model names follow its summary.
 
-Quota is shown first. History sync runs in batches of up to 16 pages across the
-connection, saves each complete page, and automatically continues with the next
-batch. The refresh icon keeps spinning until all active accounts finish syncing.
-It stops when the refresh completes or fails; failures show an error, and the next
-refresh resumes from the cached records. An account’s history becomes available
-once its window is complete, and the connection total includes every active account.
+Both tracking modes use summaries rather than individual request records.
+OpenQuota does not call the administrator request-log endpoint, download pages
+of historical requests, or read the old detail cache. Existing detail cache
+files are left untouched. The normal snapshot cache retains the last successful
+summary if a refresh fails.
+
+Quota is shown first. The refresh icon keeps spinning while summaries are
+loading, then stops when the refresh completes or fails. Failures show an error.
+Each account keeps its own summary, and the connection total combines the active
+accounts. Requests use gzip when supported by the server.
 
 ### Administrator setup
 

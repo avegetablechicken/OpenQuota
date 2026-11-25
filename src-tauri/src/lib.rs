@@ -886,7 +886,6 @@ pub fn run() {
             let sub2api = Arc::new(Sub2ApiProviders::new(
                 app_data_dir.join("sub2api-connections"),
                 storage.clone(),
-                pricing.clone(),
             ));
             let mut providers = vec![
                 Arc::new(ClaudeProvider::new(storage.clone(), pricing.clone())?)

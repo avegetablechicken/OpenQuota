@@ -4,10 +4,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Deserialize, Serialize, PartialEq)]
 pub(super) struct AccountStats {
-    #[serde(default)]
     pub(super) history: Vec<AccountStatsDay>,
-    #[serde(default)]
     pub(super) models: Vec<AccountStatsModel>,
+}
+
+#[derive(Clone, Copy)]
+enum CostBasis {
+    Subscription,
+    Standard,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -46,6 +50,16 @@ impl ReportedUsage {
             .filter(|n| n.is_finite() && *n >= 0.0)
             .or_else(|| self.cost.filter(|n| n.is_finite() && *n >= 0.0))
     }
+
+    fn amount_for(&self, basis: CostBasis) -> Option<f64> {
+        match basis {
+            CostBasis::Subscription => self.amount(),
+            // Admin daily `actual_cost` is account-adjusted, while model
+            // `actual_cost` is user-adjusted. Only `cost` has the same standard
+            // meaning in both, so never substitute either adjusted amount.
+            CostBasis::Standard => self.cost.filter(|n| n.is_finite() && *n >= 0.0),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +97,14 @@ impl Total {
 
 impl AccountStats {
     pub(super) fn into_history(self, now: chrono::DateTime<Utc>) -> UsageHistory {
+        self.into_history_with_basis(now, CostBasis::Subscription)
+    }
+
+    pub(super) fn into_standard_history(self, now: chrono::DateTime<Utc>) -> UsageHistory {
+        self.into_history_with_basis(now, CostBasis::Standard)
+    }
+
+    fn into_history_with_basis(self, now: chrono::DateTime<Utc>, basis: CostBasis) -> UsageHistory {
         let today = now.with_timezone(&Local).date_naive();
         let mut days = std::collections::BTreeMap::<NaiveDate, Total>::new();
         let mut monthly = Total::default();
@@ -90,7 +112,7 @@ impl AccountStats {
             let Ok(date) = NaiveDate::parse_from_str(day.date.trim(), "%Y-%m-%d") else {
                 continue;
             };
-            let amount = day.usage.amount();
+            let amount = day.usage.amount_for(basis);
             if day.usage.tokens == 0 && amount.unwrap_or_default() == 0.0 {
                 continue;
             }
@@ -100,7 +122,7 @@ impl AccountStats {
         let mut models = std::collections::BTreeMap::<String, Total>::new();
         for entry in self.models {
             let name = entry.model.trim();
-            let amount = entry.usage.amount();
+            let amount = entry.usage.amount_for(basis);
             if !name.is_empty() && (entry.usage.tokens > 0 || amount.unwrap_or_default() > 0.0) {
                 models
                     .entry(name.to_owned())
@@ -126,7 +148,13 @@ impl AccountStats {
         });
         let breakdown = (!models.is_empty()).then(|| ModelUsageBreakdown {
             models,
-            source_note: "Costs reported by Sub2API for this API key".into(),
+            source_note: match basis {
+                CostBasis::Subscription => "Costs reported by Sub2API for this API key",
+                CostBasis::Standard => {
+                    "Standard costs reported by Sub2API for this upstream account"
+                }
+            }
+            .into(),
         });
         UsageHistory {
             today: days.get(&today).map(|day| day.period(None)),
@@ -154,6 +182,42 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use serde_json::json;
+
+    #[test]
+    fn standard_summaries_never_substitute_adjusted_costs() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 26, 12, 0, 0).unwrap();
+        let date = now.with_timezone(&Local).date_naive().to_string();
+        let stats: AccountStats = serde_json::from_value(json!({
+            "history":[{"date":date,"tokens":100,"cost":2.0,"actual_cost":9.0,"user_cost":8.0}],
+            "models":[{"model":"model-a","total_tokens":100,"cost":2.0,"actual_cost":8.0,"account_cost":9.0}]
+        })).unwrap();
+        let standard = stats.clone().into_standard_history(now);
+        assert_eq!(standard.today.unwrap().estimated_cost_usd, Some(2.0));
+        let period = standard.last_30_days.unwrap();
+        assert!(!period.cost_estimated);
+        let breakdown = period.model_breakdown.unwrap();
+        assert!(breakdown.source_note.contains("Standard costs"));
+        assert_eq!(breakdown.models[0].cost_usd, Some(2.0));
+        assert_eq!(
+            stats.into_history(now).today.unwrap().estimated_cost_usd,
+            Some(9.0)
+        );
+
+        for cost in [serde_json::Value::Null, json!(0)] {
+            let stats: AccountStats = serde_json::from_value(json!({
+                "history":[{"date":date,"tokens":100,"cost":cost,"actual_cost":9.0}],
+                "models":[{"model":"model-a","total_tokens":100,"cost":cost,"actual_cost":8.0}]
+            }))
+            .unwrap();
+            let period = stats.into_standard_history(now).last_30_days.unwrap();
+            assert_eq!(period.estimated_cost_usd, cost.as_f64());
+            assert_eq!(period.estimate_complete, !cost.is_null());
+            assert_eq!(
+                period.model_breakdown.unwrap().models[0].cost_usd,
+                cost.as_f64()
+            );
+        }
+    }
 
     #[test]
     fn into_history_trims_valid_dates_and_skips_malformed_rows_consistently() {
