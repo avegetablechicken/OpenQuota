@@ -607,12 +607,27 @@ impl SettingsService {
             .iter_mut()
             .find(|provider| provider.id == provider_id)
             .ok_or_else(|| "Provider settings are unavailable.".to_owned())?;
+        let preserve_layout = provider.detected;
         provider.detected = detected;
         if enable {
             provider.enabled = true;
         }
         if let Some(metrics) = metric_template {
-            provider.metrics = metrics;
+            if preserve_layout {
+                // Only initialize new metrics. Mode changes must preserve existing choices,
+                // including the order and settings of metrics unavailable in the active mode.
+                for metric in metrics {
+                    if !provider
+                        .metrics
+                        .iter()
+                        .any(|current| current.id == metric.id)
+                    {
+                        provider.metrics.push(metric);
+                    }
+                }
+            } else {
+                provider.metrics = metrics;
+            }
         }
         self.storage
             .save_settings(&next)
@@ -2146,6 +2161,87 @@ mod tests {
                 .metrics,
             template
         );
+    }
+
+    #[test]
+    fn sub2api_track_changes_preserve_all_preferences() {
+        use crate::providers::sub2api::{
+            metric_template, Sub2ApiMode, Sub2ApiProviders, Sub2ApiUpstream,
+        };
+
+        for pinned in [
+            vec![],
+            vec!["daily", "monthly"],
+            vec!["weekly"],
+            vec!["session", "spark"],
+        ] {
+            let directory = tempdir().unwrap();
+            let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+            let providers =
+                Sub2ApiProviders::new(directory.path().join("sub2api"), storage.clone());
+            let mut definition = providers.provider("sub2api").unwrap().definition();
+            definition.fallback_enabled = true;
+            let registry = Arc::new(
+                ProviderRegistry::new(vec![Arc::new(CatalogProvider(definition))]).unwrap(),
+            );
+            let service =
+                SettingsService::new_for_test(storage.clone(), registry, &HashSet::new()).unwrap();
+            let template =
+                metric_template("sub2api", Sub2ApiUpstream::Codex, Sub2ApiMode::Subscription);
+            let mut settings = service
+                .reconcile_provider_credential_state_with_metrics(
+                    "sub2api",
+                    true,
+                    true,
+                    Some(template.clone()),
+                )
+                .unwrap();
+            // Initial setup still gets the mode's default layout.
+            assert_eq!(settings.providers[0].metrics, template);
+            settings.providers[0].enabled = !pinned.is_empty();
+            settings.providers[0].expanded = true;
+            settings.providers[0].metrics.reverse();
+            for metric in &mut settings.providers[0].metrics {
+                metric.enabled = !metric.enabled;
+                metric.section = match metric.section {
+                    MetricSection::AlwaysVisible => MetricSection::OnDemand,
+                    MetricSection::OnDemand => MetricSection::AlwaysVisible,
+                };
+                metric.pinned = pinned
+                    .iter()
+                    .any(|suffix| metric.id == format!("sub2api.{suffix}"));
+            }
+            settings
+                .provider_names
+                .insert("sub2api".into(), "My account".into());
+            settings
+                .provider_proxies
+                .insert("sub2api".into(), "direct".into());
+            settings.theme = ThemePreference::Dark;
+            let expected = service.update(settings).unwrap();
+
+            for (mode, upstream) in [
+                (Sub2ApiMode::Admin, Sub2ApiUpstream::Codex),
+                (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex),
+                (Sub2ApiMode::Admin, Sub2ApiUpstream::Claude),
+                (Sub2ApiMode::Admin, Sub2ApiUpstream::Grok),
+                (Sub2ApiMode::Subscription, Sub2ApiUpstream::Grok),
+            ] {
+                let saved = service
+                    .reconcile_provider_credential_state_with_metrics(
+                        "sub2api",
+                        true,
+                        false,
+                        Some(metric_template("sub2api", upstream, mode)),
+                    )
+                    .unwrap();
+                assert_eq!(saved, expected);
+                // Include a settings save to catch normalization changing retained preferences.
+                let saved = service.update(saved).unwrap();
+                assert_eq!(saved, expected);
+                assert_eq!(storage.load_settings().unwrap().unwrap(), expected);
+            }
+        }
     }
 
     #[test]

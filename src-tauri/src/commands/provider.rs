@@ -390,13 +390,20 @@ pub async fn save_sub2api_config(
     let template = outcome
         .apply_metric_template
         .then(|| metric_template(&provider_id, outcome.state.upstream, outcome.state.mode));
+    // First setup enables the provider; editing an existing connection preserves its toggle.
+    let enable = settings
+        .get()
+        .providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .is_some_and(|provider| !provider.detected);
     reconcile_provider_credential_state(
         &app,
         &service,
         &settings,
         &provider_id,
         true,
-        true,
+        enable,
         template,
     )?;
     if outcome.apply_metric_template {

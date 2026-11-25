@@ -20,6 +20,8 @@ Wallet-only keys and keys with their own quota or rate limits can return a diffe
 
 Choose **Upstream accounts (admin)** to see the active Codex, Claude, Antigravity or Grok OAuth accounts managed by the instance. Connections saved by earlier versions open in this mode.
 
+Switching **Track** or **Upstream** on an existing connection preserves metric visibility, Always Visible / On Demand groups, metric order, menu bar stars, and the account's enabled state. Metrics unavailable in the active mode keep their settings for when you switch back. Saving refreshes quota data for the selected mode.
+
 ### What it tracks
 
 | Metric            | Meaning                                                 |
