@@ -73,6 +73,9 @@ pub struct ProviderRefresh {
     pub snapshot: ProviderSnapshot,
     pub cache_identity: Option<String>,
     pub account: Option<AccountRefresh>,
+    /// More history remains. Publish this batch as a preview and keep the same
+    /// refresh running until a complete result or an error arrives.
+    pub continue_refresh: bool,
 }
 
 impl<'a> CacheIdentity<'a> {
@@ -123,6 +126,7 @@ pub trait UsageProvider: Send + Sync {
             snapshot,
             cache_identity: self.cache_identity().resolved_value().map(str::to_owned),
             account: None,
+            continue_refresh: false,
         })
     }
 

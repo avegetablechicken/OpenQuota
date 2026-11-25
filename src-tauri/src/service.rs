@@ -364,6 +364,30 @@ impl ProviderService {
                 validate_snapshot(&self.registry, &provider_id, refresh.snapshot.clone())?;
                 Ok(refresh)
             });
+            if refresh_result
+                .as_ref()
+                .is_ok_and(|refresh| refresh.continue_refresh)
+            {
+                let flight_state = flight
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if flight_state.data_revision == data_revision {
+                    self.apply_preview(
+                        &provider_id,
+                        refresh_result.expect("successful batch"),
+                        started,
+                    );
+                    crate::app_info!(
+                        &tag,
+                        "history batch finished ({}ms); continuing refresh",
+                        started.elapsed().as_millis()
+                    );
+                    // Keep refreshing and all waiters in the same generation. Each batch
+                    // has its own deadline; only completion or failure stops the spinner.
+                    continue;
+                }
+            }
             match &refresh_result {
                 Ok(_) => {
                     crate::app_info!(&tag, "refresh end ({}ms)", started.elapsed().as_millis())
@@ -905,14 +929,34 @@ fn validate_snapshot(
 
 /// Replaces a preview's not-yet-loaded histories with the previous snapshot's, per account.
 fn carry_usage_histories(previous: &ProviderSnapshot, preview: &mut ProviderSnapshot) {
-    preview.usage_histories = previous.usage_histories.clone();
+    carry_missing_histories(&previous.usage_histories, &mut preview.usage_histories);
     let (Some(previous_accounts), Some(accounts)) = (&previous.accounts, &mut preview.accounts)
     else {
         return;
     };
     for account in accounts {
         if let Some(previous) = previous_accounts.iter().find(|item| item.id == account.id) {
-            account.snapshot.usage_histories = previous.snapshot.usage_histories.clone();
+            carry_missing_histories(
+                &previous.snapshot.usage_histories,
+                &mut account.snapshot.usage_histories,
+            );
+        }
+    }
+}
+
+fn carry_missing_histories(
+    previous: &crate::models::UsageHistories,
+    preview: &mut crate::models::UsageHistories,
+) {
+    for (cached, current) in [
+        (&previous.account, &mut preview.account),
+        (&previous.local_device, &mut preview.local_device),
+    ] {
+        if current
+            .as_ref()
+            .is_none_or(|history| *history == crate::models::UsageHistory::default())
+        {
+            *current = cached.clone();
         }
     }
 }
@@ -1283,6 +1327,7 @@ mod tests {
 
         fn refresh_for_service(&self) -> Result<ProviderRefresh, ProviderError> {
             Ok(ProviderRefresh {
+                continue_refresh: false,
                 snapshot: test_snapshot("codex"),
                 cache_identity: Some(self.identity.clone()),
                 account: Some(AccountRefresh {
@@ -1355,12 +1400,14 @@ mod tests {
         ) -> Result<ProviderRefresh, ProviderError> {
             self.previews_requested.fetch_add(1, Ordering::SeqCst);
             preview(ProviderRefresh {
+                continue_refresh: false,
                 snapshot: self.snapshot("preview", None),
                 cache_identity: Some("server".into()),
                 account: None,
             });
             self.wait_for_release();
             Ok(ProviderRefresh {
+                continue_refresh: false,
                 snapshot: self.snapshot("final", Some("fresh")),
                 cache_identity: Some("server".into()),
                 account: None,
@@ -1458,6 +1505,119 @@ mod tests {
         assert_eq!(provider.previews_requested.load(Ordering::SeqCst), 0);
         assert_eq!(finished.snapshot.unwrap().plan.as_deref(), Some("final"));
         assert!(!service.subscribe_previews().has_changed().unwrap());
+    }
+
+    struct ContinuingProvider {
+        inner: PreviewProvider,
+        calls: AtomicUsize,
+        fail_final: bool,
+    }
+
+    impl UsageProvider for ContinuingProvider {
+        fn definition(&self) -> ProviderDefinition {
+            self.inner.definition()
+        }
+
+        fn has_local_credentials(&self) -> bool {
+            true
+        }
+
+        fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
+            unreachable!("service should use the batch result")
+        }
+
+        fn refresh_for_service(&self) -> Result<ProviderRefresh, ProviderError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let mut snapshot = self.inner.snapshot("partial", None);
+                snapshot.accounts.as_mut().unwrap()[0]
+                    .snapshot
+                    .usage_histories = UsageHistories::account(UsageHistory {
+                    unknown_models: vec!["account finished".into()],
+                    ..UsageHistory::default()
+                });
+                return Ok(ProviderRefresh {
+                    snapshot,
+                    cache_identity: Some("server".into()),
+                    account: None,
+                    continue_refresh: true,
+                });
+            }
+            self.inner.wait_for_release();
+            if self.fail_final {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Network,
+                    "History request timed out.",
+                ));
+            }
+            Ok(ProviderRefresh {
+                snapshot: self.inner.snapshot("complete", Some("fresh")),
+                cache_identity: Some("server".into()),
+                account: None,
+                continue_refresh: false,
+            })
+        }
+    }
+
+    #[test]
+    fn history_batches_keep_refreshing_until_completion_or_failure() {
+        for fail_final in [false, true] {
+            let directory = tempdir().unwrap();
+            let storage = Arc::new(Storage::open(&directory.path().join("cache.db")).unwrap());
+            let provider = Arc::new(ContinuingProvider {
+                inner: PreviewProvider {
+                    id: "relay",
+                    unofficial: true,
+                    previews_requested: AtomicUsize::new(0),
+                    release: Arc::new((Mutex::new(false), Condvar::new())),
+                },
+                calls: AtomicUsize::new(0),
+                fail_final,
+            });
+            storage
+                .save_snapshot_for_identity(
+                    &provider.inner.snapshot("cached", Some("cached")),
+                    Some("server"),
+                )
+                .unwrap();
+            let registry = Arc::new(ProviderRegistry::new(vec![provider.clone()]).unwrap());
+            let service = Arc::new(ProviderService::new(registry, storage));
+            let refresh = {
+                let service = service.clone();
+                thread::spawn(move || refresh_with_test_timeout(&service, "relay", true))
+            };
+            wait_until("the next history batch should start automatically", || {
+                provider.calls.load(Ordering::SeqCst) == 2
+            });
+            let state = service.provider_state("relay");
+            assert!(state.refreshing);
+            assert!(state.error.is_none());
+            assert!(!refresh.is_finished());
+            let snapshot = state.snapshot.unwrap();
+            assert_eq!(snapshot.plan.as_deref(), Some("partial"));
+            assert_eq!(history_marker(&snapshot), ["cached"]);
+            assert_eq!(
+                history_marker(&snapshot.accounts.as_ref().unwrap()[0].snapshot),
+                ["account finished"]
+            );
+            assert!(snapshot.notices.is_empty());
+
+            let (released, signal) = &*provider.inner.release;
+            *released.lock().unwrap() = true;
+            signal.notify_all();
+            let finished = refresh.join().unwrap();
+            assert!(!finished.refreshing);
+            if fail_final {
+                assert_eq!(
+                    finished.error.as_deref(),
+                    Some("History request timed out.")
+                );
+                assert_eq!(history_marker(&finished.snapshot.unwrap()), ["cached"]);
+            } else {
+                assert!(finished.error.is_none());
+                assert_eq!(history_marker(&finished.snapshot.unwrap()), ["fresh"]);
+            }
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        }
     }
 
     fn test_definition(id: &str) -> ProviderDefinition {
@@ -1635,6 +1795,7 @@ mod tests {
                 .apply_refresh_result(
                     &id,
                     Ok(ProviderRefresh {
+                        continue_refresh: false,
                         snapshot: snapshot.clone(),
                         cache_identity: None,
                         account: None,
@@ -1653,6 +1814,7 @@ mod tests {
                 .apply_refresh_result(
                     &id,
                     Ok(ProviderRefresh {
+                        continue_refresh: false,
                         snapshot,
                         cache_identity: None,
                         account: None,
@@ -1780,6 +1942,7 @@ mod tests {
                 .apply_refresh_result(
                     &id,
                     Ok(ProviderRefresh {
+                        continue_refresh: false,
                         snapshot,
                         cache_identity: None,
                         account: None,

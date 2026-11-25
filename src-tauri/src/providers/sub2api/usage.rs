@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     cache::{utc_start, UsageCache},
-    classify_status, transport_error, Envelope, Sub2ApiClient, Sub2ApiError, Sub2ApiUpstream,
+    classify_status, decode_response, transport_error, Envelope, Sub2ApiClient, Sub2ApiError,
+    Sub2ApiUpstream,
 };
 use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
@@ -180,13 +181,14 @@ impl Sub2ApiClient {
         if !response.status().is_success() {
             return Err(classify_status(response.status()));
         }
-        let envelope = response
-            .json::<Envelope<UsagePage>>()
-            .map_err(|_| Sub2ApiError::InvalidResponse)?;
+        let stage = format!("upstream usage records (page={page}, page_size={size})");
+        let envelope: Envelope<UsagePage> = decode_response(&stage, response)?;
         if envelope.code != 0 {
-            return Err(Sub2ApiError::InvalidResponse);
+            return Err(invalid_history("nonzero response code"));
         }
-        envelope.data.ok_or(Sub2ApiError::InvalidResponse)
+        envelope
+            .data
+            .ok_or_else(|| invalid_history("missing page data"))
     }
 
     /// Persist complete pages as they arrive. Publish totals only once all records
@@ -294,7 +296,7 @@ impl Sub2ApiClient {
                     .iter()
                     .any(|r| r.account_id != account_id || r.id <= 0)
             {
-                return Err(Sub2ApiError::InvalidResponse);
+                return Err(invalid_history("invalid cached-boundary page"));
             }
             if boundary.items.first().map(|r| r.id) != Some(last_id) {
                 if from < to {
@@ -326,7 +328,9 @@ impl Sub2ApiClient {
             offset = first.items.len();
             page_limit = first.page_size.unwrap_or(PAGE_SIZE).min(PAGE_SIZE);
             if page_limit == 0 || offset != total.min(page_limit) {
-                return Err(Sub2ApiError::InvalidResponse);
+                return Err(invalid_history(
+                    "first page size disagrees with total or page limit",
+                ));
             }
             if first.items.is_empty() {
                 cache.refund_empty_page();
@@ -349,13 +353,20 @@ impl Sub2ApiClient {
                 continue;
             }
             if page.total < total || page.items.len() != size {
-                return Err(Sub2ApiError::InvalidResponse);
+                return Err(invalid_history(
+                    "continuation total decreased or page size changed",
+                ));
             }
             last_id = store_page(cache, account_id, &start, &end, last_id, page.items)?;
             offset += size;
         }
         Ok(())
     }
+}
+
+fn invalid_history(reason: &'static str) -> Sub2ApiError {
+    crate::app_warn!("http", "Sub2API usage history validation failed ({reason})");
+    Sub2ApiError::InvalidResponse
 }
 
 fn store_page(
@@ -369,12 +380,16 @@ fn store_page(
     let tx = cache.db.transaction()?;
     for row in rows {
         let day = row.created_at.date_naive().to_string();
-        if row.account_id != account_id
-            || row.id <= last_id
-            || day.as_str() < start
-            || day.as_str() > end
-        {
-            return Err(Sub2ApiError::InvalidResponse);
+        if row.account_id != account_id {
+            return Err(invalid_history("record belongs to another account"));
+        }
+        if row.id <= last_id {
+            return Err(invalid_history("record IDs are not strictly increasing"));
+        }
+        if day.as_str() < start || day.as_str() > end {
+            return Err(invalid_history(
+                "record date is outside the requested range",
+            ));
         }
         last_id = row.id;
         let payload = serde_json::to_string(&row).map_err(|_| Sub2ApiError::HistoryCache)?;

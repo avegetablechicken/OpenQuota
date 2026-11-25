@@ -669,7 +669,7 @@ enum Sub2ApiError {
     RequestFailed(u16),
     #[error("Could not reach Sub2API. Check the Base URL and connection.")]
     ConnectionFailed,
-    #[error("Sub2API usage history sync continues on the next refresh.")]
+    #[error("Sub2API usage history sync continues in the next batch.")]
     HistorySyncPending,
     #[error("The local Sub2API usage cache is unavailable.")]
     HistoryCache,
@@ -803,9 +803,7 @@ impl Sub2ApiClient {
         if !status.is_success() {
             return Err(classify_status(status));
         }
-        let envelope = response
-            .json::<Envelope<LoginData>>()
-            .map_err(|_| Sub2ApiError::InvalidResponse)?;
+        let envelope: Envelope<LoginData> = decode_response("login", response)?;
         if envelope.code != 0 {
             return Err(Sub2ApiError::LoginRejected);
         }
@@ -853,9 +851,7 @@ impl Sub2ApiClient {
             if !status.is_success() {
                 return Err(classify_status(status));
             }
-            let envelope = response
-                .json::<Envelope<AccountPage>>()
-                .map_err(|_| Sub2ApiError::InvalidResponse)?;
+            let envelope: Envelope<AccountPage> = decode_response("account discovery", response)?;
             if envelope.code != 0 {
                 return Err(Sub2ApiError::InvalidResponse);
             }
@@ -911,9 +907,7 @@ impl Sub2ApiClient {
         if !status.is_success() {
             return Err(classify_status(status));
         }
-        let envelope = response
-            .json::<Envelope<Value>>()
-            .map_err(|_| Sub2ApiError::InvalidResponse)?;
+        let envelope: Envelope<Value> = decode_response("upstream usage", response)?;
         if envelope.code != 0 {
             return Err(Sub2ApiError::InvalidResponse);
         }
@@ -973,6 +967,31 @@ fn transport_error(stage: &str, error: &reqwest::Error) -> Sub2ApiError {
     };
     crate::app_warn!("http", "Sub2API {stage} request failed ({reason})");
     Sub2ApiError::ConnectionFailed
+}
+
+/// Read the body separately: `Response::json` also reports body timeouts as decode
+/// errors. Never log the response or error text, which can contain credentials.
+fn decode_response<T: serde::de::DeserializeOwned>(
+    stage: &str,
+    response: reqwest::blocking::Response,
+) -> Result<T, Sub2ApiError> {
+    let status = response.status().as_u16();
+    let started = Instant::now();
+    let bytes = response.bytes().map_err(|error| {
+        transport_error(&format!("{stage} response body (HTTP {status})"), &error)
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        crate::app_warn!(
+            "http",
+            "Sub2API {stage} JSON decode failed (HTTP {status}, bytes={}, body_read_ms={}, category={:?}, line={}, column={})",
+            bytes.len(),
+            started.elapsed().as_millis(),
+            error.classify(),
+            error.line(),
+            error.column()
+        );
+        Sub2ApiError::InvalidResponse
+    })
 }
 
 pub struct Sub2ApiProvider {
@@ -1135,14 +1154,24 @@ impl Sub2ApiProvider {
         self.refresh_snapshot_with_preview(config, &|_| {})
     }
 
-    /// Fetches every account's quota first and hands that to `preview`, then syncs usage
-    /// history. Quota endpoints answer quickly; usage logs on a busy relay can take much
-    /// longer, so the quota preview must not wait for them.
+    #[cfg(test)]
     fn refresh_snapshot_with_preview(
         &self,
         config: &StoredConfig,
         preview: &dyn Fn(ProviderSnapshot),
     ) -> Result<ProviderSnapshot, Sub2ApiError> {
+        self.refresh_batch_with_preview(config, preview)
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    /// Fetches every account's quota first and hands that to `preview`, then syncs usage
+    /// history. Quota endpoints answer quickly; usage logs on a busy relay can take much
+    /// longer, so the quota preview must not wait for them.
+    fn refresh_batch_with_preview(
+        &self,
+        config: &StoredConfig,
+        preview: &dyn Fn(ProviderSnapshot),
+    ) -> Result<(ProviderSnapshot, bool), Sub2ApiError> {
         let client = Sub2ApiClient::for_provider(&config.base_url, &self.provider_id)?;
         if config.mode == Sub2ApiMode::Subscription {
             let key = config.subscription_key()?;
@@ -1158,7 +1187,7 @@ impl Sub2ApiProvider {
             } else {
                 Some(config.upstream.provider_id().to_owned())
             };
-            return Ok(snapshot);
+            return Ok((snapshot, false));
         }
         let mut session = self.session(config)?;
         let accounts = self.with_session(config, &mut session, |token| {
@@ -1208,7 +1237,7 @@ impl Sub2ApiProvider {
         } else {
             UsageHistory::default()
         };
-        Ok(self.connection_snapshot(snapshots, history))
+        Ok((self.connection_snapshot(snapshots, history), !complete))
     }
 
     /// Runs one administrator request, logging in again once if the cached token expired.
@@ -1505,14 +1534,17 @@ impl UsageProvider for Sub2ApiProvider {
             .map_err(|_| Sub2ApiError::HistoryCache)?;
         let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
         let cache_identity = config.cache_key();
-        let snapshot = self.refresh_snapshot_with_preview(&config, &|snapshot| {
-            preview(super::ProviderRefresh {
-                snapshot,
-                cache_identity: Some(cache_identity.to_owned()),
-                account: None,
-            })
-        })?;
+        let (snapshot, continue_refresh) =
+            self.refresh_batch_with_preview(&config, &|snapshot| {
+                preview(super::ProviderRefresh {
+                    continue_refresh: false,
+                    snapshot,
+                    cache_identity: Some(cache_identity.to_owned()),
+                    account: None,
+                })
+            })?;
         Ok(super::ProviderRefresh {
+            continue_refresh,
             snapshot,
             cache_identity: Some(cache_identity.to_owned()),
             account: None,
@@ -1825,6 +1857,63 @@ mod tests {
             }
         });
         (format!("http://{address}"), receiver, worker)
+    }
+
+    #[test]
+    fn response_body_timeout_and_truncation_are_network_errors() {
+        for stall in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release, released) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).unwrap() > 0);
+                stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Type: application/json\r\n\r\n{",
+                ).unwrap();
+                if stall {
+                    let _ = released.recv_timeout(Duration::from_secs(5));
+                }
+            });
+            let client = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap();
+            let response = client.get(format!("http://{address}")).send().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let result = super::decode_response::<serde_json::Value>("test history", response);
+            let _ = release.send(());
+            worker.join().unwrap();
+            assert_eq!(result, Err(Sub2ApiError::ConnectionFailed), "stall={stall}");
+        }
+    }
+
+    #[test]
+    fn response_decoder_preserves_json_and_schema_failures() {
+        let (base, _requests, worker) = serve_sequence(vec![
+            "<html>gateway response</html>".into(),
+            r#"{"code":0,"data":{"items":[],"total":"wrong-type"}}"#.into(),
+            r#"{"code":0,"data":{"items":[],"total":0}}"#.into(),
+        ]);
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        for expected_valid in [false, false, true] {
+            let response = client.get(&base).send().unwrap();
+            let result = super::decode_response::<super::Envelope<super::AccountPage>>(
+                "test accounts",
+                response,
+            );
+            if expected_valid {
+                assert_eq!(result.unwrap().data.unwrap().total, 0);
+            } else {
+                assert!(matches!(result, Err(Sub2ApiError::InvalidResponse)));
+            }
+        }
+        worker.join().unwrap();
     }
 
     #[test]
@@ -3012,6 +3101,8 @@ mod tests {
         );
         assert!(accounts.iter().all(|a| !a.snapshot.quotas.is_empty()
             && a.snapshot.usage_histories.account == Some(super::UsageHistory::default())));
+        assert!(accounts.iter().all(|a| a.snapshot.notices.is_empty()));
+        assert!(snapshot.notices.is_empty());
         assert_eq!(
             snapshot
                 .usage_histories
@@ -3022,6 +3113,97 @@ mod tests {
                 .tokens,
             7000
         );
+    }
+
+    #[test]
+    fn history_requests_continuation_until_every_account_finishes_syncing() {
+        let now = Utc::now();
+        let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
+        let accounts = r#"{"code":0,"data":{"items":[{"id":7,"name":"Complete","last_used_at":"A"},{"id":8,"name":"Pending","last_used_at":"A"}],"total":2}}"#.to_owned();
+        let page = |ids: std::ops::RangeInclusive<i64>| {
+            let rows: Vec<_> = ids
+                .map(|id| {
+                    serde_json::json!({
+                        "id":id,"account_id":8,"created_at":now,"model":"claude-haiku-4-5",
+                        "input_tokens":1,"output_tokens":1
+                    })
+                })
+                .collect();
+            serde_json::json!({"code":0,"data":{"items":rows,"total":1921,"page_size":128}})
+                .to_string()
+        };
+        let mut responses = vec![
+            r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
+            accounts.clone(),
+            quota.clone(),
+            quota.clone(),
+            usage_data(7, now),
+        ];
+        // The first account uses one of the 16 pages; the second needs one more
+        // page than this refresh permits. Its partial totals must stay hidden.
+        for index in 0..15 {
+            responses.push(page((index * 128 + 1)..=((index + 1) * 128)));
+        }
+        responses.extend([
+            accounts,
+            quota.clone(),
+            quota,
+            page(1920..=1920),
+            page(1921..=1921),
+        ]);
+        let (base_url, _requests, worker) = serve_sequence(responses);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("configured"),
+            true,
+            test_pricing(),
+        );
+        let config = admin_config(base_url, super::Sub2ApiUpstream::Claude);
+        let (pending, continue_refresh) = provider
+            .refresh_batch_with_preview(&config, &|_| {})
+            .unwrap();
+        assert!(continue_refresh);
+        assert!(pending.notices.is_empty());
+        assert_eq!(
+            pending.usage_histories.account,
+            Some(super::UsageHistory::default())
+        );
+        let accounts = pending.accounts.unwrap();
+        assert!(accounts[0].snapshot.notices.is_empty());
+        assert!(accounts[0]
+            .snapshot
+            .usage_histories
+            .account
+            .as_ref()
+            .unwrap()
+            .last_30_days
+            .is_some());
+        assert!(accounts[1].snapshot.notices.is_empty());
+        assert!(!accounts[1].snapshot.quotas.is_empty());
+        assert_eq!(
+            accounts[1].snapshot.usage_histories.account,
+            Some(super::UsageHistory::default())
+        );
+
+        let (complete, continue_refresh) = provider
+            .refresh_batch_with_preview(&config, &|_| {})
+            .unwrap();
+        assert!(!continue_refresh);
+        assert!(complete.notices.is_empty());
+        assert!(complete
+            .usage_histories
+            .account
+            .unwrap()
+            .last_30_days
+            .is_some());
+        assert!(complete
+            .accounts
+            .unwrap()
+            .iter()
+            .all(|account| account.snapshot.notices.is_empty()));
+        worker.join().unwrap();
     }
 
     fn admin_config(base_url: String, upstream: super::Sub2ApiUpstream) -> StoredConfig {

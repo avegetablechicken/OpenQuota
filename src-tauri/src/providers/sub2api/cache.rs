@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension};
 use super::{Sub2ApiError, Sub2ApiUpstream};
 use crate::hashing::sha256_hex;
 
-const HISTORY_PAGES_PER_REFRESH: usize = 16;
+const HISTORY_PAGES_PER_BATCH: usize = 16;
 
 pub(super) struct UsageCache {
     pub(super) db: Connection,
@@ -65,7 +65,7 @@ impl UsageCache {
         tx.commit()?;
         Ok(Self {
             db,
-            pages_left: HISTORY_PAGES_PER_REFRESH,
+            pages_left: HISTORY_PAGES_PER_BATCH,
         })
     }
 

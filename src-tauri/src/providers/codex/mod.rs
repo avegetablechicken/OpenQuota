@@ -519,6 +519,7 @@ impl crate::providers::UsageProvider for CodexProvider {
     ) -> Result<crate::providers::ProviderRefresh, crate::providers::ProviderError> {
         let (snapshot, identity) = self.refresh_with_identity().map_err(provider_error)?;
         Ok(crate::providers::ProviderRefresh {
+            continue_refresh: false,
             snapshot,
             cache_identity: identity.clone(),
             account: identity.map(|identity| crate::providers::AccountRefresh {

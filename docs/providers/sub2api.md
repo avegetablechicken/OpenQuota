@@ -68,10 +68,12 @@ previous 29 local dates. Antigravity requests to Claude models use Claude's rate
 other Antigravity models use Antigravity's. Grok requests use Grok's rates.
 See [historical pricing](../pricing-history.md).
 
-Quota is shown first. Each refresh syncs up to 16 pages of request records across
-the connection and saves each complete page. OpenQuota resumes from the cached
-records on subsequent refreshes. An account’s history becomes available once its
-window is complete, and the connection total includes every active account.
+Quota is shown first. History sync runs in batches of up to 16 pages across the
+connection, saves each complete page, and automatically continues with the next
+batch. The refresh icon keeps spinning until all active accounts finish syncing.
+It stops when the refresh completes or fails; failures show an error, and the next
+refresh resumes from the cached records. An account’s history becomes available
+once its window is complete, and the connection total includes every active account.
 
 ### Administrator setup
 
