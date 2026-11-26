@@ -59,15 +59,24 @@ impl ModelPricing {
         // Foreign models in native logs use upstream API-equivalent pricing. A reseller export
         // keeps its own provider scope.
         let provider = match provider {
-            "codex" | "claude" if normalized.starts_with("deepseek-") => "deepseek",
+            "codex" | "claude" | "grok" | "kimi" | "minimax" | "zai" | "opencode"
+                if normalized.starts_with("deepseek-")
+                    || normalized.ends_with("/deepseek-flash") =>
+            {
+                "deepseek"
+            }
             _ => provider,
         };
         let models = self.supplement.history.get(provider)?;
         let name = match (provider, normalized.split_once('/')) {
             ("codex", Some(("openai" | "openai-codex", id)))
             | ("claude", Some(("anthropic", id)))
-            | ("grok", Some(("xai", id)))
-            | ("antigravity", Some(("google" | "gemini" | "google-antigravity", id))) => id,
+            | ("grok", Some(("xai" | "x-ai" | "grok", id)))
+            | ("kimi", Some(("moonshot" | "moonshotai" | "kimi", id)))
+            | ("minimax", Some(("minimax", id)))
+            | ("zai", Some(("zai" | "z-ai" | "zhipu" | "zhipuai" | "bigmodel", id)))
+            | ("antigravity", Some(("google" | "gemini" | "google-antigravity", id)))
+            | ("deepseek", Some(("deepseek", id))) => id,
             _ => &normalized,
         };
         let lookup = |candidate: &str| {
