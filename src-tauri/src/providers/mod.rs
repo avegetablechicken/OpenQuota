@@ -155,7 +155,6 @@ pub trait UsageProvider: Send + Sync {
         false
     }
 
-    #[cfg(any(target_os = "macos", test))]
     fn upstream_provider_id(&self) -> Option<&'static str> {
         None
     }
