@@ -226,7 +226,7 @@ fn parse_configuration_marker(contents: &str) -> (&str, Option<&'static str>) {
     (cache_key, track)
 }
 
-/// The track a [`track_provider_id`] names.
+/// The track a [`track_provider_id`] names. Subscription templates do not depend on the upstream.
 fn track_for_id(track: &str) -> Option<(Sub2ApiMode, Sub2ApiUpstream)> {
     [
         (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex),
@@ -237,6 +237,11 @@ fn track_for_id(track: &str) -> Option<(Sub2ApiMode, Sub2ApiUpstream)> {
     ]
     .into_iter()
     .find(|(mode, upstream)| track_provider_id(*mode, *upstream) == track)
+}
+
+/// The default metric layout of the track a [`track_provider_id`] names.
+pub fn metric_template_for_track(provider_id: &str, track: &str) -> Option<Vec<MetricLayout>> {
+    track_for_id(track).map(|(mode, upstream)| metric_template(provider_id, upstream, mode))
 }
 
 /// Whether a connection's metric can report data for its upstream, matching the Customize page.

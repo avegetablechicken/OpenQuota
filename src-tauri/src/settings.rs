@@ -313,7 +313,7 @@ impl SettingsService {
 
     #[cfg(test)]
     pub fn update(&self, mut settings: AppSettings) -> Result<AppSettings, String> {
-        self.update_internal(&mut settings, None, None, false)
+        self.update_internal(&mut settings, None, None, false, &[])
     }
 
     pub fn update_from_view(
@@ -327,6 +327,25 @@ impl SettingsService {
             Some(expected_settings_revision),
             Some(expected_account_revision),
             false,
+            &[],
+        )
+    }
+
+    /// Saves layouts reset to [`Self::default_settings`], recording each track template they
+    /// applied so later track changes still recognize the untouched metrics.
+    pub fn reset_layouts_from_view(
+        &self,
+        mut settings: AppSettings,
+        expected_settings_revision: u64,
+        expected_account_revision: u64,
+    ) -> Result<AppSettings, String> {
+        let template_defaults = self.reset_template_defaults(&settings);
+        self.update_internal(
+            &mut settings,
+            Some(expected_settings_revision),
+            Some(expected_account_revision),
+            false,
+            &template_defaults,
         )
     }
 
@@ -336,12 +355,26 @@ impl SettingsService {
         expected_settings_revision: u64,
         expected_account_revision: u64,
     ) -> Result<AppSettings, String> {
+        let template_defaults = self.reset_template_defaults(&settings);
         self.update_internal(
             &mut settings,
             Some(expected_settings_revision),
             Some(expected_account_revision),
             true,
+            &template_defaults,
         )
+    }
+
+    fn reset_template_defaults(&self, settings: &AppSettings) -> Vec<(String, Vec<MetricLayout>)> {
+        settings
+            .providers
+            .iter()
+            .filter(|provider| provider.detected)
+            .filter_map(|provider| {
+                track_template_defaults(&self.registry, &provider.id)
+                    .map(|defaults| (provider.id.clone(), defaults))
+            })
+            .collect()
     }
 
     fn update_internal(
@@ -350,6 +383,7 @@ impl SettingsService {
         expected_settings_revision: Option<u64>,
         expected_account_revision: Option<u64>,
         reset_all_account_names: bool,
+        template_defaults: &[(String, Vec<MetricLayout>)],
     ) -> Result<AppSettings, String> {
         let mut current = self
             .settings
@@ -400,7 +434,7 @@ impl SettingsService {
         }
         .map_err(|_| "OpenQuota account names could not be saved.".to_owned())?;
         self.storage
-            .save_settings_with_account_updates(settings, &account_updates)
+            .save_settings_with_updates(settings, &account_updates, template_defaults)
             .map_err(|_| "OpenQuota settings could not be saved.".to_owned())?;
         let enablement_changed = enabled_provider_set(settings) != enabled_before;
         crate::http_client::set_provider_proxies(&settings.provider_proxies);
@@ -564,11 +598,21 @@ impl SettingsService {
             .find(|provider| provider.id == provider_id)
             .ok_or_else(|| "Provider settings are unavailable.".to_owned())?;
         provider.expanded = false;
-        provider.metrics = default_provider(definition, provider.detected).metrics;
-        self.update_from_view(
-            settings,
-            expected_settings_revision,
-            expected_account_revision,
+        provider.metrics =
+            reset_provider_layout(&self.registry, definition, provider.detected).metrics;
+        let template_defaults = provider
+            .detected
+            .then(|| track_template_defaults(&self.registry, provider_id))
+            .flatten()
+            .map(|defaults| (provider_id.to_owned(), defaults))
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.update_internal(
+            &mut settings,
+            Some(expected_settings_revision),
+            Some(expected_account_revision),
+            false,
+            &template_defaults,
         )
     }
 
@@ -756,7 +800,9 @@ pub fn default_settings(registry: &ProviderRegistry, detected: &HashSet<String>)
         providers: catalog
             .providers
             .iter()
-            .map(|provider| default_provider(provider, detected.contains(&provider.id)))
+            .map(|provider| {
+                reset_provider_layout(registry, provider, detected.contains(&provider.id))
+            })
             .collect(),
         ..AppSettings::default()
     };
@@ -947,6 +993,49 @@ fn set_account_custom_name(payload: &mut Value, name: Option<&str>) {
     } else {
         object.remove("customName");
     }
+}
+
+/// A provider's default layout. A detected connection takes its current track's template, as
+/// first setup applies it, rather than the generic layout of its definition.
+fn reset_provider_layout(
+    registry: &ProviderRegistry,
+    definition: &ProviderDefinition,
+    detected: bool,
+) -> ProviderLayout {
+    let mut provider = default_provider(definition, detected);
+    if let Some(defaults) = detected
+        .then(|| track_template_defaults(registry, &definition.id))
+        .flatten()
+    {
+        provider.metrics = defaults;
+    }
+    provider
+}
+
+/// The metric defaults a connection's current track applies to an empty layout, if it has one.
+fn track_template_defaults(
+    registry: &ProviderRegistry,
+    provider_id: &str,
+) -> Option<Vec<MetricLayout>> {
+    if !registry
+        .catalog()
+        .connection_config_provider_ids
+        .iter()
+        .any(|id| id == provider_id)
+    {
+        return None;
+    }
+    let track = registry.upstream_provider_id(provider_id)?;
+    let template = crate::providers::sub2api::metric_template_for_track(provider_id, track)?;
+    let mut metrics = Vec::new();
+    Some(apply_metric_template(
+        &mut metrics,
+        &template,
+        &[],
+        |metric_id| {
+            crate::providers::sub2api::metric_supported(provider_id, metric_id, Some(track))
+        },
+    ))
 }
 
 fn default_provider(definition: &ProviderDefinition, detected: bool) -> ProviderLayout {
@@ -2521,6 +2610,82 @@ mod tests {
         *connection.1.lock().unwrap() = None;
         let saved = service.update(expected.clone()).unwrap();
         assert_eq!(saved.providers[0].metrics, expected.providers[0].metrics);
+    }
+
+    #[test]
+    fn resets_apply_the_current_track_and_later_track_changes_still_move_it() {
+        let subscription = (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex);
+        let grok_admin = (Sub2ApiMode::Admin, Sub2ApiUpstream::Grok);
+        let set_track = |connection: &TrackedConnection, (mode, upstream)| {
+            *connection.1.lock().unwrap() = Some(track_provider_id(mode, upstream));
+        };
+        for reset in ["provider", "customization", "all"] {
+            let directory = tempdir().unwrap();
+            let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+            let providers =
+                Sub2ApiProviders::new(directory.path().join("sub2api"), storage.clone());
+            let mut definition = providers.provider("sub2api").unwrap().definition();
+            definition.fallback_enabled = true;
+            let connection = Arc::new(TrackedConnection(definition, Default::default()));
+            let registry = Arc::new(ProviderRegistry::new(vec![connection.clone()]).unwrap());
+            assert!(registry
+                .catalog()
+                .connection_config_provider_ids
+                .contains(&"sub2api".to_owned()));
+            let service =
+                SettingsService::new_for_test(storage, registry, &HashSet::new()).unwrap();
+
+            set_track(&connection, subscription);
+            let mut settings = reconcile_sub2api_track(&service, subscription, None);
+            for metric in &mut settings.providers[0].metrics {
+                metric.enabled = !metric.enabled;
+            }
+            service.update(settings).unwrap();
+
+            let settings_revision = service.settings_revision();
+            let account_revision = service.account_revision();
+            let reset_settings = match reset {
+                "provider" => service
+                    .reset_provider("sub2api", settings_revision, account_revision)
+                    .unwrap(),
+                "customization" => {
+                    let mut next = service.get();
+                    next.providers = service
+                        .default_settings(&HashSet::from(["sub2api".to_owned()]))
+                        .providers;
+                    service
+                        .reset_layouts_from_view(next, settings_revision, account_revision)
+                        .unwrap()
+                }
+                _ => service
+                    .reset_all_from_view(
+                        service.reset_defaults(),
+                        settings_revision,
+                        account_revision,
+                    )
+                    .unwrap(),
+            };
+            // A reset restores the connection's own track layout, not the generic one.
+            for default in
+                metric_template("sub2api", Sub2ApiUpstream::Codex, Sub2ApiMode::Subscription)
+            {
+                assert_eq!(
+                    sub2api_metric(&reset_settings, default.id.trim_start_matches("sub2api.")),
+                    default,
+                    "{reset}"
+                );
+            }
+
+            set_track(&connection, grok_admin);
+            let saved = reconcile_sub2api_track(&service, grok_admin, Some(subscription));
+            for default in metric_template("sub2api", Sub2ApiUpstream::Grok, Sub2ApiMode::Admin) {
+                assert_eq!(
+                    sub2api_metric(&saved, default.id.trim_start_matches("sub2api.")),
+                    default,
+                    "{reset}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -346,9 +346,26 @@ impl Storage {
         settings: &AppSettings,
         account_updates: &[ProviderAccountUpdate],
     ) -> Result<(), StorageError> {
+        self.save_settings_with_updates(settings, account_updates, &[])
+    }
+
+    /// Saves settings with account updates and the metric defaults of each reset template.
+    pub fn save_settings_with_updates(
+        &self,
+        settings: &AppSettings,
+        account_updates: &[ProviderAccountUpdate],
+        template_defaults: &[(String, Vec<MetricLayout>)],
+    ) -> Result<(), StorageError> {
         let payload = serde_json::to_string(settings)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
+        for (provider_id, defaults) in template_defaults {
+            transaction.execute(
+                "INSERT INTO metric_template_defaults(provider_id, payload) VALUES (?1, ?2)
+                 ON CONFLICT(provider_id) DO UPDATE SET payload = excluded.payload",
+                params![provider_id, serde_json::to_string(defaults)?],
+            )?;
+        }
         for update in account_updates {
             transaction.execute(
                 "INSERT INTO provider_account_records(

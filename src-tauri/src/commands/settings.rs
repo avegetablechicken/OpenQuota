@@ -329,8 +329,11 @@ pub async fn reset_customization(
         .collect::<HashSet<_>>();
     next.providers = settings.default_settings(&detected_before_reset).providers;
     next.detection_notice_dismissed = false;
-    let next =
-        settings.update_from_view(next, expected_settings_revision, expected_account_revision)?;
+    let next = settings.reset_layouts_from_view(
+        next,
+        expected_settings_revision,
+        expected_account_revision,
+    )?;
     let newly_enabled = newly_enabled_provider_ids(&previous, &next);
     let credential_detection_plan = settings.reset_detection_plan();
     tray_presentation::update(&app, &service.state(), &next, settings.registry());
