@@ -236,7 +236,7 @@ export function buildProviderShareRows(
           scopedHistories.length > 1
             ? `${definition.label} · ${PROVIDER_USAGE_SCOPE_LABELS[scoped.scope]}`
             : definition.label,
-        value: formatUsageReading(period, Boolean(tokensOnly)),
+        value: formatUsageReading(period, subscription),
         condensed: previousTextSection === metric.section,
       });
     }

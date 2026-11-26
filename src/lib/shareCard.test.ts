@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { codexState, providerCatalogIndex, settingsState } from '../test/appFixtures';
+import {
+  codexState,
+  providerCatalog,
+  providerCatalogIndex,
+  settingsState,
+} from '../test/appFixtures';
 import { ProviderCatalogIndex } from './metrics';
 import totalSpendSource from './TotalSpend.svelte?raw';
 import {
@@ -174,6 +179,34 @@ describe('share card layout', () => {
       value: '3M tokens',
     });
     expect(snapshot.usageHistories.localDevice?.last30Days?.estimatedCostUsd).toBe(5.11);
+  });
+
+  it('shares a Sub2API subscription as tokens when the caller leaves that to the snapshot', () => {
+    const rename = <T extends { id: string }>(item: T) => ({
+      ...item,
+      id: item.id.replace(/^codex\./, 'sub2api.'),
+    });
+    const codex = providerCatalog.providers.find((provider) => provider.id === 'codex')!;
+    const catalog = new ProviderCatalogIndex({
+      providers: [{ ...codex, id: 'sub2api', metrics: codex.metrics.map(rename) }],
+      connectionConfigProviderIds: ['sub2api'],
+    });
+    const snapshot = { ...structuredClone(codexState.snapshot!), providerId: 'sub2api' };
+    delete snapshot.accounts;
+    const layout = settingsState.settings.providers.find((provider) => provider.id === 'codex')!;
+    const share = (tokensOnly?: boolean) =>
+      buildProviderShareRowsWithCatalog(
+        catalog,
+        snapshot,
+        { ...layout, id: 'sub2api', expanded: true, metrics: layout.metrics.map(rename) },
+        settingsState.settings,
+        Date.now(),
+        'localDevice',
+        tokensOnly,
+      ).find((row) => row.kind === 'text' && row.label === 'Last 30 Days');
+
+    expect(share(true)).toMatchObject({ value: expect.stringMatching(/^[^$]+ tokens$/) });
+    expect(share()).toEqual(share(true));
   });
 
   it('keeps provider-supplied count units in exported quota rows', () => {
