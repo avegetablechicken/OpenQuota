@@ -199,6 +199,13 @@
     };
   });
 
+  // A shortcut can switch the period, metric, or scope under the pointer. The hovered
+  // slice may then unmount without a pointerleave, so its tooltip would reopen with it.
+  $effect(() => {
+    void [settings.totalSpendPeriod, settings.totalSpendMetric, viewMode];
+    dismissBillingTooltips();
+  });
+
   onDestroy(() => {
     clearLegendHideTimer();
   });

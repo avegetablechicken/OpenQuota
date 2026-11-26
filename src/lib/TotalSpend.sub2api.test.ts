@@ -310,4 +310,55 @@ describe('TotalSpend Sub2API labels', () => {
     expect(unpriced).toHaveTextContent(/^deepseek-flash Unpriced · 700 tokens$/);
     expect(unpriced).not.toHaveTextContent('$');
   });
+
+  it('closes a billing tooltip when the period changes under the pointer', async () => {
+    const billing = {
+      tokens: 1_000,
+      pricedTokens: 400,
+      estimatedCostUsd: 2,
+      costEstimated: true,
+    };
+    const props = {
+      providers: [
+        {
+          id: 'codex',
+          usageHistories: {
+            localDevice: {
+              ...usage(100),
+              otherUsage: {
+                today: {
+                  ...billing,
+                  estimateComplete: false,
+                  models: { 'deepseek-flash': billing },
+                },
+                yesterday: null,
+                last30Days: null,
+              },
+            },
+          },
+        },
+      ],
+      settings: {
+        ...settings,
+        totalSpendMetric: 'cost' as const,
+        totalSpendPeriod: 'today' as const,
+      },
+      catalog: new ProviderCatalogIndex(catalog),
+      viewMode: 'localDevice' as const,
+      onViewModeChange: vi.fn(),
+      onChange: vi.fn(),
+      onShare: vi.fn(),
+    };
+    const { rerender } = render(TotalSpend, props);
+    const arc = screen
+      .getByRole('region', { name: 'Local Device Spend' })
+      .querySelector('svg .spend-ring__segment')!;
+    await fireEvent.pointerEnter(arc);
+    expect(document.querySelector('.spend-billing-tooltip--open')).not.toBeNull();
+
+    // Yesterday has no Others slice, so the hovered one unmounts without a pointerleave.
+    await rerender({ ...props, settings: { ...props.settings, totalSpendPeriod: 'yesterday' } });
+    await rerender(props);
+    expect(document.querySelector('.spend-billing-tooltip--open')).toBeNull();
+  });
 });
