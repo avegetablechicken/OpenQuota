@@ -1,14 +1,20 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::models::{QuotaFormat, QuotaWindow};
+use crate::{
+    models::{QuotaFormat, QuotaWindow},
+    providers::antigravity::started_reset,
+};
 
 use super::{client::UsageResponse, OpenCodeError};
 
 const ROLLING_PERIOD_SECONDS: u64 = 5 * 60 * 60;
 const WEEKLY_PERIOD_SECONDS: u64 = 7 * 24 * 60 * 60;
 
-pub(super) fn map_go_usage(response: UsageResponse) -> Result<Vec<QuotaWindow>, OpenCodeError> {
+pub(super) fn map_go_usage(
+    response: UsageResponse,
+    now: DateTime<Utc>,
+) -> Result<Vec<QuotaWindow>, OpenCodeError> {
     match response.status.as_u16() {
         200..=299 => {}
         401 => return Err(OpenCodeError::InvalidAuth),
@@ -41,15 +47,21 @@ pub(super) fn map_go_usage(response: UsageResponse) -> Result<Vec<QuotaWindow>, 
         quota(usage.get("monthly"), "monthly", "Monthly", 0),
     ]
     .into_iter()
-    .map(|quota| quota.map(unstarted_session_without_reset))
+    .map(|quota| quota.map(|quota| unstarted_session_without_reset(quota, now)))
     .collect()
 }
 
-/// An unused rolling window still reports a reset, which would read as a running session.
-/// It starts with the first request, so at 0% it has not started and has no reset yet.
-fn unstarted_session_without_reset(mut quota: QuotaWindow) -> QuotaWindow {
-    if quota.id == "session" && quota.used_percent <= 0.0 {
-        quota.resets_at = None;
+/// An unused rolling window still reports a reset a whole window from now, which would read as
+/// a running session. It starts with the first request, which fixes the reset. The percent is
+/// whole, so a started window can still read 0%; only the reset's distance tells them apart.
+fn unstarted_session_without_reset(mut quota: QuotaWindow, now: DateTime<Utc>) -> QuotaWindow {
+    if quota.id == "session" {
+        quota.resets_at = started_reset(
+            1.0 - quota.used_percent / 100.0,
+            quota.resets_at,
+            ROLLING_PERIOD_SECONDS,
+            now,
+        );
     }
     quota
 }
@@ -109,7 +121,7 @@ mod tests {
                 "monthly": {"percent": 72, "resetsAt": "2026-09-05T00:00:00Z", "status": "ok"}
             }}),
         };
-        let quotas = map_go_usage(response).unwrap();
+        let quotas = map_go_usage(response, test_now()).unwrap();
         assert_eq!(quotas.len(), 3);
         assert_eq!(quotas[0].id, "session");
         assert_eq!(quotas[0].period_seconds, 5 * 60 * 60);
@@ -117,6 +129,34 @@ mod tests {
         assert_eq!(quotas[2].period_seconds, 0);
         assert_eq!(quotas[1].used_percent, 100.0);
         assert!(!quotas.iter().any(|quota| quota.estimated));
+    }
+
+    fn test_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-12T07:00:00Z")
+            .unwrap()
+            .to_utc()
+    }
+
+    #[test]
+    fn started_rolling_window_below_one_percent_keeps_its_reset() {
+        let response = UsageResponse {
+            status: StatusCode::OK,
+            body: json!({"usage": {
+                "rolling": {"percent": 0, "resetsAt": "2026-08-12T10:30:00Z", "status": "ok"},
+                "weekly": {"percent": 0, "resetsAt": "2026-08-17T00:00:00Z", "status": "ok"},
+                "monthly": {"percent": 0, "resetsAt": "2026-09-05T00:00:00Z", "status": "ok"}
+            }}),
+        };
+        let quotas = map_go_usage(response, test_now()).unwrap();
+        assert_eq!(quotas[0].used_percent, 0.0);
+        assert_eq!(
+            quotas[0].resets_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-08-12T10:30:00Z")
+                    .unwrap()
+                    .to_utc()
+            )
+        );
     }
 
     #[test]
@@ -129,7 +169,7 @@ mod tests {
                 "monthly": {"percent": 0, "resetsAt": "2026-09-05T00:00:00Z", "status": "ok"}
             }}),
         };
-        let quotas = map_go_usage(response).unwrap();
+        let quotas = map_go_usage(response, test_now()).unwrap();
         assert_eq!(quotas[0].used_percent, 0.0);
         assert_eq!(quotas[0].resets_at, None);
         assert!(quotas[1..].iter().all(|quota| quota.resets_at.is_some()));
@@ -142,7 +182,7 @@ mod tests {
             r#"{"error":{"type":"EntitlementError","message":"OpenCode Go subscription required."}}"#,
         );
 
-        let error = map_go_usage(response).unwrap_err();
+        let error = map_go_usage(response, test_now()).unwrap_err();
         assert_eq!(error, OpenCodeError::GoSubscriptionRequired);
     }
 
@@ -153,7 +193,7 @@ mod tests {
             r#"{"error":{"type":"PermissionError","message":"Forbidden"}}"#,
         );
 
-        let error = map_go_usage(response).unwrap_err();
+        let error = map_go_usage(response, test_now()).unwrap_err();
         assert_eq!(error, OpenCodeError::RequestFailed(403));
     }
 
@@ -161,7 +201,7 @@ mod tests {
     fn maps_invalid_key_as_authentication_error() {
         let response = fetch_response(401, r#"{"type":"error"}"#);
 
-        let error = map_go_usage(response).unwrap_err();
+        let error = map_go_usage(response, test_now()).unwrap_err();
         assert_eq!(
             error.to_string(),
             "OpenCode Go login data is invalid or expired. Sign in to OpenCode Go again."
@@ -172,7 +212,7 @@ mod tests {
     fn maps_rate_limit_response_as_rate_limited_error() {
         let response = fetch_response(429, r#"{"type":"error"}"#);
 
-        let error = map_go_usage(response).unwrap_err();
+        let error = map_go_usage(response, test_now()).unwrap_err();
         assert_eq!(
             error.to_string(),
             "OpenCode Go usage request failed (HTTP 429)."

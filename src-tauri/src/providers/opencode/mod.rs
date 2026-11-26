@@ -194,7 +194,7 @@ impl OpenCodeProvider {
                     .as_ref()
                     .map_err(|error| *error)
                     .and_then(|client| client.fetch_go_usage(key))
-                    .and_then(map_go_usage)
+                    .and_then(|response| map_go_usage(response, now))
             })
             .transpose();
         let pricing = self.pricing.current();
