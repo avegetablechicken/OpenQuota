@@ -263,10 +263,10 @@ fn mapped_card(provider: &str, model: &str) -> Option<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "anthropic" | "claude-agent-sdk" => Some("claude"),
         "openai" | "openai-codex" => Some("codex"),
-        "xai" | "x-ai" | "grok" => Some("grok"),
-        "kimi" | "moonshot" | "moonshotai" => Some("kimi"),
+        "xai" | "x-ai" | "xai-oauth" | "grok" => Some("grok"),
+        "kimi" | "kimi-code" | "kimi-coding" | "moonshot" | "moonshotai" => Some("kimi"),
         "minimax" => Some("minimax"),
-        "zai" | "z-ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
+        "zai" | "z-ai" | "z_ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
         "google-antigravity" | "antigravity" | "antigravity-cli" => Some("antigravity"),
         _ => None,
     }
@@ -514,10 +514,14 @@ mod tests {
         assert_eq!(mapped_card("cursor", "cursor-small"), None);
         assert_eq!(mapped_card("zai", "glm-5"), Some("zai"));
         assert_eq!(mapped_card("zhipu", "glm-5"), Some("zai"));
+        assert_eq!(mapped_card("z_ai", "future-model"), Some("zai"));
         assert_eq!(mapped_card("anthropic", "glm-5"), Some("zai"));
         assert_eq!(mapped_card("custom", "kimi-k3"), Some("kimi"));
+        assert_eq!(mapped_card("kimi-code", "future-model"), Some("kimi"));
+        assert_eq!(mapped_card("kimi-coding", "future-model"), Some("kimi"));
         assert_eq!(mapped_card("anthropic", "MiniMax-M2.7"), Some("minimax"));
         assert_eq!(mapped_card("custom", "grok-4"), Some("grok"));
+        assert_eq!(mapped_card("xai-oauth", "future-model"), Some("grok"));
         assert_eq!(mapped_card("github-copilot", "gemini-3-pro"), None);
         assert_eq!(mapped_card("nvidia-nim", "deepseek-v4"), None);
     }
