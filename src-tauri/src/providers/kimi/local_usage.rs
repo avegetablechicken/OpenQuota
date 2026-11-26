@@ -313,6 +313,17 @@ struct LastRequestContext {
     model_alias: Option<String>,
 }
 
+impl LastRequestContext {
+    /// The last request's provider, for a usage line that names no provider of its own. A line
+    /// naming a different model belongs to another request, so it does not inherit it.
+    fn provider_for(&self, model: Option<&str>) -> Option<String> {
+        let matches_last = model.is_none_or(|model| {
+            self.model_alias.as_deref() == Some(model) || self.model.as_deref() == Some(model)
+        });
+        matches_last.then(|| self.provider.clone()).flatten()
+    }
+}
+
 fn parse_jsonl(content: &str, fallback_model: Option<&str>) -> Vec<KimiTokenEvent> {
     let mut events = Vec::new();
     let mut last_request = LastRequestContext::default();
@@ -375,18 +386,8 @@ fn parse_usage_record(
         .or_else(|| last_request.model_alias.clone())
         .or_else(|| last_request.model.clone())
         .or_else(|| fallback_model.map(str::to_owned));
-    let provider = non_empty_str(map.get("provider")).or_else(|| {
-        let matches_last = match raw_model.as_deref() {
-            None => true,
-            Some(model) => {
-                last_request.model_alias.as_deref() == Some(model)
-                    || last_request.model.as_deref() == Some(model)
-            }
-        };
-        matches_last
-            .then(|| last_request.provider.clone())
-            .flatten()
-    });
+    let provider = non_empty_str(map.get("provider"))
+        .or_else(|| last_request.provider_for(raw_model.as_deref()));
     let model = raw_model
         .as_deref()
         .map(|model| normalize_kimi_model(model, provider.as_deref()));
@@ -428,7 +429,8 @@ fn parse_legacy_status_update(
         .or_else(|| last_request.model_alias.clone())
         .or_else(|| last_request.model.clone())
         .or_else(|| fallback_model.map(str::to_owned));
-    let provider = non_empty_str(payload.get("provider")).or_else(|| last_request.provider.clone());
+    let provider = non_empty_str(payload.get("provider"))
+        .or_else(|| last_request.provider_for(raw_model.as_deref()));
     let model = raw_model
         .as_deref()
         .map(|model| normalize_kimi_model(model, provider.as_deref()));
@@ -1137,6 +1139,36 @@ mod tests {
         assert!(last30.tokens > 0);
         assert!(last30.estimated_cost_usd.is_some_and(|cost| cost > 0.0));
         assert!(last30.unknown_models.is_empty());
+    }
+
+    #[test]
+    fn legacy_status_updates_inherit_the_request_provider_only_for_its_model() {
+        let request = serde_json::json!({
+            "type": "llm.request",
+            "provider": "ollama",
+            "model": "glm-4.7",
+            "time": 1_784_800_000_000_i64
+        })
+        .to_string();
+        let content = [
+            request,
+            legacy_kimi_wire(1_784_800_001.0, None, [10, 1, 0, 0]),
+            legacy_kimi_wire(1_784_800_002.0, Some("glm-4.7"), [20, 2, 0, 0]),
+            legacy_kimi_wire(1_784_800_003.0, Some("kimi-k3"), [30, 3, 0, 0]),
+        ]
+        .join("\n");
+        let providers = parse_jsonl(&content, None)
+            .into_iter()
+            .map(|event| (event.input, event.provider))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            providers,
+            [
+                (10, Some("ollama".to_owned())),
+                (20, Some("ollama".to_owned())),
+                (30, None),
+            ]
+        );
     }
 
     #[test]
