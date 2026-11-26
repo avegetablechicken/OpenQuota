@@ -458,6 +458,9 @@ fn aggregate_into(
             output: event.completion.saturating_add(event.reasoning),
             ..TokenBreakdown::default()
         };
+        if total == 0 {
+            continue;
+        }
         match native_log_disposition("grok", model) {
             LocalModelDisposition::Home => {}
             LocalModelDisposition::RoutedTo(_) => continue,
@@ -470,7 +473,7 @@ fn aggregate_into(
         if let Some(cost) = pricing.estimated_cost_at("grok", model, event.timestamp, tokens, true)
         {
             accumulator.add(date, total, cost, model);
-        } else if total > 0 {
+        } else {
             accumulator.add_unpriced(date, total, model);
         }
     }
@@ -484,7 +487,7 @@ fn aggregate_routed_into(
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
     let today = now.with_timezone(&Local).date_naive();
-    let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
+    let since = today.checked_sub_days(Days::new(29)).unwrap_or(today);
     let mut contributed = false;
 
     for event in events {
@@ -508,11 +511,14 @@ fn aggregate_routed_into(
             .prompt
             .saturating_add(event.completion)
             .saturating_add(event.reasoning);
+        if total == 0 {
+            continue;
+        }
         if let Some(cost) = pricing.estimated_cost_at(card_id, model, event.timestamp, tokens, true)
         {
             accumulator.add(date, total, cost, model);
             contributed = true;
-        } else if total > 0 {
+        } else {
             accumulator.add_unpriced(date, total, model);
             contributed = true;
         }

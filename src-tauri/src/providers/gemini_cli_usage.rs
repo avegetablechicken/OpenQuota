@@ -243,10 +243,24 @@ fn parse_chat_file(content: &str) -> Vec<GeminiCliTokenEvent> {
                 })
                 .collect();
         }
-        // Single-object message record fallback.
-        return parse_message_record(&root, non_empty_str(root.get("sessionId")).as_deref(), None)
-            .into_iter()
-            .collect();
+        // Single-object message record fallback (including single-line wrapped JSONL logs).
+        let record = root
+            .get("message")
+            .and_then(Value::as_object)
+            .unwrap_or(&root);
+        let fallback_timestamp = root
+            .get("timestamp")
+            .or_else(|| root.get("lastUpdated"))
+            .or_else(|| root.get("startTime"))
+            .and_then(Value::as_str)
+            .and_then(parse_log_timestamp);
+        return parse_message_record(
+            record,
+            non_empty_str(root.get("sessionId")).as_deref(),
+            fallback_timestamp,
+        )
+        .into_iter()
+        .collect();
     }
 
     // JSONL session or subagent log format.
@@ -396,7 +410,7 @@ fn aggregate_into(
     let since = now
         .with_timezone(&Local)
         .date_naive()
-        .checked_sub_days(Days::new(30))
+        .checked_sub_days(Days::new(29))
         .unwrap_or(NaiveDate::MIN);
     let mut contributed = false;
 
@@ -774,10 +788,10 @@ mod tests {
         .unwrap());
         let antigravity = antigravity_acc.build(now, "test");
         assert_eq!(antigravity.today.unwrap().tokens, 100_000);
-        assert_eq!(
-            antigravity.other_usage.unwrap().today.unwrap().tokens,
-            300_000
-        );
+        let other_today = antigravity.other_usage.unwrap().today.unwrap();
+        assert_eq!(other_today.tokens, 300_000);
+        assert!(other_today.estimated_cost_usd.is_some());
+        assert!(other_today.estimate_complete);
 
         let mut claude_acc = DailyUsageAccumulator::default();
         assert!(scan_tmp_directories_into(
@@ -792,5 +806,24 @@ mod tests {
         let claude = claude_acc.build(now, "test");
         assert_eq!(claude.today.unwrap().tokens, 200_000);
         assert!(claude.other_usage.is_none());
+    }
+
+    #[test]
+    fn single_line_wrapped_jsonl_preserves_message_and_timestamp() {
+        let content = serde_json::json!({
+            "sessionId": "single-line-session",
+            "timestamp": "2026-11-20T10:05:00.000Z",
+            "message": {
+                "id": "m-single",
+                "type": "gemini",
+                "model": "gemini-4-neon",
+                "tokens": { "input": 100, "cached": 0, "output": 50, "thoughts": 0, "tool": 0, "total": 150 }
+            }
+        })
+        .to_string();
+        let events = parse_chat_file(&content);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id.as_deref(), Some("single-line-session"));
+        assert_eq!(events[0].total_tokens(), 150);
     }
 }

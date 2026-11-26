@@ -662,7 +662,7 @@ fn aggregate_routed_into(
     let since = now
         .with_timezone(&Local)
         .date_naive()
-        .checked_sub_days(Days::new(30))
+        .checked_sub_days(Days::new(29))
         .unwrap_or(NaiveDate::MIN);
     let mut contributed = false;
     for event in events {
@@ -690,6 +690,9 @@ fn aggregate_routed_into(
             is_fast: event.is_fast,
             ..TokenBreakdown::default()
         };
+        if tokens.total_tokens() == 0 && event.cost_usd.is_none_or(|cost| cost <= 0.0) {
+            continue;
+        }
         if let Some(exact) = event.cost_usd {
             accumulator.add_exact(date, tokens.total_tokens(), exact, model);
             contributed = true;

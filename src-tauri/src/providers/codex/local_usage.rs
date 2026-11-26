@@ -730,7 +730,7 @@ fn aggregate_routed_into(
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
     let today = now.with_timezone(&Local).date_naive();
-    let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
+    let since = today.checked_sub_days(Days::new(29)).unwrap_or(today);
     let mut seen = HashSet::new();
     let mut contributed = false;
 
@@ -763,10 +763,26 @@ fn aggregate_routed_into(
             is_fast: event.tier == ServiceTier::Fast,
             ..event.pricing_tokens()
         };
-        if let Some(cost) = pricing.estimated_cost_at(card_id, model, event.timestamp, tokens, true)
-        {
-            accumulator.add(date, event.total, cost, model);
-            contributed = true;
+        let cost = if event.tier == ServiceTier::Unknown {
+            None
+        } else if let Some(rates) = pricing.historical_rates(
+            card_id,
+            model,
+            event.timestamp,
+            event.tier,
+            tokens.prompt_tokens(),
+        ) {
+            rates.map(|rates| rates.cost_dollars(tokens, true))
+        } else if matches!(event.tier, ServiceTier::Standard | ServiceTier::Fast) {
+            pricing.estimated_cost_dollars(model, tokens, true)
+        } else {
+            None
+        };
+        if let Some(cost) = cost {
+            if event.total > 0 || cost > 0.0 {
+                accumulator.add(date, event.total, cost, model);
+                contributed = true;
+            }
         } else if event.total > 0 {
             accumulator.add_unpriced(date, event.total, model);
             contributed = true;

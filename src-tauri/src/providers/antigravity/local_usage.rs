@@ -666,7 +666,7 @@ fn aggregate_routed_into(
     let since = now
         .with_timezone(&Local)
         .date_naive()
-        .checked_sub_days(Days::new(30))
+        .checked_sub_days(Days::new(29))
         .unwrap_or(NaiveDate::MIN);
     let mut contributed = false;
 
