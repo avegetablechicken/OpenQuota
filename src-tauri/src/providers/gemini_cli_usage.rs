@@ -126,7 +126,7 @@ fn scan_tmp_directories_into(
         .checked_sub_days(Days::new(30))
         .unwrap_or(NaiveDate::MIN);
     let events = load_local_events(storage, tmp_dirs, since_date)?;
-    Ok(aggregate_into(events, now, pricing, card_id, accumulator))
+    Ok(aggregate_into(&events, now, pricing, card_id, accumulator))
 }
 
 static LOADED_EVENTS: LoadedEventsMemo<GeminiCliTokenEvent> = LoadedEventsMemo::new();
@@ -135,7 +135,7 @@ fn load_local_events(
     storage: &Storage,
     tmp_dirs: &[PathBuf],
     since_date: NaiveDate,
-) -> Result<Vec<GeminiCliTokenEvent>, LogCacheError> {
+) -> Result<std::sync::Arc<Vec<GeminiCliTokenEvent>>, LogCacheError> {
     let paths = discover_chat_files(tmp_dirs);
     LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
         load_chat_files(storage, paths, since_date)
@@ -413,7 +413,7 @@ fn deduplicate(events: Vec<GeminiCliTokenEvent>) -> Vec<GeminiCliTokenEvent> {
 }
 
 fn aggregate_into(
-    events: Vec<GeminiCliTokenEvent>,
+    events: &[GeminiCliTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
@@ -448,7 +448,7 @@ fn aggregate_into(
             };
             match native_log_disposition("antigravity", model) {
                 LocalModelDisposition::Home => {
-                    add_priced_event(accumulator, date, &event, model, "antigravity", pricing);
+                    add_priced_event(accumulator, date, event, model, "antigravity", pricing);
                     contributed = true;
                 }
                 LocalModelDisposition::RoutedTo(_) => {}
@@ -470,7 +470,7 @@ fn aggregate_into(
             if card_for_model(model) != Some(card_id) {
                 continue;
             }
-            add_priced_event(accumulator, date, &event, model, card_id, pricing);
+            add_priced_event(accumulator, date, event, model, card_id, pricing);
             contributed = true;
         }
     }

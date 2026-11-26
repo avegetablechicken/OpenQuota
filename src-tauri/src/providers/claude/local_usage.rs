@@ -60,7 +60,7 @@ static LOADED_EVENTS: LoadedEventsMemo<ClaudeTokenEvent> = LoadedEventsMemo::new
 fn load_local_events(
     storage: &Storage,
     since_date: NaiveDate,
-) -> Result<Vec<ClaudeTokenEvent>, ClaudeError> {
+) -> Result<std::sync::Arc<Vec<ClaudeTokenEvent>>, ClaudeError> {
     let paths = discover_files();
     LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
         load_files(storage, paths, since_date)
@@ -116,7 +116,7 @@ pub(crate) fn scan_routed_usage_into(
         .unwrap_or(NaiveDate::MIN);
     let events = load_local_events(storage, since_date)?;
     Ok(aggregate_routed_into(
-        events,
+        &events,
         now,
         pricing,
         card_id,
@@ -136,7 +136,7 @@ pub fn scan_local_usage(
         .unwrap_or(NaiveDate::MIN);
     let events = load_local_events(storage, since_date)?;
     let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(events, now, pricing, &mut accumulator);
+    aggregate_into(&events, now, pricing, &mut accumulator);
     let includes_pi = match pi_usage::scan_into(storage, now, pricing, "claude", &mut accumulator) {
         Ok(includes_pi) => includes_pi,
         Err(_) => {
@@ -592,7 +592,7 @@ fn deduplicate(events: Vec<ClaudeTokenEvent>) -> Vec<ClaudeTokenEvent> {
 
 #[cfg(test)]
 fn aggregate(
-    events: Vec<ClaudeTokenEvent>,
+    events: &[ClaudeTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
 ) -> UsageHistory {
@@ -602,7 +602,7 @@ fn aggregate(
 }
 
 fn aggregate_into(
-    events: Vec<ClaudeTokenEvent>,
+    events: &[ClaudeTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
@@ -665,7 +665,7 @@ fn aggregate_into(
 }
 
 fn aggregate_routed_into(
-    events: Vec<ClaudeTokenEvent>,
+    events: &[ClaudeTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
@@ -791,7 +791,7 @@ mod tests {
         let events = deduplicate(events);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].total_tokens(), 170);
-        let history = aggregate(events, now, &test_bundled_pricing());
+        let history = aggregate(&events, now, &test_bundled_pricing());
         assert!(history.last_30_days.unwrap().estimated_cost_usd.is_some());
     }
 
@@ -855,7 +855,7 @@ mod tests {
             .unwrap();
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
 
-        let history = aggregate(deduplicate(parse_jsonl(content)), now, &pricing);
+        let history = aggregate(&deduplicate(parse_jsonl(content)), now, &pricing);
         let today = history.today.unwrap();
 
         assert_eq!(today.tokens, 15);
@@ -1000,7 +1000,7 @@ mod tests {
         let content = r#"{"timestamp":"2026-07-15T08:00:00Z","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100,"output_tokens":10}}}
 {"timestamp":"2026-07-15T09:00:00Z","message":{"model":"claude-future-unpriced-model","usage":{"input_tokens":500,"output_tokens":20}}}"#;
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
-        let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
+        let history = aggregate(&parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 630);
         assert!(today.estimated_cost_usd.is_some());
@@ -1022,7 +1022,7 @@ mod tests {
 
         let expired_fast = r#"{"timestamp":"2026-07-25T08:00:00Z","message":{"model":"claude-opus-4-7","usage":{"input_tokens":1000,"output_tokens":100,"speed":"fast"}}}"#;
         let now_fast = Utc.with_ymd_and_hms(2026, 7, 25, 12, 0, 0).unwrap();
-        let history_fast = aggregate(parse_jsonl(expired_fast), now_fast, &pricing);
+        let history_fast = aggregate(&parse_jsonl(expired_fast), now_fast, &pricing);
         let today_fast = history_fast.today.unwrap();
         assert_eq!(today_fast.tokens, 1_100);
         assert_eq!(today_fast.estimated_cost_usd, None);
@@ -1031,7 +1031,7 @@ mod tests {
 
         let pre_history = r#"{"timestamp":"2026-09-27T08:00:00Z","message":{"model":"claude-sonnet-5-5","usage":{"input_tokens":500,"output_tokens":50}}}"#;
         let now_pre = Utc.with_ymd_and_hms(2026, 9, 27, 12, 0, 0).unwrap();
-        let history_pre = aggregate(parse_jsonl(pre_history), now_pre, &pricing);
+        let history_pre = aggregate(&parse_jsonl(pre_history), now_pre, &pricing);
         let today_pre = history_pre.today.unwrap();
         assert_eq!(today_pre.tokens, 550);
         assert_eq!(today_pre.estimated_cost_usd, None);
@@ -1057,7 +1057,7 @@ mod tests {
             has_speed: false,
             cost_usd: None,
         };
-        let history = aggregate(vec![event], now, &test_bundled_pricing());
+        let history = aggregate(&[event], now, &test_bundled_pricing());
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 220);
         assert_eq!(today.estimated_cost_usd, None);
@@ -1069,7 +1069,7 @@ mod tests {
     fn explicit_cost_wins_even_when_model_has_no_catalog_entry() {
         let content = r#"{"timestamp":"2026-07-15T08:00:00Z","costUSD":1.75,"message":{"model":"claude-future-unpriced-model","usage":{"input_tokens":500,"output_tokens":20}}}"#;
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
-        let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
+        let history = aggregate(&parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 520);
         assert_eq!(today.estimated_cost_usd, Some(1.75));
@@ -1083,7 +1083,7 @@ mod tests {
 {"timestamp":"2026-07-15T09:00:00Z","message":{"model":"qwen3.8:27b - mlx","usage":{"input_tokens":500,"output_tokens":20}}}
 {"timestamp":"2026-07-15T10:00:00Z","message":{"model":"future-unpriced-model","usage":{"input_tokens":300,"output_tokens":10}}}"#;
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
-        let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
+        let history = aggregate(&parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.as_ref().unwrap();
 
         assert_eq!(today.tokens, 110);
@@ -1104,18 +1104,14 @@ mod tests {
         let pricing = test_bundled_pricing();
         let events = parse_jsonl(content);
 
-        let claude = aggregate(events.clone(), now, &pricing);
+        let claude = aggregate(&events, now, &pricing);
         assert_eq!(claude.today.as_ref().unwrap().tokens, 110);
         // Only Qwen (unowned) enters Claude's Others; GLM and MiniMax do not double-count.
         assert_eq!(claude.other_usage.unwrap().today.unwrap().tokens, 440);
 
         let mut zai = crate::providers::daily_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
-            events.clone(),
-            now,
-            &pricing,
-            "zai",
-            &mut zai
+            &events, now, &pricing, "zai", &mut zai
         ));
         let zai_today = zai.build(now, "test").today.unwrap();
         assert_eq!(zai_today.tokens, 550);
@@ -1123,7 +1119,7 @@ mod tests {
 
         let mut minimax = crate::providers::daily_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
-            events,
+            &events,
             now,
             &pricing,
             "minimax",

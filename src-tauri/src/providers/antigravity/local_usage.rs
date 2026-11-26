@@ -75,7 +75,7 @@ fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
     since_date: NaiveDate,
-) -> Result<Vec<AntigravityTokenEvent>, AntigravityError> {
+) -> Result<std::sync::Arc<Vec<AntigravityTokenEvent>>, AntigravityError> {
     let paths = discover_transcript_files(roots);
     LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
         load_transcript_files(storage, paths, since_date)
@@ -161,7 +161,7 @@ fn scan_routed_roots_into(
         .unwrap_or(NaiveDate::MIN);
     let events = load_local_events(storage, roots, since_date)?;
     Ok(aggregate_routed_into(
-        events,
+        &events,
         now,
         pricing,
         card_id,
@@ -193,7 +193,7 @@ fn scan_roots(
     let events = load_local_events(storage, roots, since_date)?;
 
     let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(events, now, pricing, &mut accumulator);
+    aggregate_into(&events, now, pricing, &mut accumulator);
     let includes_pi = if fold_pi {
         match pi_usage::scan_into(storage, now, pricing, "antigravity", &mut accumulator) {
             Ok(includes_pi) => includes_pi,
@@ -612,7 +612,7 @@ fn add_priced_event(
 }
 
 fn aggregate_into(
-    events: Vec<AntigravityTokenEvent>,
+    events: &[AntigravityTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
@@ -644,14 +644,7 @@ fn aggregate_into(
         };
         match native_log_disposition("antigravity", model_name) {
             LocalModelDisposition::Home => {
-                add_priced_event(
-                    accumulator,
-                    date,
-                    &event,
-                    model_name,
-                    "antigravity",
-                    pricing,
-                );
+                add_priced_event(accumulator, date, event, model_name, "antigravity", pricing);
             }
             LocalModelDisposition::RoutedTo(_) => continue,
             LocalModelDisposition::Other => {
@@ -669,7 +662,7 @@ fn aggregate_into(
 }
 
 fn aggregate_routed_into(
-    events: Vec<AntigravityTokenEvent>,
+    events: &[AntigravityTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
@@ -699,7 +692,7 @@ fn aggregate_routed_into(
             continue;
         }
 
-        add_priced_event(accumulator, date, &event, model_name, card_id, pricing);
+        add_priced_event(accumulator, date, event, model_name, card_id, pricing);
         contributed = true;
     }
     contributed

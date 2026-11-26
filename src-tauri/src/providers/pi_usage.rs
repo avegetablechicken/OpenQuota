@@ -119,7 +119,7 @@ fn scan_directories_into(
         .checked_sub_days(Days::new(30))
         .unwrap_or(NaiveDate::MIN);
     Ok(aggregate_into(
-        events,
+        &events,
         card_id,
         since,
         now,
@@ -282,7 +282,7 @@ fn deduplicate(events: Vec<PiUsageEvent>) -> Vec<PiUsageEvent> {
 }
 
 fn aggregate_into(
-    events: Vec<PiUsageEvent>,
+    events: &[PiUsageEvent],
     card_id: &str,
     since: NaiveDate,
     now: DateTime<Utc>,
@@ -541,7 +541,7 @@ mod tests {
             let mut accumulator = DailyUsageAccumulator::default();
             assert!(
                 aggregate_into(
-                    vec![event],
+                    &[event],
                     card,
                     chrono::NaiveDate::MIN,
                     now(),
@@ -589,7 +589,7 @@ mod tests {
 
         assert!(
             aggregate_into(
-                vec![event],
+                &[event],
                 "codex",
                 chrono::NaiveDate::MIN,
                 now(),
@@ -615,7 +615,7 @@ mod tests {
         let mut accumulator = DailyUsageAccumulator::default();
         assert!(
             aggregate_into(
-                events,
+                &events,
                 "claude",
                 chrono::NaiveDate::MIN,
                 now(),
@@ -642,7 +642,7 @@ mod tests {
 
         assert_eq!(
             aggregate_into(
-                vec![event],
+                &[event],
                 "claude",
                 chrono::NaiveDate::MIN,
                 now(),

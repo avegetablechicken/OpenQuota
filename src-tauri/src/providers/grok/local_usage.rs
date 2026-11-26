@@ -89,7 +89,7 @@ pub(crate) fn scan_routed_usage_into(
     let path = default_log_path();
     let events = load_events(storage, &path)?;
     Ok(aggregate_routed_into(
-        events,
+        &events,
         now,
         pricing,
         card_id,
@@ -120,7 +120,10 @@ struct TokenEvent {
 
 static LOADED_EVENTS: LoadedEventsMemo<TokenEvent> = LoadedEventsMemo::new();
 
-fn load_events(storage: &Storage, path: &Path) -> Result<Vec<TokenEvent>, GrokError> {
+fn load_events(
+    storage: &Storage,
+    path: &Path,
+) -> Result<std::sync::Arc<Vec<TokenEvent>>, GrokError> {
     LOADED_EVENTS.load(storage, [path.to_path_buf()], NaiveDate::MIN, || {
         load_log_file(storage, path)
     })
@@ -162,7 +165,7 @@ fn scan_path(
     let events = load_events(storage, path)?;
 
     let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(events, now, pricing, &mut accumulator);
+    aggregate_into(&events, now, pricing, &mut accumulator);
     let includes_pi = if fold_external {
         match pi_usage::scan_into(storage, now, pricing, "grok", &mut accumulator) {
             Ok(includes_pi) => includes_pi,
@@ -425,14 +428,14 @@ fn model_id(message: &str, context: &Map<String, Value>) -> Option<String> {
 }
 
 #[cfg(test)]
-fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
+fn aggregate(events: &[TokenEvent], now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(events, now, pricing, &mut accumulator);
     accumulator.build(now, SOURCE_NOTE)
 }
 
 fn aggregate_into(
-    events: Vec<TokenEvent>,
+    events: &[TokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
@@ -488,7 +491,7 @@ fn aggregate_into(
 }
 
 fn aggregate_routed_into(
-    events: Vec<TokenEvent>,
+    events: &[TokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
@@ -568,7 +571,7 @@ mod tests {
     #[test]
     fn fixture_tracks_models_per_process_and_prices_usage() {
         let history = aggregate(
-            parse_jsonl(include_str!("fixtures/usage.jsonl")),
+            &parse_jsonl(include_str!("fixtures/usage.jsonl")),
             now(),
             &test_bundled_pricing(),
         );
@@ -588,7 +591,7 @@ mod tests {
 {"ts":"2026-06-18T09:00:00Z","pid":7,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000,"cached_prompt_tokens":800000,"completion_tokens":0}}
 {"ts":"2026-06-18T10:00:00Z","pid":7,"msg":"backend_search: model switch","ctx":{"model_id":"grok-composer-2.5-fast"}}
 {"ts":"2026-06-18T11:00:00Z","pid":7,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000,"completion_tokens":0}}"#;
-        let history = aggregate(parse_jsonl(content), now(), &test_bundled_pricing());
+        let history = aggregate(&parse_jsonl(content), now(), &test_bundled_pricing());
 
         assert!((history.today.unwrap().estimated_cost_usd.unwrap() - 3.36).abs() < 0.000_001);
     }
@@ -600,7 +603,7 @@ mod tests {
 {"ts":"2026-06-18T10:00:00Z","pid":2,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000}}
 {"ts":"2026-06-18T11:00:00Z","pid":3,"msg":"model changed","ctx":{"model":"grok-build"}}
 {"ts":"2026-06-18T12:00:00Z","pid":3,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":500000}}"#;
-        let history = aggregate(parse_jsonl(content), now(), &test_bundled_pricing());
+        let history = aggregate(&parse_jsonl(content), now(), &test_bundled_pricing());
 
         assert_eq!(history.today.as_ref().unwrap().tokens, 2_500_000);
         assert_eq!(
@@ -620,13 +623,13 @@ mod tests {
 {"ts":"2026-06-18T09:40:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":300000}}"#;
         let events = parse_jsonl(content);
         let pricing = test_bundled_pricing();
-        let grok = aggregate(events.clone(), now(), &pricing);
+        let grok = aggregate(&events, now(), &pricing);
         assert_eq!(grok.today.as_ref().unwrap().tokens, 100_000);
         assert_eq!(grok.other_usage.unwrap().today.unwrap().tokens, 300_000);
 
         let mut claude = crate::providers::daily_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
-            events,
+            &events,
             now(),
             &pricing,
             "claude",
@@ -643,7 +646,7 @@ mod tests {
         let content = r#"{"ts":"2026-05-01T08:00:00Z","pid":1,"msg":"model changed","ctx":{"model":"grok-build"}}
 {"ts":"2026-05-01T09:00:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000}}
 {"ts":"2026-06-18T09:00:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"loop_index":3}}"#;
-        let history = aggregate(parse_jsonl(content), now(), &test_bundled_pricing());
+        let history = aggregate(&parse_jsonl(content), now(), &test_bundled_pricing());
         assert!(history.today.is_none());
         assert!(history.daily.is_empty());
     }

@@ -66,7 +66,7 @@ pub(crate) fn scan_routed_usage_into(
         .unwrap_or(NaiveDate::MIN);
     let events = scan_codex_events(storage, &homes, since_date)?;
     Ok(aggregate_routed_into(
-        events,
+        &events,
         now,
         pricing,
         card_id,
@@ -90,7 +90,7 @@ pub fn scan_local_usage(
     let events = scan_codex_events(storage, &homes, since_date)?;
 
     let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(events, now, pricing, &mut accumulator);
+    aggregate_into(&events, now, pricing, &mut accumulator);
     let includes_pi = match pi_usage::scan_into(storage, now, pricing, "codex", &mut accumulator) {
         Ok(includes_pi) => includes_pi,
         Err(_) => {
@@ -240,7 +240,7 @@ fn scan_codex_events(
     storage: &Storage,
     homes: &[PathBuf],
     since_date: NaiveDate,
-) -> Result<Vec<TokenEvent>, CodexError> {
+) -> Result<std::sync::Arc<Vec<TokenEvent>>, CodexError> {
     let paths = discover_session_files(homes);
     LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
         load_session_files(storage, paths, since_date)
@@ -668,14 +668,14 @@ fn resolve_model(parsed: Option<String>, current_model: &mut Option<String>) -> 
 }
 
 #[cfg(test)]
-fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
+fn aggregate(events: &[TokenEvent], now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(events, now, pricing, &mut accumulator);
     accumulator.build(now, "From your Codex logs (estimated)")
 }
 
 fn aggregate_into(
-    events: Vec<TokenEvent>,
+    events: &[TokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
@@ -719,14 +719,14 @@ fn aggregate_into(
                 accumulator.add_other(
                     date,
                     event.total,
-                    estimate_cost(&event, pricing),
+                    estimate_cost(event, pricing),
                     true,
                     model,
                 );
                 continue;
             }
         }
-        if let Some(cost) = estimate_cost(&event, pricing) {
+        if let Some(cost) = estimate_cost(event, pricing) {
             accumulator.add(date, event.total, cost, model);
         } else if event.total > 0 || model.eq_ignore_ascii_case("codex-auto-review") {
             accumulator.add_unpriced(date, event.total, model);
@@ -735,7 +735,7 @@ fn aggregate_into(
 }
 
 fn aggregate_routed_into(
-    events: Vec<TokenEvent>,
+    events: &[TokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
@@ -982,7 +982,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(events[0].model.is_empty());
 
-        let history = aggregate(events, now, &test_bundled_pricing());
+        let history = aggregate(&events, now, &test_bundled_pricing());
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 110);
         assert_eq!(today.estimated_cost_usd, None);
@@ -1017,7 +1017,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
 {"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"deepseek-v4-flash","info":{"last_token_usage":{"input_tokens":500,"output_tokens":20,"total_tokens":520}}}}"#;
-        let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
+        let history = aggregate(&parse_jsonl(content), now, &test_bundled_pricing());
 
         assert_eq!(history.today.as_ref().unwrap().tokens, 110);
         let other = history.other_usage.unwrap().today.unwrap();
@@ -1036,13 +1036,13 @@ mod tests {
         let pricing = test_bundled_pricing();
         let events = parse_jsonl(content);
 
-        let codex = aggregate(events.clone(), now, &pricing);
+        let codex = aggregate(&events, now, &pricing);
         assert_eq!(codex.today.as_ref().unwrap().tokens, 110);
         assert_eq!(codex.other_usage.unwrap().today.unwrap().tokens, 520);
 
         let mut claude = crate::providers::daily_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
-            events.clone(),
+            &events,
             now,
             &pricing,
             "claude",
@@ -1054,7 +1054,7 @@ mod tests {
 
         let mut kimi = crate::providers::daily_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
-            events, now, &pricing, "kimi", &mut kimi
+            &events, now, &pricing, "kimi", &mut kimi
         ));
         let kimi_today = kimi.build(now, "test").today.unwrap();
         assert_eq!(kimi_today.tokens, 330);
@@ -1092,7 +1092,7 @@ mod tests {
             (template.replace("openai", "custom"), None),
             (template.replace("pro", "unknown"), None),
         ] {
-            let history = aggregate(parse_jsonl(&log), now, &pricing);
+            let history = aggregate(&parse_jsonl(&log), now, &pricing);
             let period = history.last_30_days.unwrap();
             assert_eq!(period.tokens, 105);
             assert_eq!(period.estimated_cost_usd, expected);
@@ -1346,7 +1346,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.6-sol","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
         let pricing = test_bundled_pricing();
-        let history = aggregate(parse_jsonl(content), now, &pricing);
+        let history = aggregate(&parse_jsonl(content), now, &pricing);
         assert_eq!(history.today.as_ref().unwrap().tokens, 110);
         assert!(history.today.as_ref().unwrap().estimated_cost_usd.is_some());
         assert!(history.today.as_ref().unwrap().estimate_complete);
@@ -1357,7 +1357,7 @@ mod tests {
     fn uppercase_codex_models_are_priced_without_losing_display_identity() {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"GPT-5.5","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
-        let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
+        let history = aggregate(&parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.unwrap();
 
         assert_eq!(today.tokens, 110);
@@ -1372,7 +1372,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-daybreak-blue-latest","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
         let pricing = test_bundled_pricing();
-        let history = aggregate(parse_jsonl(content), now, &pricing);
+        let history = aggregate(&parse_jsonl(content), now, &pricing);
         let today = history.today.as_ref().unwrap();
         assert_eq!(today.tokens, 110);
         assert_eq!(today.estimated_cost_usd, Some(0.0008));
@@ -1391,7 +1391,7 @@ mod tests {
 {"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":800,"output_tokens":100,"total_tokens":900}}}}
 {"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
         let pricing = test_bundled_pricing();
-        let history = aggregate(parse_jsonl(content), now, &pricing);
+        let history = aggregate(&parse_jsonl(content), now, &pricing);
         let today = history.today.unwrap();
         let breakdown = today.model_breakdown.unwrap();
 
@@ -1416,7 +1416,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
         let pricing = test_bundled_pricing();
-        let history = aggregate(parse_jsonl(content), now, &pricing);
+        let history = aggregate(&parse_jsonl(content), now, &pricing);
 
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 500);
@@ -1443,7 +1443,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(estimate_cost(&events[0], &pricing), None);
 
-        let history = aggregate(events, now, &pricing);
+        let history = aggregate(&events, now, &pricing);
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 1_100);
         assert_eq!(today.estimated_cost_usd, None);
@@ -1465,7 +1465,7 @@ mod tests {
             .iter()
             .all(|event| estimate_cost(event, &pricing).is_none()));
 
-        let history = aggregate(events, now, &pricing);
+        let history = aggregate(&events, now, &pricing);
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 272_661);
         assert_eq!(today.estimated_cost_usd, None);

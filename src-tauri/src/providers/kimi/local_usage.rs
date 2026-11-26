@@ -130,7 +130,7 @@ fn scan_roots_into(
         .checked_sub_days(Days::new(30))
         .unwrap_or(NaiveDate::MIN);
     let events = load_local_events(storage, roots, since_date)?;
-    Ok(aggregate_into(events, now, pricing, card_id, accumulator))
+    Ok(aggregate_into(&events, now, pricing, card_id, accumulator))
 }
 
 static LOADED_EVENTS: LoadedEventsMemo<KimiTokenEvent> = LoadedEventsMemo::new();
@@ -139,7 +139,7 @@ fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
     since_date: NaiveDate,
-) -> Result<Vec<KimiTokenEvent>, LogCacheError> {
+) -> Result<std::sync::Arc<Vec<KimiTokenEvent>>, LogCacheError> {
     let discovered = discover_wire_files(roots);
     let paths = discovered
         .iter()
@@ -566,7 +566,7 @@ fn is_short_kimi_series(slug_lower: &str) -> bool {
 }
 
 fn aggregate_into(
-    events: Vec<KimiTokenEvent>,
+    events: &[KimiTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
@@ -1156,7 +1156,7 @@ mod tests {
 
         let mut kimi_acc = DailyUsageAccumulator::default();
         assert!(!aggregate_into(
-            events.clone(),
+            &events,
             now,
             &pricing,
             "kimi",
@@ -1168,7 +1168,7 @@ mod tests {
         assert!(other.estimated_cost_usd.unwrap_or_default().abs() < 1e-9);
 
         let mut zai_acc = DailyUsageAccumulator::default();
-        assert!(!aggregate_into(events, now, &pricing, "zai", &mut zai_acc));
+        assert!(!aggregate_into(&events, now, &pricing, "zai", &mut zai_acc));
         assert!(zai_acc.build(now, "test").today.is_none());
     }
 }

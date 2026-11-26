@@ -47,7 +47,7 @@ pub struct LoadedEventsMemo<T> {
     entry: Mutex<Option<(LoadedEventsKey, Arc<Vec<T>>)>>,
 }
 
-impl<T: Clone> LoadedEventsMemo<T> {
+impl<T> LoadedEventsMemo<T> {
     pub const fn new() -> Self {
         Self {
             entry: Mutex::new(None),
@@ -63,7 +63,7 @@ impl<T: Clone> LoadedEventsMemo<T> {
         paths: impl IntoIterator<Item = PathBuf>,
         since_date: NaiveDate,
         load: impl FnOnce() -> Result<Vec<T>, E>,
-    ) -> Result<Vec<T>, E> {
+    ) -> Result<Arc<Vec<T>>, E> {
         let key = LoadedEventsKey {
             storage: std::ptr::from_ref(storage) as usize,
             since_date,
@@ -77,22 +77,20 @@ impl<T: Clone> LoadedEventsMemo<T> {
                 })
                 .collect(),
         };
+        // Every card shares the remembered events, so a hit copies nothing.
         let mut entry = self
             .entry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((cached_key, events)) = entry.as_ref() {
             if *cached_key == key {
-                return Ok(events.as_ref().clone());
+                return Ok(Arc::clone(events));
             }
         }
         let unreadable_before = UNREADABLE_LOGS.with(std::cell::Cell::get);
-        let events = load()?;
-        if UNREADABLE_LOGS.with(std::cell::Cell::get) == unreadable_before {
-            *entry = Some((key, Arc::new(events.clone())));
-        } else {
-            *entry = None;
-        }
+        let events = Arc::new(load()?);
+        *entry = (UNREADABLE_LOGS.with(std::cell::Cell::get) == unreadable_before)
+            .then(|| (key, Arc::clone(&events)));
         Ok(events)
     }
 }
@@ -510,30 +508,27 @@ mod tests {
             Ok(vec![loads.get()])
         };
 
-        assert_eq!(
-            memo.load(&storage, [first.clone()], since, load),
-            Ok(vec![1])
-        );
-        assert_eq!(
-            memo.load(&storage, [first.clone()], since, load),
-            Ok(vec![1])
-        );
+        let loaded = memo.load(&storage, [first.clone()], since, load).unwrap();
+        assert_eq!(*loaded, [1]);
+        // A hit shares the remembered events instead of copying them.
+        let reused = memo.load(&storage, [first.clone()], since, load).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&loaded, &reused));
 
         fs::write(&first, "ab").unwrap();
         assert_eq!(
             memo.load(&storage, [first.clone()], since, load),
-            Ok(vec![2])
+            Ok(std::sync::Arc::new(vec![2]))
         );
         assert_eq!(
             memo.load(&storage, [first.clone(), second.clone()], since, load),
-            Ok(vec![3])
+            Ok(std::sync::Arc::new(vec![3]))
         );
 
         let failed = memo.load(&storage, [second.clone()], since, || Err::<Vec<u32>, _>(()));
         assert_eq!(failed, Err(()));
         assert_eq!(
             memo.load(&storage, [second.clone()], since, load),
-            Ok(vec![4])
+            Ok(std::sync::Arc::new(vec![4]))
         );
         assert_eq!(loads.get(), 4);
 
@@ -550,8 +545,11 @@ mod tests {
         };
         assert_eq!(
             memo.load(&storage, [second.clone()], since, skipping),
-            Ok(vec![5])
+            Ok(std::sync::Arc::new(vec![5]))
         );
-        assert_eq!(memo.load(&storage, [second], since, load), Ok(vec![6]));
+        assert_eq!(
+            memo.load(&storage, [second], since, load),
+            Ok(std::sync::Arc::new(vec![6]))
+        );
     }
 }
