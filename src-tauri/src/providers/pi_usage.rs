@@ -106,7 +106,9 @@ fn scan_directories_into(
     let mut seen_paths = HashSet::with_capacity(paths.len());
     let mut events = Vec::new();
     for (source, path) in paths {
-        seen_paths.insert(path.clone());
+        if !seen_paths.insert(path.clone()) {
+            continue;
+        }
         let Some(parsed) =
             load_or_parse_log(storage, "pi", &path, LOG_CACHE_SCHEMA_VERSION, |content| {
                 parse_jsonl(content, source)
@@ -152,7 +154,9 @@ fn sessions_directories(
         home.join(".pi").join("agent").join("sessions")
     };
     let oh_my_pi = home.join(".omp").join("agent").join("sessions");
-    if pi == oh_my_pi {
+    let pi_canonical = fs::canonicalize(&pi).unwrap_or_else(|_| pi.clone());
+    let oh_my_pi_canonical = fs::canonicalize(&oh_my_pi).unwrap_or_else(|_| oh_my_pi.clone());
+    if pi_canonical == oh_my_pi_canonical {
         vec![(PiUsageSource::OhMyPi, oh_my_pi)]
     } else {
         vec![(PiUsageSource::Pi, pi), (PiUsageSource::OhMyPi, oh_my_pi)]
@@ -802,5 +806,73 @@ mod tests {
                 "{card}"
             );
         }
+    }
+
+    #[test]
+    fn overlapping_directories_never_double_count_idless_events() {
+        let directory = tempdir().unwrap();
+        let outer = directory.path().join("sessions");
+        let nested_omp = outer.join("omp");
+        fs::create_dir_all(&nested_omp).unwrap();
+        let idless = serde_json::json!({
+            "type": "message",
+            "timestamp": "2026-07-12T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input": 100,
+                    "output": 50,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "totalTokens": 150,
+                    "cost": {"total": 0.4}
+                }
+            }
+        })
+        .to_string();
+        fs::write(nested_omp.join("session.jsonl"), idless).unwrap();
+
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let mut accumulator = DailyUsageAccumulator::default();
+        let sources = scan_directories_into(
+            &storage,
+            &[
+                (PiUsageSource::Pi, outer),
+                (PiUsageSource::OhMyPi, nested_omp),
+            ],
+            now(),
+            &pricing(),
+            "claude",
+            &mut accumulator,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sources,
+            PiUsageSources {
+                pi: true,
+                oh_my_pi: false,
+            }
+        );
+        let today = accumulator.build(now(), "test").today.unwrap();
+        assert_eq!(today.tokens, 150);
+        assert!((today.estimated_cost_usd.unwrap() - 0.4).abs() < 1e-9);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_pi_and_omp_directories_collapse_to_single_source() {
+        let directory = tempdir().unwrap();
+        let home = directory.path();
+        let omp_sessions = home.join(".omp").join("agent").join("sessions");
+        let pi_agent = home.join(".pi").join("agent");
+        fs::create_dir_all(&omp_sessions).unwrap();
+        fs::create_dir_all(&pi_agent).unwrap();
+        std::os::unix::fs::symlink(&omp_sessions, pi_agent.join("sessions")).unwrap();
+
+        let dirs = sessions_directories(None, None, home);
+        assert_eq!(dirs, [(PiUsageSource::OhMyPi, omp_sessions)]);
     }
 }
