@@ -76,7 +76,10 @@
   }
   function togglePin(metric: MetricLayout, button: HTMLButtonElement) {
     if (!provider || !canTogglePin(metric)) return;
-    if (!metric.pinned && provider.metrics.filter((item) => item.pinned).length >= 2) {
+    if (
+      !metric.pinned &&
+      provider.metrics.filter((item) => item.pinned && metricSupported(item.id)).length >= 2
+    ) {
       showMessage('Up to 2 stars per provider', 'denied');
       if (!reducedMotion) {
         button.animate?.(

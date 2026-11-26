@@ -290,7 +290,15 @@ fn menu_bar_providers(settings: &AppSettings, registry: &ProviderRegistry) -> Ve
             let pins = provider
                 .metrics
                 .iter()
-                .filter(|metric| metric.pinned)
+                .filter(|metric| {
+                    metric.pinned
+                        && (!connection_configured
+                            || crate::providers::sub2api::metric_supported(
+                                &provider.id,
+                                &metric.id,
+                                upstream_provider_id,
+                            ))
+                })
                 .count();
             let options = provider
                 .metrics

@@ -808,7 +808,21 @@ pub fn normalize(
             settings.known_provider_ids.push(definition.id.clone());
         }
         provider.detected = detected.contains(&definition.id);
-        normalize_metrics(&mut provider.metrics, &definition.metrics);
+        let connection_configured = catalog
+            .connection_config_provider_ids
+            .contains(&provider.id);
+        let upstream_provider_id = connection_configured
+            .then(|| registry.upstream_provider_id(&provider.id))
+            .flatten();
+        let provider_id = provider.id.clone();
+        normalize_metrics(&mut provider.metrics, &definition.metrics, |metric_id| {
+            !connection_configured
+                || crate::providers::sub2api::metric_supported(
+                    &provider_id,
+                    metric_id,
+                    upstream_provider_id,
+                )
+        });
         normalized.push(provider);
     }
     for definition in &catalog.providers {
@@ -934,7 +948,11 @@ fn default_provider(definition: &ProviderDefinition, detected: bool) -> Provider
     }
 }
 
-fn normalize_metrics(metrics: &mut Vec<MetricLayout>, definitions: &[MetricDefinition]) {
+fn normalize_metrics(
+    metrics: &mut Vec<MetricLayout>,
+    definitions: &[MetricDefinition],
+    is_supported: impl Fn(&str) -> bool,
+) {
     let mut normalized = Vec::with_capacity(definitions.len());
     for metric in metrics.iter() {
         if definitions
@@ -963,9 +981,13 @@ fn normalize_metrics(metrics: &mut Vec<MetricLayout>, definitions: &[MetricDefin
             .iter()
             .find(|definition| definition.id == metric.id)
             .is_some_and(|definition| definition.pinnable);
-        metric.pinned &= pinnable && pin_count < MAX_PINS_PER_PROVIDER;
-        if metric.pinned {
-            pin_count += 1;
+        if is_supported(&metric.id) {
+            metric.pinned &= pinnable && pin_count < MAX_PINS_PER_PROVIDER;
+            if metric.pinned {
+                pin_count += 1;
+            }
+        } else {
+            metric.pinned &= pinnable;
         }
     }
     if !normalized

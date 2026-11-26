@@ -1,10 +1,20 @@
 use crate::models::{DailyUsage, ModelUsageBreakdown, ModelUsageEntry, UsageHistory, UsagePeriod};
 use chrono::{Days, Local, NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 #[derive(Clone, Default, Deserialize, Serialize, PartialEq)]
 pub(super) struct AccountStats {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub(super) history: Vec<AccountStatsDay>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub(super) models: Vec<AccountStatsModel>,
 }
 
@@ -266,5 +276,17 @@ mod tests {
         assert!(history.yesterday.is_none());
         assert!(history.last_30_days.is_none());
         assert!(history.daily.is_empty());
+    }
+
+    #[test]
+    fn account_stats_tolerates_missing_and_null_slices() {
+        let missing: AccountStats = serde_json::from_value(json!({})).unwrap();
+        assert!(missing.history.is_empty());
+        assert!(missing.models.is_empty());
+
+        let nulls: AccountStats =
+            serde_json::from_value(json!({"history": null, "models": null})).unwrap();
+        assert!(nulls.history.is_empty());
+        assert!(nulls.models.is_empty());
     }
 }

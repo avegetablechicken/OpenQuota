@@ -201,7 +201,6 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
 }
 
 /// Whether a connection's metric can report data for its upstream, matching the Customize page.
-#[cfg(any(target_os = "macos", test))]
 pub fn metric_supported(
     provider_id: &str,
     metric_id: &str,
@@ -289,6 +288,8 @@ pub fn metric_template(
                 metric("last30", true, demand, false),
             ],
             &[
+                "daily",
+                "monthly",
                 "spark",
                 "sparkWeekly",
                 "rateLimitResets",
@@ -308,7 +309,15 @@ pub fn metric_template(
                 metric("yesterday", true, demand, false),
                 metric("last30", true, demand, false),
             ],
-            &["sonnet", "fable", "extra", "claude", "claudeWeekly"],
+            &[
+                "daily",
+                "monthly",
+                "sonnet",
+                "fable",
+                "extra",
+                "claude",
+                "claudeWeekly",
+            ],
         ),
         // Antigravity's Session and Weekly are its Gemini pool, as in the native provider.
         Sub2ApiUpstream::Antigravity => (
@@ -323,6 +332,8 @@ pub fn metric_template(
                 metric("last30", true, demand, false),
             ],
             &[
+                "daily",
+                "monthly",
                 "spark",
                 "sparkWeekly",
                 "rateLimitResets",
@@ -342,6 +353,7 @@ pub fn metric_template(
                 metric("last30", true, demand, false),
             ],
             &[
+                "daily",
                 "session",
                 "spark",
                 "sparkWeekly",
@@ -1014,7 +1026,6 @@ pub struct Sub2ApiProvider {
     configured: AtomicBool,
     session: Mutex<Option<CachedSession>>,
     model_families: Mutex<Option<subscription::CachedModelFamilies>>,
-    history_lock: Mutex<()>,
 }
 
 impl Sub2ApiProvider {
@@ -1031,7 +1042,6 @@ impl Sub2ApiProvider {
             configured: AtomicBool::new(configured),
             session: Mutex::new(None),
             model_families: Mutex::new(None),
-            history_lock: Mutex::new(()),
         }
     }
 
@@ -1099,6 +1109,9 @@ impl Sub2ApiProvider {
         if let Ok(mut cached) = self.session.lock() {
             *cached = None;
         }
+        if let Ok(mut cached) = self.model_families.lock() {
+            *cached = None;
+        }
         Ok(Sub2ApiConfigSaveOutcome {
             state: connections.state(),
             apply_metric_template,
@@ -1114,10 +1127,6 @@ impl Sub2ApiProvider {
     }
 
     pub fn delete_config(&self) -> Result<Sub2ApiConfigState, ProviderError> {
-        let _guard = self
-            .history_lock
-            .lock()
-            .map_err(|_| Sub2ApiError::HistoryCache)?;
         match fs::remove_file(self.cache_path()) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1127,6 +1136,9 @@ impl Sub2ApiProvider {
             .map_err(|_| Sub2ApiError::CredentialStorage)?;
         self.set_configuration_marker(None)?;
         if let Ok(mut cached) = self.session.lock() {
+            *cached = None;
+        }
+        if let Ok(mut cached) = self.model_families.lock() {
             *cached = None;
         }
         Ok(Sub2ApiConfigState::default())
@@ -1502,10 +1514,6 @@ impl UsageProvider for Sub2ApiProvider {
         &self,
         preview: &dyn Fn(super::ProviderRefresh),
     ) -> Result<super::ProviderRefresh, ProviderError> {
-        let _guard = self
-            .history_lock
-            .lock()
-            .map_err(|_| Sub2ApiError::HistoryCache)?;
         let config = self.load_config()?.ok_or(Sub2ApiError::MissingConfig)?;
         let cache_identity = config.cache_key();
         let snapshot = self.refresh_snapshot_with_preview(&config, &|snapshot| {
@@ -2070,8 +2078,7 @@ mod tests {
             for known in &definition.metrics {
                 let suffix = known.id.split_once('.').unwrap().1;
                 assert!(
-                    matches!(suffix, "daily" | "monthly" | "expires")
-                        || template.iter().any(|metric| metric.id == known.id),
+                    template.iter().any(|metric| metric.id == known.id),
                     "{upstream} {suffix}"
                 );
             }

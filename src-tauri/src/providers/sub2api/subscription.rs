@@ -101,14 +101,25 @@ impl Sub2ApiClient {
         cache: &std::sync::Mutex<Option<CachedModelFamilies>>,
     ) -> Option<&'static str> {
         let key_hash = crate::hashing::sha256_hex(key.as_bytes());
-        let mut cached = cache.lock().ok()?;
-        if !cached.as_ref().is_some_and(|last| {
-            last.endpoint == self.base_url
-                && last.key_hash == key_hash
-                && last.checked.elapsed()
-                    < std::time::Duration::from_secs(if last.icon.is_some() { 3600 } else { 300 })
+        if let Some(icon) = cache.lock().ok().and_then(|cached| {
+            cached
+                .as_ref()
+                .filter(|last| {
+                    last.endpoint == self.base_url
+                        && last.key_hash == key_hash
+                        && last.checked.elapsed()
+                            < std::time::Duration::from_secs(if last.icon.is_some() {
+                                3600
+                            } else {
+                                300
+                            })
+                })
+                .map(|last| last.icon)
         }) {
-            let icon = self.fetch_model_icon(key);
+            return icon;
+        }
+        let icon = self.fetch_model_icon(key);
+        if let Ok(mut cached) = cache.lock() {
             *cached = Some(CachedModelFamilies {
                 endpoint: self.base_url.clone(),
                 key_hash,
@@ -116,7 +127,7 @@ impl Sub2ApiClient {
                 icon,
             });
         }
-        cached.as_ref()?.icon
+        icon
     }
 
     fn fetch_model_icon(&self, key: &str) -> Option<&'static str> {
