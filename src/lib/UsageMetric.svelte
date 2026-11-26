@@ -157,12 +157,13 @@
     }
 
     .usage-label-warning {
+      position: relative;
+      top: -1px;
       display: inline-block;
       margin-left: 4px;
       color: var(--meter-warning);
       font-style: normal;
       font-size: 9px;
-      transform: translateY(-1px);
     }
 
     .usage-divider {

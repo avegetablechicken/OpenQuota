@@ -127,4 +127,11 @@ describe('popover geometry contract', () => {
       /\.pointer-reorder-lift\.provider-section > \.provider-card,[\s\S]*box-shadow: 0 8px 28px rgba\(0, 0, 0, 0\.18\);/,
     );
   });
+
+  it('keeps usage warning tooltips out of a local stacking context so later rows do not paint over them', () => {
+    const warningRule = coLocatedComponentCss.match(/\.usage-label-warning\s*{([^}]*)}/s)?.[1] ?? '';
+    expect(warningRule).not.toContain('transform:');
+    expect(warningRule).not.toContain('z-index:');
+    expect(warningRule).toContain('top: -1px');
+  });
 });
