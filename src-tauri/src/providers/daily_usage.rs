@@ -187,6 +187,28 @@ impl DailyUsageAccumulator {
             .add(family, variant, tokens, cost);
     }
 
+    /// Adds usage whose cost covers only some of its tokens. The day keeps the partial dollars,
+    /// but the model's cost is incomplete, as if its unpriced part were added separately.
+    pub fn add_partially_priced(
+        &mut self,
+        date: NaiveDate,
+        tokens: u64,
+        cost: f64,
+        model: &str,
+        cost_estimated: bool,
+    ) {
+        let model = normalized_model_name(model);
+        self.add_internal(date, tokens, cost, model, None, cost_estimated);
+        if let Some(usage) = self
+            .days
+            .get_mut(&date)
+            .and_then(|day| day.models.get_mut(&model.to_lowercase()))
+        {
+            usage.cost_complete = false;
+        }
+        self.add_unknown_model(date, model);
+    }
+
     /// Keeps measured token history visible when the model has no usable pricing entry.
     pub fn add_unpriced(&mut self, date: NaiveDate, tokens: u64, model: &str) {
         if tokens == 0 {

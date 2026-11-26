@@ -242,16 +242,20 @@ fn aggregate_into(
             continue;
         }
         if let Some(cost) = record.cost {
-            match record.cost_provenance {
-                CostProvenance::Exact => {
-                    accumulator.add_exact(date, record.tokens, cost, &record.model)
-                }
-                CostProvenance::Estimated => {
-                    accumulator.add(date, record.tokens, cost, &record.model)
-                }
-            }
+            let estimated = record.cost_provenance == CostProvenance::Estimated;
             if record.incomplete_cost {
-                accumulator.add_unknown_model(date, &record.model);
+                // Only some steps are priced, so the model's cost must not read as complete.
+                accumulator.add_partially_priced(
+                    date,
+                    record.tokens,
+                    cost,
+                    &record.model,
+                    estimated,
+                );
+            } else if estimated {
+                accumulator.add(date, record.tokens, cost, &record.model);
+            } else {
+                accumulator.add_exact(date, record.tokens, cost, &record.model);
             }
             contributed = true;
         } else if record.tokens > 0 {
@@ -311,5 +315,31 @@ mod unit_tests {
 
         let estimated = aggregate_history(&[record(100, Some(1.0), false)], now);
         assert!(estimated.today.unwrap().cost_estimated);
+    }
+
+    #[test]
+    fn partially_priced_messages_leave_their_model_cost_incomplete() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        let mut partial = record(1_000, Some(0.1), true);
+        partial.incomplete_cost = true;
+        partial.priced_tokens = 100;
+        let mut priced = record(100, Some(1.0), true);
+        priced.key.1 = "priced".into();
+        priced.model = "priced-model".into();
+
+        let today = aggregate_history(&[partial, priced], now).today.unwrap();
+        assert_eq!(today.tokens, 1_100);
+        assert!((today.estimated_cost_usd.unwrap() - 1.1).abs() < 1e-9);
+        assert_eq!(today.unknown_models, ["model"]);
+        let models = today.model_breakdown.unwrap().models;
+        let cost = |name: &str| {
+            models
+                .iter()
+                .find(|entry| entry.model == name)
+                .map(|entry| entry.cost_usd)
+                .unwrap()
+        };
+        assert_eq!(cost("model"), None);
+        assert_eq!(cost("priced-model"), Some(1.0));
     }
 }
