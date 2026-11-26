@@ -70,6 +70,24 @@ describe('FloatingTooltip', () => {
     expect(tooltip.style.left).toBe('90px');
   });
 
+  it('hides when the hovered trigger is removed, which sends no mouseout', async () => {
+    render(FloatingTooltip);
+    const container = document.createElement('div');
+    const trigger = document.createElement('button');
+    trigger.dataset.tooltip = 'Back';
+    mockRect(trigger, { left: 20, top: 20, width: 20, height: 20 });
+    container.appendChild(trigger);
+    document.body.appendChild(container);
+
+    await fireEvent.mouseOver(trigger);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(document.querySelector('.floating-tooltip')).toHaveClass('floating-tooltip--visible');
+
+    container.remove();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.querySelector('.floating-tooltip')).toBeNull();
+  });
+
   it('flips above the trigger when near the bottom edge so the last row tooltip is never clipped', async () => {
     render(FloatingTooltip);
     const trigger = document.createElement('i');

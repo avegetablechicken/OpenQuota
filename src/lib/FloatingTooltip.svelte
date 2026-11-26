@@ -19,6 +19,20 @@
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
   let unmountTimer: ReturnType<typeof setTimeout> | undefined;
   let renderToken = 0;
+  // Removing a hovered element sends no mouseout, so watch for the target leaving
+  // the page while a tooltip is shown or pending.
+  let removalObserver: MutationObserver | undefined;
+
+  function watchTargetRemoval() {
+    removalObserver ??= new MutationObserver(() => {
+      if (activeTarget && !activeTarget.isConnected) hideNow();
+    });
+    removalObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function stopWatchingTargetRemoval() {
+    removalObserver?.disconnect();
+  }
 
   function findTooltipTarget(node: EventTarget | null): HTMLElement | null {
     let current: Element | null = node instanceof Element ? node : null;
@@ -66,6 +80,7 @@
     clearShowTimer();
     clearHideTimer();
     clearUnmountTimer();
+    stopWatchingTargetRemoval();
     activeTarget = null;
     visible = false;
     text = null;
@@ -77,6 +92,7 @@
     hideTimer = setTimeout(() => {
       hideTimer = undefined;
       renderToken += 1;
+      stopWatchingTargetRemoval();
       activeTarget = null;
       visible = false;
       clearUnmountTimer();
@@ -150,6 +166,7 @@
     clearShowTimer();
     visible = false;
     activeTarget = target;
+    watchTargetRemoval();
     showTimer = setTimeout(() => {
       showTimer = undefined;
       void reveal(target);
