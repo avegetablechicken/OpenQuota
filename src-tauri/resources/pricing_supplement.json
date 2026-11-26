@@ -347,6 +347,20 @@
       "cache_read_per_million": 0.3,
       "output_per_million": 15.0
     },
+    "kimi-k3.1-pro": {
+      "$comment": "Kimi platform published K3.1 Pro rates. No separate cache-write fee is listed, so cache writes use the input rate.",
+      "input_per_million": 2.0,
+      "cache_write_per_million": 2.0,
+      "cache_read_per_million": 0.2,
+      "output_per_million": 10.0
+    },
+    "kimi-k3.1-pro-highspeed": {
+      "$comment": "Kimi platform published K3.1 Pro Highspeed rates.",
+      "input_per_million": 4.0,
+      "cache_write_per_million": 4.0,
+      "cache_read_per_million": 0.2,
+      "output_per_million": 20.0
+    },
     "glm-5.3": {
       "$comment": "Z.ai's published GLM-5.3 API list price. Cached-input storage is separate and currently free; cache creation keeps the normal input token rate.",
       "input_per_million": 1.4,
@@ -478,7 +492,15 @@
     { "pattern": "^(?:cursor-)?grok-4\\.6(?:-(?:low|medium|high|xhigh))?$", "canonical": "grok-4.6" },
     { "pattern": "^kimi-k2\\.7(?:-code)?$", "canonical": "kimi-k2.7-code" },
     { "pattern": "^kimi-k2p7(?:-code)?$", "canonical": "kimi-k2.7-code" },
+    { "pattern": "^(?:kimi(?:-code|-coding)?|moonshot(?:-cn|ai)?)/(?:kimi-)?k2(?:\\.7|p7)(?:-code)?$", "canonical": "kimi-k2.7-code" },
+    { "pattern": "^kimi-k2p6$", "canonical": "moonshot/kimi-k2.6" },
+    { "pattern": "^(?:kimi(?:-code|-coding)?|moonshot(?:-cn|ai)?)/(?:kimi-)?k2(?:\\.6|p6)$", "canonical": "moonshot/kimi-k2.6" },
     { "pattern": "^kimi-k3(?:-code)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "kimi-k3" },
+    { "pattern": "^(?:kimi(?:-code|-coding)?|moonshot(?:-cn|ai)?)/(?:kimi-)?k3(?:-code)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "kimi-k3" },
+    { "pattern": "^kimi-k3\\.1-pro-highspeed(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "kimi-k3.1-pro-highspeed" },
+    { "pattern": "^(?:kimi(?:-code|-coding)?|moonshot(?:-cn|ai)?)/(?:kimi-)?k3\\.1-pro-highspeed(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "kimi-k3.1-pro-highspeed" },
+    { "pattern": "^kimi-k3\\.1-pro(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "kimi-k3.1-pro" },
+    { "pattern": "^(?:kimi(?:-code|-coding)?|moonshot(?:-cn|ai)?)/(?:kimi-)?k3\\.1-pro(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "kimi-k3.1-pro" },
     { "pattern": "^claude-4\\.5-haiku(?:-thinking)?$", "canonical": "claude-haiku-4-5" },
     { "pattern": "^claude-4\\.5-opus-(?:low|medium|high)(?:-thinking)?$", "canonical": "claude-opus-4-5" },
     { "pattern": "^claude-4-sonnet-1m(?:-thinking)?$", "canonical": "claude-4-sonnet-1m" },
@@ -546,6 +568,7 @@
     { "pattern": "^gpt-5\\.6-luna(?:-(?:none|low|medium|high|xhigh|max))?$", "canonical": "gpt-5.6-luna" },
     { "pattern": "^kimi-k2\\.5$", "canonical": "moonshot/kimi-k2.5" },
     { "pattern": "^kimi-k2p5$", "canonical": "moonshot/kimi-k2.5" },
+    { "pattern": "^(?:kimi(?:-code|-coding)?|moonshot(?:-cn|ai)?)/(?:kimi-)?k2(?:\\.5|p5)$", "canonical": "moonshot/kimi-k2.5" },
     { "pattern": "(?i)^glm-5\\.3-flash(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "glm-5.3-flash" },
     { "pattern": "(?i)^glm-5\\.3(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "glm-5.3" },
     { "pattern": "^glm-5\\.2(?:-(?:high|max))?$", "canonical": "glm-5.2" },

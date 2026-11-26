@@ -112,6 +112,14 @@ mod bundled_resource_tests {
         );
         assert_rates("claude-sonnet-5", [2.0, 2.5, 0.2, 10.0]);
         assert_rates("kimi-k3-code-max", [3.0, 3.0, 0.3, 15.0]);
+        assert_rates("kimi-code/k3", [3.0, 3.0, 0.3, 15.0]);
+        assert_rates("kimi-code/k3-max", [3.0, 3.0, 0.3, 15.0]);
+        assert_rates("kimi-code/k3.1-pro", [2.0, 2.0, 0.2, 10.0]);
+        assert_rates("kimi-code/k3.1-pro-highspeed", [4.0, 4.0, 0.2, 20.0]);
+        assert_rates("kimi-code/k2.7-code", [0.95, 0.95, 0.19, 4.0]);
+        assert_rates("moonshot-cn/kimi-k2.7-code", [0.95, 0.95, 0.19, 4.0]);
+        assert_rates("kimi-coding/k2p5", [0.6, 0.6, 0.1, 3.0]);
+        assert_rates("moonshot-cn/kimi-k2.6", [0.95, 0.95, 0.16, 4.0]);
         assert_rates("GLM-5.3-Flash-max", [0.15, 0.15, 0.03, 0.5]);
         assert_rates("glm-5.3-high", [1.4, 1.4, 0.26, 4.4]);
         assert_rates("cursor-grok-4.5-high-fast", [4.0, 4.0, 1.0, 12.0]);
@@ -159,5 +167,35 @@ mod bundled_resource_tests {
             )
             .unwrap();
         assert!(cost > 0.0);
+    }
+
+    #[test]
+    fn namespaced_kimi_aliases_resolve_through_historical_schedules() {
+        use chrono::{TimeZone, Utc};
+
+        let pricing = test_bundled_pricing();
+        let tokens = TokenBreakdown {
+            input: 1_000_000,
+            cache_read: 1_000_000,
+            output: 100_000,
+            ..TokenBreakdown::default()
+        };
+        let k3_date = Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap();
+        let k3_cost = pricing
+            .estimated_cost_at("kimi", "kimi-code/k3", k3_date, tokens, true)
+            .unwrap();
+        assert!((k3_cost - 4.8).abs() < 1e-6);
+
+        let k31_date = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+        let k31_cost = pricing
+            .estimated_cost_at("kimi", "kimi-code/k3.1-pro", k31_date, tokens, true)
+            .unwrap();
+        assert!((k31_cost - 3.2).abs() < 1e-6);
+
+        // Before K3.1 Pro's effective `from` date, the historical schedule reports unknown pricing.
+        let before_k31 = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        assert!(pricing
+            .estimated_cost_at("kimi", "kimi-code/k3.1-pro", before_k31, tokens, true)
+            .is_none());
     }
 }

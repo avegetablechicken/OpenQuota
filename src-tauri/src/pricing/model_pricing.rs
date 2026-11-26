@@ -108,8 +108,9 @@ impl ModelPricing {
                 .get(super::history::strip_snapshot(base))
                 .map(|rows| (rows, suffix_fast))
         };
-        let (rows, suffix_fast) =
-            lookup(name).or_else(|| self.supplement.canonical_name(name).and_then(lookup))?;
+        let (rows, suffix_fast) = lookup(name)
+            .or_else(|| self.supplement.canonical_name(name).and_then(lookup))
+            .or_else(|| self.supplement.canonical_name(&normalized).and_then(lookup))?;
         let tier = if suffix_fast && tier == ServiceTier::Standard {
             ServiceTier::Fast
         } else {
