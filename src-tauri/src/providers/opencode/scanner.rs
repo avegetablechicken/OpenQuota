@@ -230,9 +230,11 @@ fn aggregate_into(
             continue;
         }
         if record.is_other {
-            accumulator.add_other(
+            // A partial cost covers only its priced steps, so the rest stays unpriced.
+            accumulator.add_partially_priced_other(
                 date,
                 record.tokens,
+                record.priced_tokens,
                 record.cost,
                 record.cost_provenance == CostProvenance::Estimated,
                 &record.model,
@@ -283,6 +285,7 @@ mod unit_tests {
                 CostProvenance::Estimated
             },
             incomplete_cost: cost.is_none(),
+            priced_tokens: if cost.is_some() { tokens } else { 0 },
             is_other: false,
         }
     }

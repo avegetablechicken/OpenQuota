@@ -923,3 +923,52 @@ fn ollama_stays_unpriced_in_opencode_others_and_kimi_short_aliases_route_to_kimi
         .unwrap());
     assert_eq!(kimi_acc.build(now(), "test").today.unwrap().tokens, 1500);
 }
+
+#[test]
+fn partially_priced_others_steps_keep_their_unpriced_tokens() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("opencode.db");
+    let connection = create_database(&path, true);
+    insert_message(
+        &connection,
+        "session",
+        "other-partial",
+        timestamp(),
+        r#"{"role":"assistant","providerID":"openai","modelID":"deepseek-v4-flash","cost":null}"#,
+    );
+    for (part, cost, input) in [
+        ("part-priced", serde_json::json!(0.5), 100_u64),
+        ("part-unpriced", serde_json::Value::Null, 300),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    part,
+                    "other-partial",
+                    "session",
+                    timestamp(),
+                    serde_json::json!({
+                        "type": "step-finish",
+                        "cost": cost,
+                        "tokens": {
+                            "input": input,
+                            "output": 0,
+                            "reasoning": 0,
+                            "cache": {"read": 0, "write": 0}
+                        }
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let other = scan(vec![path]).usage.other_usage.unwrap().today.unwrap();
+    assert_eq!(other.tokens, 400);
+    assert_eq!(other.priced_tokens, 100);
+    assert_eq!(other.estimated_cost_usd, Some(0.5));
+    assert!(!other.estimate_complete);
+}

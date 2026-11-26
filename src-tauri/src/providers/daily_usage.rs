@@ -223,6 +223,19 @@ impl DailyUsageAccumulator {
         cost_estimated: bool,
         model: &str,
     ) {
+        self.add_partially_priced_other(date, tokens, tokens, cost, cost_estimated, model);
+    }
+
+    /// Adds Others usage whose cost covers only `priced_tokens` of its `tokens`.
+    pub fn add_partially_priced_other(
+        &mut self,
+        date: NaiveDate,
+        tokens: u64,
+        priced_tokens: u64,
+        cost: Option<f64>,
+        cost_estimated: bool,
+        model: &str,
+    ) {
         let cost = cost.filter(|value| value.is_finite() && *value >= 0.0);
         if tokens == 0 && cost.is_none_or(|value| value == 0.0) {
             return;
@@ -234,7 +247,11 @@ impl DailyUsageAccumulator {
             .or_default()
             .merge(&OtherModelUsage {
                 tokens,
-                priced_tokens: if cost.is_some() { tokens } else { 0 },
+                priced_tokens: if cost.is_some() {
+                    priced_tokens.min(tokens)
+                } else {
+                    0
+                },
                 estimated_cost_usd: cost,
                 cost_estimated: cost.is_some() && cost_estimated,
             });

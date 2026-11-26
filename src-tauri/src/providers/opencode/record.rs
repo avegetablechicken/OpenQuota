@@ -65,6 +65,8 @@ pub(crate) struct UsageRecord {
     pub(crate) cost: Option<f64>,
     pub(crate) cost_provenance: CostProvenance,
     pub(crate) incomplete_cost: bool,
+    /// The part of `tokens` covered by `cost`; lower than `tokens` when the cost is partial.
+    pub(crate) priced_tokens: u64,
     pub(crate) is_other: bool,
 }
 
@@ -91,8 +93,8 @@ impl ParsedMessage {
             .filter(|tokens| tokens.total > 0 || part_tokens.total == 0)
             .unwrap_or(part_tokens);
 
-        let (cost, cost_provenance, incomplete_cost) = match self.cost {
-            StoredCost::Exact(cost) => (Some(cost), CostProvenance::Exact, false),
+        let (cost, cost_provenance, incomplete_cost, priced_part_tokens) = match self.cost {
+            StoredCost::Exact(cost) => (Some(cost), CostProvenance::Exact, false, tokens.total),
             StoredCost::Invalid | StoredCost::Missing if !parts.is_empty() => cost_from_parts(
                 parts,
                 self.timestamp,
@@ -100,7 +102,7 @@ impl ParsedMessage {
                 &self.model,
                 pricing,
             ),
-            StoredCost::Invalid => (None, CostProvenance::Exact, tokens.total > 0),
+            StoredCost::Invalid => (None, CostProvenance::Exact, tokens.total > 0, 0),
             StoredCost::Missing => estimate_cost(
                 pricing,
                 self.timestamp,
@@ -109,9 +111,19 @@ impl ParsedMessage {
                 tokens.breakdown,
             )
             .map_or(
-                (None, CostProvenance::Estimated, tokens.total > 0),
-                |cost| (Some(cost), CostProvenance::Estimated, false),
+                (None, CostProvenance::Estimated, tokens.total > 0, 0),
+                |cost| (Some(cost), CostProvenance::Estimated, false, tokens.total),
             ),
+        };
+        let priced_tokens = if cost.is_none() {
+            0
+        } else if !incomplete_cost {
+            tokens.total
+        } else if priced_part_tokens < tokens.total {
+            priced_part_tokens
+        } else {
+            // The unpriced steps are not measurable against the message total.
+            0
         };
 
         UsageRecord {
@@ -122,6 +134,7 @@ impl ParsedMessage {
             cost,
             cost_provenance,
             incomplete_cost,
+            priced_tokens,
             is_other: self.is_other,
         }
     }
@@ -267,16 +280,19 @@ fn cost_from_parts(
     provider_id: &str,
     model: &str,
     pricing: &ModelPricing,
-) -> (Option<f64>, CostProvenance, bool) {
+) -> (Option<f64>, CostProvenance, bool, u64) {
     let mut total = 0.0;
     let mut has_cost = false;
     let mut estimated = false;
     let mut incomplete = false;
+    let mut priced_tokens = 0_u64;
     for part in parts {
+        let part_tokens = part.tokens.map_or(0, |tokens| tokens.total);
         match part.cost {
             StoredCost::Exact(cost) => {
                 total += cost;
                 has_cost = true;
+                priced_tokens = priced_tokens.saturating_add(part_tokens);
             }
             StoredCost::Missing => {
                 let estimate = part.tokens.and_then(|tokens| {
@@ -286,7 +302,8 @@ fn cost_from_parts(
                     total += cost;
                     has_cost = true;
                     estimated = true;
-                } else if part.tokens.is_some_and(|tokens| tokens.total > 0) {
+                    priced_tokens = priced_tokens.saturating_add(part_tokens);
+                } else if part_tokens > 0 {
                     incomplete = true;
                 }
             }
@@ -301,6 +318,7 @@ fn cost_from_parts(
             CostProvenance::Exact
         },
         incomplete,
+        priced_tokens,
     )
 }
 
