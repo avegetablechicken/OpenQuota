@@ -40,7 +40,6 @@ pub(crate) enum ZCodeProvider {
     Grok,
     Kimi,
     MiniMax,
-    OpenRouter,
     Zai,
 }
 
@@ -304,7 +303,6 @@ fn add_event(
         ZCodeProvider::Grok => "grok",
         ZCodeProvider::Kimi => "kimi",
         ZCodeProvider::MiniMax => "minimax",
-        ZCodeProvider::OpenRouter => "openrouter",
         ZCodeProvider::Zai => "zai",
     };
     let variant_model = event
@@ -385,7 +383,6 @@ fn provider_kind(provider_id: &str, config: Option<&ZCodeProviderConfig>) -> Opt
         return Some(ZCodeProvider::Zai);
     }
     for (marker, provider) in [
-        ("openrouter", ZCodeProvider::OpenRouter),
         ("anthropic", ZCodeProvider::Claude),
         ("claude", ZCodeProvider::Claude),
         ("openai", ZCodeProvider::Codex),
@@ -418,9 +415,6 @@ fn provider_kind(provider_id: &str, config: Option<&ZCodeProviderConfig>) -> Opt
 fn provider_from_metadata(name: &str, base_url: &str) -> Option<ZCodeProvider> {
     let contains_any =
         |haystack: &str, needles: &[&str]| needles.iter().any(|needle| haystack.contains(needle));
-    if contains_any(base_url, &["openrouter.ai"]) || name.trim() == "openrouter" {
-        return Some(ZCodeProvider::OpenRouter);
-    }
     if contains_any(
         base_url,
         &["api.z.ai", "open.bigmodel.cn", "zcode.z.ai", "zhipuai.cn"],
@@ -529,19 +523,26 @@ mod tests {
 
     #[test]
     fn provider_mapping_uses_upstream_metadata_and_skips_delegated_clis() {
-        let config: ZCodeProviderConfig = serde_json::from_str(
-            r#"{"name":"OpenRouter mirror","options":{"baseURL":"https://openrouter.ai/api/v1"}}"#,
+        let kimi: ZCodeProviderConfig = serde_json::from_str(
+            r#"{"name":"Kimi mirror","options":{"baseURL":"https://api.kimi.com/coding/v1"}}"#,
         )
         .unwrap();
         assert_eq!(
-            provider_kind("custom-id", Some(&config)),
-            Some(ZCodeProvider::OpenRouter)
+            provider_kind("custom-id", Some(&kimi)),
+            Some(ZCodeProvider::Kimi)
         );
         assert_eq!(
             provider_kind("builtin:zai-coding-plan", None),
             Some(ZCodeProvider::Zai)
         );
         assert_eq!(provider_kind("builtin:codex-cli", None), None);
+
+        let openrouter: ZCodeProviderConfig = serde_json::from_str(
+            r#"{"name":"OpenRouter mirror","options":{"baseURL":"https://openrouter.ai/api/v1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(provider_kind("openrouter", None), None);
+        assert_eq!(provider_kind("custom-id", Some(&openrouter)), None);
 
         let unrelated: ZCodeProviderConfig = serde_json::from_str(
             r#"{"name":"Bailian","options":{"baseURL":"https://dashscope.aliyuncs.com/v1"}}"#,

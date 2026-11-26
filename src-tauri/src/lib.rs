@@ -903,8 +903,7 @@ pub fn run() {
                 Arc::new(GrokProvider::new(storage.clone(), pricing.clone())?)
                     as Arc<dyn UsageProvider>,
                 Arc::new(OpenCodeProvider::new(pricing.clone())) as Arc<dyn UsageProvider>,
-                Arc::new(OpenRouterProvider::new(storage.clone(), pricing.clone())?)
-                    as Arc<dyn UsageProvider>,
+                Arc::new(OpenRouterProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(ZaiProvider::new(storage.clone(), pricing.clone())?)
                     as Arc<dyn UsageProvider>,
                 Arc::new(KimiProvider::new(storage.clone(), pricing.clone())?)
