@@ -163,7 +163,24 @@ fn load_local_events(
         );
     }
     storage.prune_log_events("kimi", &seen_paths)?;
-    Ok(events)
+    Ok(deduplicate(events))
+}
+
+fn deduplicate(events: Vec<KimiTokenEvent>) -> Vec<KimiTokenEvent> {
+    let mut seen = HashSet::with_capacity(events.len());
+    events
+        .into_iter()
+        .filter(|event| {
+            seen.insert((
+                event.timestamp,
+                event.model.clone(),
+                event.input,
+                event.cache_write,
+                event.cache_read,
+                event.output,
+            ))
+        })
+        .collect()
 }
 
 fn discover_wire_files(roots: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
@@ -215,12 +232,12 @@ fn session_dedup_key(path: &Path, sessions_dir: &Path) -> Option<String> {
     let relative = path.strip_prefix(sessions_dir).ok()?;
     for component in relative.components() {
         let name = component.as_os_str().to_str()?;
-        if let Some(uuid) = name.strip_prefix("session_") {
-            if looks_like_uuid(uuid) {
-                return Some(uuid.to_ascii_lowercase());
-            }
-        } else if looks_like_uuid(name) {
-            return Some(name.to_ascii_lowercase());
+        let candidate = name
+            .strip_prefix("session_")
+            .or_else(|| name.strip_prefix("ses_"))
+            .unwrap_or(name);
+        if looks_like_uuid(candidate) {
+            return Some(candidate.to_ascii_lowercase());
         }
     }
     None
@@ -949,6 +966,101 @@ mod tests {
         let mut third = DailyUsageAccumulator::default();
         assert!(scan_roots_into(&storage, &roots, now, &pricing, "kimi", &mut third).unwrap());
         assert_eq!(third.build(now, "test").today.unwrap().tokens, 11_000);
+    }
+
+    #[test]
+    fn ses_prefixed_sessions_deduplicate_against_legacy_kimi_root() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("openquota.db")).unwrap();
+        let pricing = test_bundled_pricing();
+        let now = Utc.with_ymd_and_hms(2026, 7, 23, 12, 0, 0).unwrap();
+
+        let code_root = dir.path().join(".kimi-code");
+        let legacy_root = dir.path().join(".kimi");
+        let uuid = "423f0afc-b11b-423e-8164-4f21b2c862d8";
+
+        let code_wire = code_root
+            .join("sessions")
+            .join("wd_repo")
+            .join(format!("ses_{uuid}"))
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        let legacy_wire = legacy_root
+            .join("sessions")
+            .join("hash_a")
+            .join(uuid)
+            .join("wire.jsonl");
+        fs::create_dir_all(code_wire.parent().unwrap()).unwrap();
+        fs::create_dir_all(legacy_wire.parent().unwrap()).unwrap();
+        fs::write(
+            &code_wire,
+            kimi_code_wire(now.timestamp_millis(), "kimi-code/k3", [10_000, 1_000, 0, 0]),
+        )
+        .unwrap();
+        fs::write(
+            &legacy_wire,
+            legacy_kimi_wire(
+                now.timestamp() as f64 + 1.0,
+                Some("kimi-code/k3"),
+                [10_000, 1_000, 0, 0],
+            ),
+        )
+        .unwrap();
+
+        let roots = [code_root, legacy_root];
+        let mut accumulator = DailyUsageAccumulator::default();
+        assert!(
+            scan_roots_into(&storage, &roots, now, &pricing, "kimi", &mut accumulator).unwrap()
+        );
+        assert_eq!(accumulator.build(now, "test").today.unwrap().tokens, 11_000);
+    }
+
+    #[test]
+    fn duplicate_events_in_same_or_copied_wire_files_are_counted_once() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("openquota.db")).unwrap();
+        let pricing = test_bundled_pricing();
+        let now = Utc.with_ymd_and_hms(2026, 7, 23, 12, 0, 0).unwrap();
+        let ts_ms = now.timestamp_millis();
+
+        let code_root = dir.path().join(".kimi-code");
+        let wire_a = code_root
+            .join("sessions")
+            .join("wd_a")
+            .join("custom-dir-a")
+            .join("wire.jsonl");
+        let wire_b = code_root
+            .join("sessions")
+            .join("wd_b")
+            .join("custom-dir-b")
+            .join("wire.jsonl");
+        fs::create_dir_all(wire_a.parent().unwrap()).unwrap();
+        fs::create_dir_all(wire_b.parent().unwrap()).unwrap();
+
+        let record_and_legacy = [
+            kimi_code_wire(ts_ms, "kimi-code/k3", [50_000, 5_000, 0, 0]),
+            legacy_kimi_wire(
+                ts_ms as f64 / 1000.0,
+                Some("kimi-code/k3"),
+                [50_000, 5_000, 0, 0],
+            ),
+        ]
+        .join("\n");
+        fs::write(&wire_a, &record_and_legacy).unwrap();
+        fs::write(&wire_b, &record_and_legacy).unwrap();
+
+        let mut accumulator = DailyUsageAccumulator::default();
+        assert!(scan_roots_into(
+            &storage,
+            std::slice::from_ref(&code_root),
+            now,
+            &pricing,
+            "kimi",
+            &mut accumulator,
+        )
+        .unwrap());
+        assert_eq!(accumulator.build(now, "test").today.unwrap().tokens, 55_000);
     }
 
     #[test]
