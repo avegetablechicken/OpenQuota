@@ -93,6 +93,39 @@ describe('ValueMetric', () => {
     expect(screen.getByText('Expiry times unavailable')).toBeInTheDocument();
   });
 
+  it('opens a clicked reset-expiry timeline below its trigger', async () => {
+    render(ValueMetric, {
+      label: 'Rate Limit Resets',
+      metric: {
+        id: 'rateLimitResets',
+        label: 'Rate Limit Resets',
+        values: [{ number: 2, kind: 'count', label: 'available', estimated: false }],
+        expiriesAt: ['2026-02-20T19:00:00Z', '2026-02-20T17:30:00Z'],
+      },
+      now: Date.parse('2026-02-20T16:00:00Z'),
+      resetDisplay: 'countdown',
+      timeFormat: 'twentyFourHour',
+    });
+    const trigger = screen.getByRole('button', { name: 'Rate Limit Resets: 2 available' });
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      top: 240,
+      bottom: 260,
+      left: 0,
+      right: 100,
+      width: 100,
+      height: 20,
+      x: 0,
+      y: 240,
+      toJSON: () => ({}),
+    });
+
+    await fireEvent.click(trigger);
+
+    expect(screen.getByRole('dialog', { name: 'Rate Limit Resets details' }).style.top).toBe(
+      '267px',
+    );
+  });
+
   it('requires confirmation and claims one explicitly selected reset credit', async () => {
     mocks.invoke.mockResolvedValue('success');
     render(ValueMetric, {

@@ -40,6 +40,48 @@ describe('UsageMetric model detail', () => {
     expect(detail).toHaveTextContent('25%');
   });
 
+  it('places the detail where the reading is when it opens, after a scroll during the dwell', async () => {
+    vi.useFakeTimers();
+    render(UsageMetric, {
+      label: 'Today',
+      period: {
+        tokens: 2_000,
+        estimatedCostUsd: 0.04,
+        costEstimated: true,
+        estimateComplete: true,
+        unknownModels: [],
+        modelBreakdown: {
+          sourceNote: 'From your Codex logs (estimated)',
+          models: [
+            { model: 'gpt-5.4', totalTokens: 1_100, costUsd: 0.03 },
+            { model: 'gpt-5.3-codex', totalTokens: 900, costUsd: 0.01 },
+          ],
+        },
+      },
+    });
+    const reading = screen.getByRole('button', { name: '$0.04 · 2K tokens' });
+    const at = (top: number) =>
+      vi.spyOn(reading, 'getBoundingClientRect').mockReturnValue({
+        top,
+        bottom: top + 20,
+        left: 0,
+        right: 100,
+        width: 100,
+        height: 20,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      });
+
+    at(20);
+    await fireEvent.mouseEnter(reading);
+    at(200);
+    await vi.advanceTimersByTimeAsync(400);
+
+    // Below the reading's current position, not where it was when the hover began.
+    expect(screen.getByRole('tooltip', { name: 'Today model usage' }).style.top).toBe('227px');
+  });
+
   it('ranks subscription model details by token share and keeps fees out of the card', async () => {
     vi.useFakeTimers();
     render(UsageMetric, {

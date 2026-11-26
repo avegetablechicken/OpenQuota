@@ -74,6 +74,15 @@
     if (!showsResetDetail || detailOpen || showTimer) return;
     if (hideTimer) clearTimeout(hideTimer);
     const target = event.currentTarget as HTMLElement;
+    showTimer = setTimeout(() => {
+      showTimer = undefined;
+      if (!target.isConnected || !showsResetDetail) return;
+      // Measure when opening: the page may have scrolled during the delay.
+      placeDetail(target);
+      detailOpen = true;
+    }, 350);
+  }
+  function placeDetail(target: HTMLElement) {
     const rect = target.getBoundingClientRect();
     const estimatedHeight = Math.min(72 + (metric?.expiriesAt.length ?? 0) * 34, 340);
     detailAnchor = { top: rect.top, bottom: rect.bottom };
@@ -81,10 +90,6 @@
       preferred: 'below',
       gap: 7,
     });
-    showTimer = setTimeout(() => {
-      detailOpen = true;
-      showTimer = undefined;
-    }, 350);
   }
   function scheduleHide() {
     if (showTimer) clearTimeout(showTimer);
@@ -105,9 +110,11 @@
       detailOpen = false;
       return;
     }
-    scheduleShow(event);
     if (showTimer) clearTimeout(showTimer);
     showTimer = undefined;
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = undefined;
+    placeDetail(event.currentTarget as HTMLElement);
     detailOpen = true;
   }
   async function dismissDetail({ restoreFocus = false } = {}) {

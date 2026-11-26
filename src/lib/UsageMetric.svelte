@@ -48,16 +48,18 @@
     if (!period?.modelBreakdown?.models.length || open || showTimer) return;
     if (hideTimer) clearTimeout(hideTimer);
     const target = event.currentTarget as HTMLElement;
-    const rect = target.getBoundingClientRect();
-    const estimatedHeight = Math.min(86 + period.modelBreakdown.models.length * 52, 360);
-    detailAnchor = { top: rect.top, bottom: rect.bottom };
-    detailTop = computeFixedPopoverTop(detailAnchor, estimatedHeight, window.innerHeight, {
-      preferred: 'below',
-      gap: 7,
-    });
     showTimer = setTimeout(() => {
-      open = true;
       showTimer = undefined;
+      if (!target.isConnected || !period?.modelBreakdown?.models.length) return;
+      // Measure when opening: the page may have scrolled during the delay.
+      const rect = target.getBoundingClientRect();
+      const estimatedHeight = Math.min(86 + period.modelBreakdown.models.length * 52, 360);
+      detailAnchor = { top: rect.top, bottom: rect.bottom };
+      detailTop = computeFixedPopoverTop(detailAnchor, estimatedHeight, window.innerHeight, {
+        preferred: 'below',
+        gap: 7,
+      });
+      open = true;
     }, 400);
   }
   function scheduleHide() {
