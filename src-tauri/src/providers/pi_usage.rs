@@ -20,7 +20,7 @@ use super::{
     model_scope::{card_for_model, model_belongs_to_card},
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 7;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 8;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum PiUsageSource {
@@ -267,7 +267,7 @@ fn mapped_card(provider: &str, model: &str) -> Option<&'static str> {
         "kimi" | "moonshot" | "moonshotai" => Some("kimi"),
         "minimax" => Some("minimax"),
         "zai" | "z-ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
-        "google-antigravity" | "antigravity" => Some("antigravity"),
+        "google-antigravity" | "antigravity" | "antigravity-cli" => Some("antigravity"),
         _ => None,
     }
 }
@@ -501,6 +501,14 @@ mod tests {
         assert_eq!(
             mapped_card("google-antigravity", "gemini-3-pro"),
             Some("antigravity")
+        );
+        assert_eq!(
+            mapped_card("antigravity-cli", "gemini-3-pro"),
+            Some("antigravity")
+        );
+        assert_eq!(
+            mapped_card("antigravity-cli", "claude-sonnet-5"),
+            Some("claude")
         );
         assert_eq!(mapped_card("deepseek", "deepseek-v4"), None);
         assert_eq!(mapped_card("cursor", "cursor-small"), None);
