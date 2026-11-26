@@ -6,6 +6,7 @@
   import { formatSpendValue, totalSpendRingCenter } from './metricFormat';
   import { popupMenu } from './nativeMenu';
   import SelectMenu from './SelectMenu.svelte';
+  import { dashboardKeyshortcuts } from './dashboardShortcuts';
   import type { ProviderCatalogIndex } from './metrics';
   import { TOTAL_SPEND_GEOMETRY } from './shareCard';
   import { ringSectorPath, spendRingArcs } from './spendRing';
@@ -34,6 +35,7 @@
   }
   let { providers, settings, catalog, viewMode, onViewModeChange, onChange, onShare }: Props =
     $props();
+  const keyshortcuts = dashboardKeyshortcuts();
   const providerDisplayName = (id: string) => {
     if (id === OTHERS_SPEND_ID) return 'Others';
     if (id === UNPRICED_OTHERS_SPEND_ID) return 'Others (unpriced)';
@@ -273,11 +275,16 @@
           { value: 'account', label: 'Accounts' },
         ]}
         onChange={(value) => onViewModeChange(value as UsageViewMode)}
+        keyshortcuts={keyshortcuts?.view}
       />
     </div>
   </div>
   <div class="total-card">
-    <div class="period-switcher" aria-label="Total Spend period">
+    <div
+      class="period-switcher"
+      aria-label="Total Spend period"
+      aria-keyshortcuts={keyshortcuts?.period}
+    >
       <span
         class="period-switcher__selection"
         style={`transform: translateX(${periodIndex * 100}%)`}

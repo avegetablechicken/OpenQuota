@@ -38,6 +38,7 @@
   import CustomizeProviderList from './lib/CustomizeProviderList.svelte';
   import ConfirmationSheet from './lib/ConfirmationSheet.svelte';
   import { restoreCustomization } from './lib/customizationHistory';
+  import { handleDashboardShortcut, hasDashboardShortcuts } from './lib/dashboardShortcuts';
   import Dashboard from './lib/Dashboard.svelte';
   import FloatingTooltip from './lib/FloatingTooltip.svelte';
   import Icon from './lib/Icon.svelte';
@@ -777,6 +778,14 @@
       mutationObserver.observe(popover, { childList: true, subtree: true, characterData: true });
     }
     observePanelParts();
+    // Capture so Option-Command arrows move the dashboard switchers before a
+    // focused reorder handle treats Alt+Arrow as its own shortcut. The screen
+    // check drops the keys while a previous dashboard is still animating out.
+    // Only macOS registers them; see dashboardShortcuts.
+    const handleDashboardKeydown = (event: KeyboardEvent) => {
+      if (screen !== 'dashboard') return;
+      handleDashboardShortcut(event);
+    };
     const handleKeydown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return;
       if (event.key === 'Escape') {
@@ -830,6 +839,9 @@
         quitApp();
       }
     };
+    if (hasDashboardShortcuts(platform)) {
+      document.addEventListener('keydown', handleDashboardKeydown, true);
+    }
     document.addEventListener('keydown', handleKeydown);
     // Held open by keyboard navigation of the menu bar (macOS 27), the window
     // passes on the ←/→ it does not use; see menuKeys.
@@ -927,6 +939,7 @@
       disposed = true;
       document.removeEventListener('visibilitychange', observeFirstFrame);
       cancelAnimationFrame(frame);
+      document.removeEventListener('keydown', handleDashboardKeydown, true);
       document.removeEventListener('keydown', handleKeydown);
       document.removeEventListener('keydown', handleMenuKeydown);
       window.clearInterval(clock);

@@ -11,6 +11,13 @@
   import Icon from './Icon.svelte';
   import MetricRenderer from './MetricRenderer.svelte';
   import TotalSpend from './TotalSpend.svelte';
+  import {
+    bindDashboardShortcuts,
+    SPEND_PERIODS,
+    stepCycle,
+    USAGE_VIEW_MODES,
+    type DashboardShortcut,
+  } from './dashboardShortcuts';
   import { UPSTREAM_ACCOUNT_HEADER_STYLE } from './shareCard';
   import type { SpendProjection } from './totalSpend';
   import type { ProviderCatalogIndex } from './metrics';
@@ -503,6 +510,17 @@
     const remainingMinutes = minutes % 60;
     return `Last updated ${hours}h${remainingMinutes ? ` ${remainingMinutes}m` : ''} ago`;
   }
+  function applyDashboardShortcut(shortcut: DashboardShortcut) {
+    if (shortcut.kind === 'period') {
+      onSettingsChange({
+        ...settings,
+        totalSpendPeriod: stepCycle(SPEND_PERIODS, settings.totalSpendPeriod, shortcut.direction),
+      });
+      return;
+    }
+    usageViewMode = stepCycle(USAGE_VIEW_MODES, usageViewMode, shortcut.direction);
+  }
+  $effect(() => bindDashboardShortcuts(applyDashboardShortcut));
 </script>
 
 {#if updateStatus?.available && updateStatus.version !== settings.dismissedUpdateVersion}

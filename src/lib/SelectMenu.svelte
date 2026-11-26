@@ -14,9 +14,18 @@
     onChange: (value: string) => void;
     variant?: 'field' | 'title';
     disabled?: boolean;
+    keyshortcuts?: string;
   }
 
-  let { label, value, options, onChange, variant = 'field', disabled = false }: Props = $props();
+  let {
+    label,
+    value,
+    options,
+    onChange,
+    variant = 'field',
+    disabled = false,
+    keyshortcuts,
+  }: Props = $props();
   let pullDown = $state<HTMLButtonElement>();
   const selectedLabel = $derived(options.find((option) => option.value === value)?.label ?? value);
 
@@ -60,6 +69,7 @@
       class="select-menu__trigger"
       aria-label={label}
       aria-haspopup="menu"
+      aria-keyshortcuts={keyshortcuts}
       {disabled}
       bind:this={pullDown}
       onclick={openPullDown}

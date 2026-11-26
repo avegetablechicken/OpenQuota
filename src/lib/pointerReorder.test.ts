@@ -186,6 +186,23 @@ describe('pointer reorder interaction', () => {
     action.destroy();
   });
 
+  it('leaves Option-Command arrows for the dashboard switchers', async () => {
+    const { source, grip } = reorderFixture();
+    const onReorder = vi.fn();
+    const action = pointerReorder(source, {
+      id: 'first',
+      group: 'test',
+      gripOnly: true,
+      onReorder,
+    });
+
+    grip.focus();
+    await fireEvent.keyDown(grip, { key: 'ArrowDown', altKey: true, metaKey: true });
+
+    expect(onReorder).not.toHaveBeenCalled();
+    action.destroy();
+  });
+
   it('keeps the lifted preview inside the visible window', async () => {
     const { source, header } = reorderFixture();
     const previewButton = document.createElement('button');

@@ -1059,6 +1059,107 @@ describe('OpenQuota dashboard', () => {
     );
   });
 
+  it('switches Today, Yesterday, and 30 Days, and All, Device, and Accounts, with Option-Command arrows', async () => {
+    const userAgent = navigator.userAgent;
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    });
+    try {
+      await checkDashboardShortcuts();
+    } finally {
+      Object.defineProperty(navigator, 'userAgent', { configurable: true, value: userAgent });
+    }
+  });
+
+  it('leaves Meta-Alt arrows alone outside macOS', async () => {
+    const userAgent = navigator.userAgent;
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    });
+    try {
+      render(App);
+      await screen.findByText('Plus');
+      expect(document.querySelector('.period-switcher')).not.toHaveAttribute('aria-keyshortcuts');
+      const scope = screen.getByRole('button', { name: 'Usage Scope' });
+      expect(scope).not.toHaveAttribute('aria-keyshortcuts');
+
+      const arrow = new KeyboardEvent('keydown', {
+        key: 'ArrowRight',
+        altKey: true,
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(arrow);
+      await fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true, metaKey: true });
+      expect(arrow.defaultPrevented).toBe(false);
+      expect(screen.getByRole('button', { name: 'Today' })).toHaveClass('active');
+      expect(scope).toHaveTextContent('All');
+    } finally {
+      Object.defineProperty(navigator, 'userAgent', { configurable: true, value: userAgent });
+    }
+  });
+
+  async function checkDashboardShortcuts() {
+    render(App);
+    await screen.findByText('Plus');
+    expect(document.querySelector('.period-switcher')).toHaveAttribute(
+      'aria-keyshortcuts',
+      'Alt+Meta+ArrowLeft Alt+Meta+ArrowRight',
+    );
+    const scope = screen.getByRole('button', { name: 'Usage Scope' });
+    expect(scope).toHaveAttribute('aria-keyshortcuts', 'Alt+Meta+ArrowUp Alt+Meta+ArrowDown');
+    expect(scope).toHaveTextContent('All');
+    expect(screen.getByRole('button', { name: 'Today' })).toHaveClass('active');
+
+    await fireEvent.keyDown(document, { key: 'ArrowRight', altKey: true, metaKey: true });
+    expect(screen.getByRole('button', { name: 'Yesterday' })).toHaveClass('active');
+    await fireEvent.keyDown(document, { key: 'ArrowRight', altKey: true, metaKey: true });
+    expect(screen.getByRole('button', { name: '30 Days' })).toHaveClass('active');
+    await fireEvent.keyDown(document, { key: 'ArrowRight', altKey: true, metaKey: true });
+    expect(screen.getByRole('button', { name: 'Today' })).toHaveClass('active');
+    await fireEvent.keyDown(document, { key: 'ArrowLeft', altKey: true, metaKey: true });
+    expect(screen.getByRole('button', { name: '30 Days' })).toHaveClass('active');
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        'save_app_settings',
+        expect.objectContaining({
+          settings: expect.objectContaining({ totalSpendPeriod: 'last30Days' }),
+        }),
+      ),
+    );
+
+    await fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true, metaKey: true });
+    expect(scope).toHaveTextContent('Device');
+    expect(screen.queryByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
+    await fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true, metaKey: true });
+    expect(scope).toHaveTextContent('Accounts');
+    expect(screen.queryByRole('group', { name: 'Codex provider' })).not.toBeInTheDocument();
+    await fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true, metaKey: true });
+    expect(scope).toHaveTextContent('All');
+    expect(screen.getByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
+    await fireEvent.keyDown(document, { key: 'ArrowUp', altKey: true, metaKey: true });
+    expect(scope).toHaveTextContent('Accounts');
+
+    await fireEvent.keyDown(document, { key: 'ArrowLeft', altKey: true });
+    await fireEvent.keyDown(document, { key: 'ArrowUp', metaKey: true });
+    expect(screen.getByRole('button', { name: '30 Days' })).toHaveClass('active');
+    expect(scope).toHaveTextContent('Accounts');
+
+    const periodSaves = () =>
+      mocks.invoke.mock.calls.filter(([command]) => command === 'save_app_settings').length;
+    const savesBeforeSettings = periodSaves();
+    await openOptions();
+    await chooseMenuItem('Settings');
+    await screen.findByRole('button', { name: 'Back' });
+    await fireEvent.keyDown(document, { key: 'ArrowRight', altKey: true, metaKey: true });
+    await fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true, metaKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(periodSaves()).toBe(savesBeforeSettings);
+  }
+
   it('explains unavailable cost and reveals measured tokens for the same period', async () => {
     mockInvoke((command: string, args?: { settings?: SettingsViewState['settings'] }) => {
       if (command === 'get_usage_state')

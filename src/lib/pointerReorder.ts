@@ -219,7 +219,15 @@ export function pointerReorder(node: HTMLElement, initialOptions: PointerReorder
   let options = initialOptions;
 
   function keyDown(event: KeyboardEvent) {
-    if (options.disabled || activeCleanup || !event.altKey) return;
+    if (
+      options.disabled ||
+      activeCleanup ||
+      !event.altKey ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey
+    )
+      return;
     const direction = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
     if (direction === 0) return;
     const grip =
