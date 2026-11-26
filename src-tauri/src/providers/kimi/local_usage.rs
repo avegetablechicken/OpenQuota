@@ -15,7 +15,10 @@ use crate::{
     providers::{
         daily_usage::DailyUsageAccumulator,
         log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
-        model_scope::{card_for_model, native_log_disposition, LocalModelDisposition},
+        model_scope::{
+            card_for_model, is_local_runtime_provider, native_log_disposition,
+            LocalModelDisposition,
+        },
     },
     storage::Storage,
 };
@@ -574,6 +577,23 @@ fn aggregate_into(
         }
         let tokens = event.pricing_tokens();
 
+        // Local runtimes are free and never route to a paid card; keep them as unpriced Others.
+        if event
+            .provider
+            .as_deref()
+            .is_some_and(is_local_runtime_provider)
+        {
+            if card_id == "kimi" {
+                let model = event
+                    .model
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("Unattributed");
+                accumulator.add_other(date, total, None, true, model);
+            }
+            continue;
+        }
+
         if card_id == "kimi" {
             let Some(model) = event.model.as_deref().filter(|value| !value.is_empty()) else {
                 accumulator.add_unpriced(date, total, "Unattributed");
@@ -655,7 +675,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        kimi_roots, normalize_kimi_model, parse_jsonl, read_default_model, scan_roots_into,
+        aggregate_into, kimi_roots, normalize_kimi_model, parse_jsonl, read_default_model,
+        scan_roots_into, KimiTokenEvent,
     };
     use crate::{
         pricing::test_bundled_pricing, providers::daily_usage::DailyUsageAccumulator,
@@ -1100,5 +1121,38 @@ mod tests {
         assert!(last30.tokens > 0);
         assert!(last30.estimated_cost_usd.is_some_and(|cost| cost > 0.0));
         assert!(last30.unknown_models.is_empty());
+    }
+
+    #[test]
+    fn local_runtime_usage_stays_unpriced_in_kimi_others() {
+        let pricing = test_bundled_pricing();
+        let now = Utc.with_ymd_and_hms(2026, 7, 23, 12, 0, 0).unwrap();
+        let event = |model: &str| KimiTokenEvent {
+            timestamp: now,
+            provider: Some("ollama".to_owned()),
+            model: Some(model.to_owned()),
+            input: 1_000_000,
+            cache_write: 0,
+            cache_read: 0,
+            output: 0,
+        };
+        let events = vec![event("kimi-k3"), event("glm-4.7")];
+
+        let mut kimi_acc = DailyUsageAccumulator::default();
+        assert!(!aggregate_into(
+            events.clone(),
+            now,
+            &pricing,
+            "kimi",
+            &mut kimi_acc
+        ));
+        let kimi = kimi_acc.build(now, "test");
+        let other = kimi.other_usage.unwrap().today.unwrap();
+        assert_eq!(other.tokens, 2_000_000);
+        assert!(other.estimated_cost_usd.unwrap_or_default().abs() < 1e-9);
+
+        let mut zai_acc = DailyUsageAccumulator::default();
+        assert!(!aggregate_into(events, now, &pricing, "zai", &mut zai_acc));
+        assert!(zai_acc.build(now, "test").today.is_none());
     }
 }
