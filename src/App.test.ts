@@ -1102,6 +1102,46 @@ describe('OpenQuota dashboard', () => {
     }
   });
 
+  it('leaves Option-Command arrows alone while Total Spend is hidden', async () => {
+    const userAgent = navigator.userAgent;
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    });
+    mockInvoke((command: string) => {
+      if (command === 'get_usage_state') return Promise.resolve(liveState);
+      if (command === 'get_app_settings')
+        return Promise.resolve({
+          ...settingsState,
+          settings: { ...settingsState.settings, showTotalSpend: false },
+        });
+      return Promise.resolve();
+    });
+    try {
+      render(App);
+      await screen.findByText('Plus');
+      expect(screen.queryByRole('button', { name: 'Usage Scope' })).toBeNull();
+      const arrow = new KeyboardEvent('keydown', {
+        key: 'ArrowRight',
+        altKey: true,
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(arrow);
+      for (let step = 0; step < 2; step += 1) {
+        await fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true, metaKey: true });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(arrow.defaultPrevented).toBe(false);
+      // Accounts would hide the local-only Codex card.
+      expect(screen.getByRole('group', { name: 'Codex provider' })).toBeInTheDocument();
+      expect(mocks.invoke).not.toHaveBeenCalledWith('save_app_settings', expect.anything());
+    } finally {
+      Object.defineProperty(navigator, 'userAgent', { configurable: true, value: userAgent });
+    }
+  });
+
   async function checkDashboardShortcuts() {
     render(App);
     await screen.findByText('Plus');

@@ -520,7 +520,13 @@
     }
     usageViewMode = stepCycle(USAGE_VIEW_MODES, usageViewMode, shortcut.direction);
   }
-  $effect(() => bindDashboardShortcuts(applyDashboardShortcut));
+  // Total Spend holds the only period and scope switchers, so without it the
+  // shortcuts would change views the page gives no way to see or undo.
+  const showsTotalSpend = $derived(settings.showTotalSpend && providerUsage.length > 0);
+  $effect(() => {
+    if (!showsTotalSpend) usageViewMode = 'all';
+  });
+  $effect(() => (showsTotalSpend ? bindDashboardShortcuts(applyDashboardShortcut) : undefined));
 </script>
 
 {#if updateStatus?.available && updateStatus.version !== settings.dismissedUpdateVersion}
@@ -609,7 +615,7 @@
   </section>
 {/if}
 
-{#if settings.showTotalSpend && providerUsage.length > 0}
+{#if showsTotalSpend}
   <TotalSpend
     providers={providerUsage}
     {settings}
