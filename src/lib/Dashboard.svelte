@@ -252,7 +252,11 @@
         const error = state?.error ? providerMessage(provider.id, state.error) : null;
         const warnings = snapshot.warnings.map((warning) => providerMessage(provider.id, warning));
         const visibleMetrics = provider.metrics.filter((metric) => {
-          if (!metric.enabled || !showSub2ApiMetric(snapshot, metric.id)) return false;
+          if (
+            !metric.enabled ||
+            !showSub2ApiMetric(snapshot, metric.id, isSub2ApiSubscription(state?.snapshot))
+          )
+            return false;
           const source = metricDefinition(metric.id)?.source.kind;
           const metricScope = metricUsageScope(metric);
           if (

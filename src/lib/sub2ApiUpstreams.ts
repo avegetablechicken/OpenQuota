@@ -75,9 +75,12 @@ export function isSub2ApiSubscription(snapshot: ProviderSnapshot | null | undefi
   return Boolean(snapshot && sub2ApiSlotDisplayName(snapshot.providerId) && !snapshot.accounts);
 }
 
-export function showSub2ApiMetric(snapshot: ProviderSnapshot, metricId: string) {
-  if (metricId !== `${snapshot.providerId}.monthly` || !isSub2ApiSubscription(snapshot))
-    return true;
+export function showSub2ApiMetric(
+  snapshot: ProviderSnapshot,
+  metricId: string,
+  subscription = isSub2ApiSubscription(snapshot),
+) {
+  if (metricId !== `${snapshot.providerId}.monthly` || !subscription) return true;
   return snapshot.quotas.some((window) => window.id === 'monthly' && (window.limitValue ?? 0) > 0);
 }
 

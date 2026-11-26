@@ -502,4 +502,17 @@ describe('share card layout', () => {
       ]),
     );
   });
+
+  it('keeps fillPercent at zero when fractional usage floors to 0% used', () => {
+    const snapshot = structuredClone(codexState.snapshot!);
+    snapshot.quotas[0] = { ...snapshot.quotas[0], usedPercent: 0.1 };
+    const rows = buildProviderShareRows(
+      'codex',
+      snapshot,
+      settingsState.settings.providers[0],
+      { ...settingsState.settings, usageDisplay: 'used' },
+      Date.now(),
+    );
+    expect(rows[0]).toMatchObject({ kind: 'quota', reading: '0% used', fillPercent: 0 });
+  });
 });

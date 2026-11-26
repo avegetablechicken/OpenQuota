@@ -1,5 +1,5 @@
 import type { ProviderCatalogIndex } from './metrics';
-import { showSub2ApiMetric } from './sub2ApiUpstreams';
+import { isSub2ApiSubscription, showSub2ApiMetric } from './sub2ApiUpstreams';
 import {
   formatMetricValue,
   formatUsageReading,
@@ -117,8 +117,9 @@ export function buildProviderShareRows(
   settings: AppSettings,
   now: number,
   viewMode: UsageViewMode = 'localDevice',
-  tokensOnly = false,
+  tokensOnly?: boolean,
 ) {
+  const subscription = tokensOnly ?? isSub2ApiSubscription(snapshot);
   const alwaysVisible = layout.metrics.filter(
     (metric) => metric.enabled && metric.section === 'alwaysVisible',
   );
@@ -137,7 +138,7 @@ export function buildProviderShareRows(
 
   for (const metric of visible) {
     const definition = catalog.metric(metric.id);
-    if (!definition || !showSub2ApiMetric(snapshot, metric.id)) continue;
+    if (!definition || !showSub2ApiMetric(snapshot, metric.id, subscription)) continue;
     const source = definition.source;
     if (source.kind === 'quota' || source.kind === 'quotaOrValue') {
       const quota = snapshot.quotas.find((item) => item.id === source.sourceId);
@@ -235,7 +236,7 @@ export function buildProviderShareRows(
           scopedHistories.length > 1
             ? `${definition.label} · ${PROVIDER_USAGE_SCOPE_LABELS[scoped.scope]}`
             : definition.label,
-        value: formatUsageReading(period, tokensOnly),
+        value: formatUsageReading(period, Boolean(tokensOnly)),
         condensed: previousTextSection === metric.section,
       });
     }
@@ -379,11 +380,10 @@ function quotaShareRow(
   sessionWindow: boolean,
 ): ShareRow {
   const used = clamp(quota.usedPercent, 0, 100);
-  const remaining = Math.max(0, 100 - used);
   const usedDisplay = Math.floor(used);
   const remainingDisplay = 100 - usedDisplay;
   let reading = `${settings.usageDisplay === 'used' ? usedDisplay : remainingDisplay}% ${settings.usageDisplay}`;
-  let fillPercent = settings.usageDisplay === 'used' ? used : remaining;
+  let fillPercent = settings.usageDisplay === 'used' ? usedDisplay : remainingDisplay;
   if (quota.format === 'count' && quota.usedValue !== null && quota.limitValue !== null) {
     const displayed =
       settings.usageDisplay === 'left'

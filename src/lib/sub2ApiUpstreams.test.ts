@@ -3,12 +3,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   forgetSub2ApiUpstream,
   rememberSub2ApiUpstream,
+  showSub2ApiMetric,
   sub2ApiDisplayName,
   sub2ApiEndpoints,
   sub2ApiMetricSupported,
   sub2ApiPublicName,
   sub2ApiUpstreamAccountName,
 } from './sub2ApiUpstreams';
+import { codexState } from '../test/appFixtures';
 
 describe('Sub2API connection labels', () => {
   afterEach(() => forgetSub2ApiUpstream('sub2api@2'));
@@ -70,5 +72,26 @@ describe('Sub2API connection labels', () => {
     expect(sub2ApiPublicName('grok')).toBe('Sub2API · Grok');
     expect(sub2ApiUpstreamAccountName('Sub2API · Antigravity · agy')).toBe('agy');
     expect(sub2ApiUpstreamAccountName('Sub2API · Grok · grok')).toBe('grok');
+  });
+
+  it('keeps percentage monthly quotas on flattened Grok admin account snapshots', () => {
+    const childSnapshot = {
+      ...structuredClone(codexState.snapshot!),
+      providerId: 'sub2api@2',
+      accounts: undefined,
+      quotas: [
+        {
+          ...codexState.snapshot!.quotas[0],
+          id: 'monthly',
+          label: 'Monthly',
+          format: 'percent' as const,
+          usedPercent: 35,
+          limitValue: null,
+        },
+      ],
+    };
+
+    expect(showSub2ApiMetric(childSnapshot, 'sub2api@2.monthly', false)).toBe(true);
+    expect(showSub2ApiMetric(childSnapshot, 'sub2api@2.monthly', true)).toBe(false);
   });
 });
