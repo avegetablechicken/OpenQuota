@@ -2,6 +2,11 @@
   import { tick } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { claimCodexResetCredit } from './backend';
+  import {
+    clampFixedPopoverTop,
+    computeFixedPopoverTop,
+    type VerticalBounds,
+  } from './floatingPosition';
   import { formatReset } from './pacing';
   import type { ResetClaimOutcome } from './types';
 
@@ -12,17 +17,19 @@
     now: number;
     timeFormat: 'system' | 'twelveHour' | 'twentyFourHour';
     top: number;
+    anchor?: VerticalBounds;
     onEnter: () => void;
     onLeave: () => void;
     onDismiss: () => void;
   }
 
-  let { title, count, expiries, now, timeFormat, top, onEnter, onLeave, onDismiss }: Props =
+  let { title, count, expiries, now, timeFormat, top, anchor, onEnter, onLeave, onDismiss }: Props =
     $props();
   let confirmingExpiry = $state<string | null>(null);
   let pendingExpiry = $state<string | null>(null);
   let result = $state<{ expiry: string; outcome: ResetClaimOutcome } | null>(null);
-  let dialogElement: HTMLDivElement | undefined;
+  let dialogElement = $state<HTMLDivElement>();
+  let resolvedTop = $state<number | null>(null);
   let cancelButton = $state<HTMLButtonElement>();
   let claimTriggerIndex = $state<number | null>(null);
   const requestIds = new SvelteMap<string, string>();
@@ -122,6 +129,37 @@
     await tick();
     dialogElement?.focus();
   }
+
+  $effect(() => {
+    void entries.length;
+    void confirmingExpiry;
+    void resultMessage;
+    const height = dialogElement?.offsetHeight ?? 0;
+    if (height <= 0) {
+      resolvedTop = top;
+      return;
+    }
+    resolvedTop = anchor
+      ? computeFixedPopoverTop(anchor, height, window.innerHeight, { preferred: 'below', gap: 7 })
+      : clampFixedPopoverTop(top, height, window.innerHeight);
+  });
+
+  $effect(() => {
+    const onScroll = (event: Event) => {
+      if (confirmingExpiry || pendingExpiry) return;
+      if (event.target instanceof Node && dialogElement?.contains(event.target)) return;
+      onDismiss();
+    };
+    const onResize = () => {
+      if (!confirmingExpiry && !pendingExpiry) onDismiss();
+    };
+    window.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('scroll', onScroll, { capture: true });
+      window.removeEventListener('resize', onResize);
+    };
+  });
 </script>
 
 <svelte:window onkeydowncapture={handleKeydown} />
@@ -129,7 +167,7 @@
 <div
   bind:this={dialogElement}
   class="reset-credits-detail"
-  style={`top:${top}px`}
+  style={`top:${resolvedTop ?? top}px`}
   role="dialog"
   tabindex="-1"
   aria-label={`${title} details`}

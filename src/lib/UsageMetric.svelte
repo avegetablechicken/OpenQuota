@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import { computeFixedPopoverTop, type VerticalBounds } from './floatingPosition';
   import Icon from './Icon.svelte';
   import { formatMetricNumber, formatMetricValue, formatUsageReading } from './metricFormat';
   import ModelUsageDetail from './ModelUsageDetail.svelte';
@@ -13,6 +14,7 @@
   let { label, period, tokensOnly = false }: Props = $props();
   let open = $state(false);
   let detailTop = $state(8);
+  let detailAnchor = $state<VerticalBounds | null>(null);
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -48,7 +50,11 @@
     const target = event.currentTarget as HTMLElement;
     const rect = target.getBoundingClientRect();
     const estimatedHeight = Math.min(86 + period.modelBreakdown.models.length * 52, 360);
-    detailTop = Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - estimatedHeight - 8));
+    detailAnchor = { top: rect.top, bottom: rect.bottom };
+    detailTop = computeFixedPopoverTop(detailAnchor, estimatedHeight, window.innerHeight, {
+      preferred: 'below',
+      gap: 7,
+    });
     showTimer = setTimeout(() => {
       open = true;
       showTimer = undefined;
@@ -62,6 +68,13 @@
       open = false;
       hideTimer = undefined;
     }, 180);
+  }
+  function dismissNow() {
+    if (showTimer) clearTimeout(showTimer);
+    showTimer = undefined;
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = undefined;
+    open = false;
   }
   function keepOpen() {
     if (hideTimer) clearTimeout(hideTimer);
@@ -100,8 +113,10 @@
     title={label}
     breakdown={period.modelBreakdown}
     top={detailTop}
+    anchor={detailAnchor ?? undefined}
     onEnter={keepOpen}
     onLeave={scheduleHide}
+    onDismiss={dismissNow}
   />
 {/if}
 

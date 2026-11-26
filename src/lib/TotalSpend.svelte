@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy, tick } from 'svelte';
+  import { computeFixedPopoverTop } from './floatingPosition';
   import Icon from './Icon.svelte';
   import { sub2ApiUpstreams } from './sub2ApiUpstreams';
   import { formatSpendValue, totalSpendRingCenter } from './metricFormat';
@@ -108,7 +110,96 @@
     return lines;
   }
   let hoveredBilling = $state<string | null>(null);
+  let legendBilling = $state<string | null>(null);
+  let billingTooltipTop = $state(8);
+  let legendHideTimer: ReturnType<typeof setTimeout> | undefined;
+  const openBillingKey = $derived(hoveredBilling ?? legendBilling);
+  const billingRowNodes = new Map<string, HTMLElement>();
+  const billingTooltipNodes = new Map<string, HTMLElement>();
   const chartId = $props.id();
+
+  function registerNode(node: HTMLElement, params: { map: Map<string, HTMLElement>; key: string }) {
+    let current = params;
+    current.map.set(current.key, node);
+    return {
+      update(next: { map: Map<string, HTMLElement>; key: string }) {
+        if (current.key !== next.key || current.map !== next.map) {
+          if (current.map.get(current.key) === node) current.map.delete(current.key);
+          current = next;
+          current.map.set(current.key, node);
+        }
+      },
+      destroy() {
+        if (current.map.get(current.key) === node) current.map.delete(current.key);
+      },
+    };
+  }
+
+  function billingKeyFor(scope: SpendProjection['scope'], id: string) {
+    return `${scope}:${id}`;
+  }
+
+  function clearLegendHideTimer() {
+    if (legendHideTimer !== undefined) {
+      clearTimeout(legendHideTimer);
+      legendHideTimer = undefined;
+    }
+  }
+
+  function openLegendBilling(key: string) {
+    clearLegendHideTimer();
+    legendBilling = key;
+  }
+
+  function scheduleLegendBillingHide(key: string) {
+    clearLegendHideTimer();
+    legendHideTimer = setTimeout(() => {
+      legendHideTimer = undefined;
+      if (legendBilling === key) legendBilling = null;
+    }, 150);
+  }
+
+  function dismissBillingTooltips() {
+    clearLegendHideTimer();
+    hoveredBilling = null;
+    legendBilling = null;
+  }
+
+  function updateBillingTooltipPosition(key: string) {
+    const row = billingRowNodes.get(key);
+    const tip = billingTooltipNodes.get(key);
+    if (!row) return;
+    const rect = row.getBoundingClientRect();
+    const height = tip && tip.offsetHeight > 0 ? tip.offsetHeight : 96;
+    billingTooltipTop = computeFixedPopoverTop(rect, height, window.innerHeight, {
+      preferred: 'below',
+      gap: 4,
+    });
+  }
+
+  $effect(() => {
+    const key = openBillingKey;
+    if (!key) return;
+    updateBillingTooltipPosition(key);
+    void tick().then(() => {
+      if (openBillingKey === key) updateBillingTooltipPosition(key);
+    });
+    const onScroll = (event: Event) => {
+      const tip = billingTooltipNodes.get(key);
+      if (event.target instanceof Node && tip?.contains(event.target)) return;
+      dismissBillingTooltips();
+    };
+    window.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    window.addEventListener('resize', dismissBillingTooltips);
+    return () => {
+      window.removeEventListener('scroll', onScroll, { capture: true });
+      window.removeEventListener('resize', dismissBillingTooltips);
+    };
+  });
+
+  onDestroy(() => {
+    clearLegendHideTimer();
+  });
   function patch(patch: Partial<AppSettings>) {
     onChange({ ...settings, ...patch });
   }
@@ -225,11 +316,14 @@
                   aria-hidden="true"
                 >
                   {#each spendRingArcs(projection.slices) as segment (segment.id)}
+                    {@const segmentKey = billingKeyFor(projection.scope, segment.id)}
                     <path
                       role="presentation"
                       class="spend-ring__segment"
-                      onpointerenter={() => (hoveredBilling = segment.id)}
-                      onpointerleave={() => (hoveredBilling = null)}
+                      onpointerenter={() => (hoveredBilling = segmentKey)}
+                      onpointerleave={() => {
+                        if (hoveredBilling === segmentKey) hoveredBilling = null;
+                      }}
                       d={ringSectorPath(segment, TOTAL_SPEND_GEOMETRY)}
                       style={`--segment-color: ${providerSpendColor(segment.id)}`}
                     />
@@ -243,20 +337,34 @@
               </div>
               <div class="spend-legend">
                 {#each projection.slices as provider (provider.id)}
+                  {@const billingKey = billingKeyFor(projection.scope, provider.id)}
                   {@const tooltipId = provider.otherBilling
                     ? `${chartId}-${projection.scope}-${provider.id}`
                     : undefined}
                   <div
                     class="spend-legend__row"
                     class:spend-legend__billing={provider.otherBilling}
+                    use:registerNode={{ map: billingRowNodes, key: billingKey }}
                   >
-                    <svelte:element
-                      this={tooltipId ? 'button' : 'span'}
-                      type={tooltipId ? 'button' : undefined}
-                      aria-describedby={tooltipId}
-                      ><i style={`background: ${providerSpendColor(provider.id)}`}
-                      ></i>{providerDisplayName(provider.id)}</svelte:element
-                    ><strong
+                    {#if tooltipId}
+                      <button
+                        type="button"
+                        aria-describedby={tooltipId}
+                        onmouseenter={() => openLegendBilling(billingKey)}
+                        onmouseleave={() => scheduleLegendBillingHide(billingKey)}
+                        onfocus={() => openLegendBilling(billingKey)}
+                        onblur={() => {
+                          if (legendBilling === billingKey) legendBilling = null;
+                        }}
+                        ><i style={`background: ${providerSpendColor(provider.id)}`}
+                        ></i>{providerDisplayName(provider.id)}</button
+                      >
+                    {:else}
+                      <span
+                        ><i style={`background: ${providerSpendColor(provider.id)}`}
+                        ></i>{providerDisplayName(provider.id)}</span
+                      >
+                    {/if}<strong
                       class:spend-legend__value--hidden={provider.showValue === false}
                       aria-hidden={provider.showValue === false ? 'true' : undefined}
                       >{display(provider.value)}</strong
@@ -266,7 +374,11 @@
                         id={tooltipId}
                         role="tooltip"
                         class="spend-billing-tooltip"
-                        class:spend-billing-tooltip--open={hoveredBilling === provider.id}
+                        class:spend-billing-tooltip--open={openBillingKey === billingKey}
+                        style={`top:${billingTooltipTop}px`}
+                        use:registerNode={{ map: billingTooltipNodes, key: billingKey }}
+                        onmouseenter={() => openLegendBilling(billingKey)}
+                        onmouseleave={() => scheduleLegendBillingHide(billingKey)}
                       >
                         {#each billingLines(provider) as line, index (index)}
                           <div>{line}</div>
@@ -438,12 +550,11 @@
 
     .spend-billing-tooltip {
       display: none;
-      position: absolute;
-      top: 100%;
-      right: 0;
-      z-index: 50;
+      position: fixed;
+      right: 8px;
+      z-index: 100;
       width: max-content;
-      max-width: min(260px, calc(100vw - 32px));
+      max-width: min(260px, calc(100vw - 16px));
       max-height: 35vh;
       overflow: auto;
       padding: 6px 8px;
@@ -458,9 +569,7 @@
       overflow-wrap: anywhere;
     }
 
-    .spend-billing-tooltip--open,
-    .spend-legend__billing:hover .spend-billing-tooltip,
-    .spend-legend__billing:focus-within .spend-billing-tooltip {
+    .spend-billing-tooltip--open {
       display: grid;
       gap: 5px;
     }

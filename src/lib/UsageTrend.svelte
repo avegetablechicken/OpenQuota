@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import { SvelteDate } from 'svelte/reactivity';
+  import { computeFixedPopoverTop } from './floatingPosition';
   import { formatMetricNumber } from './metricFormat';
   import type { DailyUsage } from './types';
 
@@ -17,6 +18,9 @@
     points.reduce((best, point) => (point.tokens > best.tokens ? point : best), points[0]),
   );
   let detailVisible = $state(false);
+  let detailTop = $state(8);
+  let chartWrap = $state<HTMLDivElement>();
+  let detailEl = $state<HTMLElement>();
   let hoveredDate = $state<string | null>(null);
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
   const highlightedPoint = $derived(
@@ -50,15 +54,60 @@
       : new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(date);
   }
 
+  function updateDetailPosition(height = 165) {
+    if (!chartWrap) return;
+    const rect = chartWrap.getBoundingClientRect();
+    detailTop = computeFixedPopoverTop(rect, height, window.innerHeight, {
+      preferred: 'above',
+      gap: 12,
+    });
+  }
+
   function revealDetail() {
     if (hoverTimer) clearTimeout(hoverTimer);
-    hoverTimer = setTimeout(() => (detailVisible = true), 400);
+    if (detailVisible) {
+      updateDetailPosition(detailEl?.offsetHeight || 165);
+      return;
+    }
+    hoverTimer = setTimeout(() => {
+      hoverTimer = undefined;
+      updateDetailPosition();
+      detailVisible = true;
+      void tick().then(() => {
+        if (detailVisible && detailEl && detailEl.offsetHeight > 0) {
+          updateDetailPosition(detailEl.offsetHeight);
+        }
+      });
+    }, 400);
   }
 
   function concealDetail() {
     if (hoverTimer) clearTimeout(hoverTimer);
-    hoverTimer = setTimeout(() => (detailVisible = false), 180);
+    hoverTimer = setTimeout(() => {
+      hoverTimer = undefined;
+      detailVisible = false;
+    }, 180);
   }
+
+  function dismissDetail() {
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = undefined;
+    detailVisible = false;
+  }
+
+  $effect(() => {
+    if (!detailVisible) return;
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && detailEl?.contains(event.target)) return;
+      dismissDetail();
+    };
+    window.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    window.addEventListener('resize', dismissDetail);
+    return () => {
+      window.removeEventListener('scroll', onScroll, { capture: true });
+      window.removeEventListener('resize', dismissDetail);
+    };
+  });
 
   onDestroy(() => {
     if (hoverTimer) clearTimeout(hoverTimer);
@@ -69,6 +118,7 @@
   <strong>{label}</strong>
   {#if total > 0}
     <div
+      bind:this={chartWrap}
       class="trend-chart-wrap"
       role="group"
       aria-label="Usage trend chart details"
@@ -89,7 +139,13 @@
         {/each}
       </div>
       {#if detailVisible}
-        <aside class="trend-detail" onmouseenter={revealDetail} onmouseleave={concealDetail}>
+        <aside
+          bind:this={detailEl}
+          class="trend-detail"
+          style={`top:${detailTop}px`}
+          onmouseenter={revealDetail}
+          onmouseleave={concealDetail}
+        >
           <header>
             <strong>{label}</strong><span
               >{hoveredDate
@@ -196,20 +252,20 @@
     }
 
     .trend-detail {
-      position: absolute;
-      right: -8px;
-      bottom: calc(100% + 12px);
-      z-index: 20;
+      position: fixed;
+      right: 8px;
+      z-index: 100;
       display: grid;
       width: 240px;
+      max-height: calc(100vh - 16px);
       gap: 8px;
       padding: 12px;
+      overflow-y: auto;
       border: 1px solid var(--separator);
       border-radius: 12px;
       color: var(--text);
-      background: color-mix(in srgb, var(--tray) 96%, transparent);
+      background: var(--tray);
       box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
-      backdrop-filter: blur(20px);
       animation: detail-in 180ms ease-out both;
     }
 

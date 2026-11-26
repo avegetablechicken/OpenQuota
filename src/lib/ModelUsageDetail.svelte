@@ -1,4 +1,9 @@
 <script lang="ts">
+  import {
+    clampFixedPopoverTop,
+    computeFixedPopoverTop,
+    type VerticalBounds,
+  } from './floatingPosition';
   import { formatMetricNumber, formatMetricValue } from './metricFormat';
   import type { ModelUsageBreakdown } from './types';
 
@@ -6,12 +11,50 @@
     title: string;
     breakdown: ModelUsageBreakdown;
     top: number;
+    anchor?: VerticalBounds;
     tokensOnly?: boolean;
     onEnter: () => void;
     onLeave: () => void;
+    onDismiss?: () => void;
   }
 
-  let { title, breakdown, top, onEnter, onLeave, tokensOnly = false }: Props = $props();
+  let {
+    title,
+    breakdown,
+    top,
+    anchor,
+    onEnter,
+    onLeave,
+    onDismiss,
+    tokensOnly = false,
+  }: Props = $props();
+  let detailEl = $state<HTMLDivElement>();
+  let resolvedTop = $state<number | null>(null);
+
+  $effect(() => {
+    const height = detailEl?.offsetHeight ?? 0;
+    if (height <= 0) {
+      resolvedTop = top;
+      return;
+    }
+    resolvedTop = anchor
+      ? computeFixedPopoverTop(anchor, height, window.innerHeight, { preferred: 'below', gap: 7 })
+      : clampFixedPopoverTop(top, height, window.innerHeight);
+  });
+
+  $effect(() => {
+    const dismiss = onDismiss ?? onLeave;
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && detailEl?.contains(event.target)) return;
+      dismiss();
+    };
+    window.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    window.addEventListener('resize', dismiss);
+    return () => {
+      window.removeEventListener('scroll', onScroll, { capture: true });
+      window.removeEventListener('resize', dismiss);
+    };
+  });
 
   const models = $derived(
     tokensOnly
@@ -48,8 +91,9 @@
 </script>
 
 <div
+  bind:this={detailEl}
   class="model-usage-detail"
-  style={`top:${top}px`}
+  style={`top:${resolvedTop ?? top}px`}
   role="tooltip"
   aria-label={`${title} model usage`}
   onmouseenter={onEnter}

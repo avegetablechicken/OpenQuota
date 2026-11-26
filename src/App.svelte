@@ -1478,10 +1478,6 @@
       font-size: inherit;
     }
 
-    .screen-header .text-button::after {
-      content: none;
-    }
-
     .transient-pill {
       position: absolute;
       right: 14px;

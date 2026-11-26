@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
+  import { computeFixedPopoverTop, type VerticalBounds } from './floatingPosition';
   import { formatMetricValue } from './metricFormat';
   import { formatReset } from './pacing';
   import Icon from './Icon.svelte';
@@ -17,6 +18,7 @@
   let { label, metric, now, resetDisplay, timeFormat }: Props = $props();
   let detailOpen = $state(false);
   let detailTop = $state(8);
+  let detailAnchor = $state<VerticalBounds | null>(null);
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
   let detailTrigger = $state<HTMLButtonElement>();
@@ -74,7 +76,11 @@
     const target = event.currentTarget as HTMLElement;
     const rect = target.getBoundingClientRect();
     const estimatedHeight = Math.min(72 + (metric?.expiriesAt.length ?? 0) * 34, 340);
-    detailTop = Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - estimatedHeight - 8));
+    detailAnchor = { top: rect.top, bottom: rect.bottom };
+    detailTop = computeFixedPopoverTop(detailAnchor, estimatedHeight, window.innerHeight, {
+      preferred: 'below',
+      gap: 7,
+    });
     showTimer = setTimeout(() => {
       detailOpen = true;
       showTimer = undefined;
@@ -167,6 +173,7 @@
     {now}
     {timeFormat}
     top={detailTop}
+    anchor={detailAnchor ?? undefined}
     onEnter={keepOpen}
     onLeave={scheduleHide}
     onDismiss={() => void dismissDetail()}

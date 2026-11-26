@@ -132,4 +132,14 @@ describe('popover geometry contract', () => {
     expect(warningRule).not.toContain('z-index:');
     expect(warningRule).toContain('top: -1px');
   });
+
+  it('keeps trend and spend detail popovers in fixed viewport layers so scroll stages do not clip them', () => {
+    const trendRule = coLocatedComponentCss.match(/\.trend-detail\s*{([^}]*)}/s)?.[1] ?? '';
+    const spendRule =
+      coLocatedComponentCss.match(/\.spend-billing-tooltip\s*{([^}]*)}/s)?.[1] ?? '';
+    expect(trendRule).toContain('position: fixed');
+    expect(trendRule).toContain('z-index: 100');
+    expect(spendRule).toContain('position: fixed');
+    expect(spendRule).toContain('z-index: 100');
+  });
 });

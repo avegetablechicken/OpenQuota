@@ -162,4 +162,38 @@ describe('native visual contract', () => {
     expect(screen.getByText(/· 42K tokens$/)).toBeInTheDocument();
     expect(container.querySelectorAll('.trend-detail__bars i.muted')).toHaveLength(30);
   });
+
+  it('flips Usage Trend details below the row when there is not enough room above', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 400 });
+    const today = new Date();
+    const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const { container } = render(UsageTrend, {
+      label: 'Usage Trend',
+      daily: [{ date, tokens: 42_000, estimatedCostUsd: 0.21, estimateComplete: true }],
+      sourceNote: 'From your Codex logs (estimated)',
+    });
+    const chart = screen.getByRole('group', { name: 'Usage trend chart details' });
+    chart.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: 40,
+          bottom: 58,
+          left: 140,
+          right: 290,
+          width: 150,
+          height: 18,
+          x: 140,
+          y: 40,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    );
+
+    await fireEvent.mouseEnter(chart);
+    await vi.advanceTimersByTimeAsync(400);
+    const detail = container.querySelector<HTMLElement>('.trend-detail')!;
+    expect(detail).toBeInTheDocument();
+    // 58 (bottom) + 12 (gap) = 70
+    expect(detail.style.top).toBe('70px');
+  });
 });
