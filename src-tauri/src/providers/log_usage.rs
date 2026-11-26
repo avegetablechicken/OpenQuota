@@ -30,11 +30,13 @@ impl LogFileFingerprint {
     }
 }
 
-/// Identifies one load of a client's logs: the storage, the date window, and every file's state.
+/// Identifies one load of a client's logs: the storage, the date window, anything else the
+/// parsed events depend on, and every file's state.
 #[derive(PartialEq, Eq)]
 struct LoadedEventsKey {
     storage: usize,
     since_date: NaiveDate,
+    context: String,
     files: Vec<(PathBuf, Option<LogFileFingerprint>)>,
 }
 
@@ -64,9 +66,23 @@ impl<T> LoadedEventsMemo<T> {
         since_date: NaiveDate,
         load: impl FnOnce() -> Result<Vec<T>, E>,
     ) -> Result<Arc<Vec<T>>, E> {
+        self.load_in_context(storage, String::new(), paths, since_date, load)
+    }
+
+    /// Like [`Self::load`], for events that also depend on `context`, such as which client each
+    /// file belongs to.
+    pub fn load_in_context<E>(
+        &self,
+        storage: &Storage,
+        context: String,
+        paths: impl IntoIterator<Item = PathBuf>,
+        since_date: NaiveDate,
+        load: impl FnOnce() -> Result<Vec<T>, E>,
+    ) -> Result<Arc<Vec<T>>, E> {
         let key = LoadedEventsKey {
             storage: std::ptr::from_ref(storage) as usize,
             since_date,
+            context,
             files: paths
                 .into_iter()
                 .map(|path| {

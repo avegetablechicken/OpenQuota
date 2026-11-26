@@ -109,7 +109,15 @@ fn scan_directories_into(
         .iter()
         .map(|(_, path)| path.clone())
         .collect::<Vec<_>>();
-    let events = LOADED_EVENTS.load(storage, files, NaiveDate::MIN, || {
+    // Events carry the client their file belongs to, which can change while the file does not.
+    let sources = paths
+        .iter()
+        .map(|(source, _)| match source {
+            PiUsageSource::Pi => 'p',
+            PiUsageSource::OhMyPi => 'o',
+        })
+        .collect::<String>();
+    let events = LOADED_EVENTS.load_in_context(storage, sources, files, NaiveDate::MIN, || {
         load_session_files(storage, paths)
     })?;
 
@@ -147,7 +155,12 @@ fn load_session_files(
         else {
             continue;
         };
-        events.extend(parsed);
+        // The stored events keep the client the file belonged to when it was parsed.
+        events.extend(
+            parsed
+                .into_iter()
+                .map(|event| PiUsageEvent { source, ..event }),
+        );
     }
     storage.prune_log_events("pi", &seen_paths)?;
     Ok(deduplicate(events))
@@ -707,6 +720,46 @@ mod tests {
             .oh_my_pi
         );
         assert_eq!(second.build(now(), "From pi").today.unwrap().tokens, 202);
+    }
+
+    #[test]
+    fn cached_sessions_follow_the_client_their_directory_now_belongs_to() {
+        let directory = tempdir().unwrap();
+        let sessions = directory.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("session.jsonl"),
+            line("pi", "openai", "gpt-5.5", "0.25"),
+        )
+        .unwrap();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let scan = |source| {
+            scan_directories_into(
+                &storage,
+                &[(source, sessions.clone())],
+                now(),
+                &pricing(),
+                "codex",
+                &mut DailyUsageAccumulator::default(),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            scan(PiUsageSource::Pi),
+            PiUsageSources {
+                pi: true,
+                oh_my_pi: false,
+            }
+        );
+        // The file is unchanged, so both the loaded events and the stored parse are reused.
+        assert_eq!(
+            scan(PiUsageSource::OhMyPi),
+            PiUsageSources {
+                pi: false,
+                oh_my_pi: true,
+            }
+        );
     }
 
     #[test]
