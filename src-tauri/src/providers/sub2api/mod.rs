@@ -200,6 +200,14 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
     }
 }
 
+/// The upstream id a Sub2API track reports, as passed to [`metric_supported`].
+pub fn track_provider_id(mode: Sub2ApiMode, upstream: Sub2ApiUpstream) -> &'static str {
+    match mode {
+        Sub2ApiMode::Subscription => "subscription",
+        Sub2ApiMode::Admin => upstream.provider_id(),
+    }
+}
+
 /// Whether a connection's metric can report data for its upstream, matching the Customize page.
 pub fn metric_supported(
     provider_id: &str,
@@ -1505,10 +1513,7 @@ impl UsageProvider for Sub2ApiProvider {
         self.load_config()
             .ok()
             .flatten()
-            .map(|config| match config.mode {
-                Sub2ApiMode::Subscription => "subscription",
-                Sub2ApiMode::Admin => config.upstream.provider_id(),
-            })
+            .map(|config| track_provider_id(config.mode, config.upstream))
     }
 
     fn refresh_for_service(&self) -> Result<super::ProviderRefresh, ProviderError> {

@@ -11,8 +11,8 @@ use crate::{
     pacing::NotificationEvaluator,
     providers::{
         sub2api::{
-            claude_provider_base_url, codex_provider_base_url, metric_template, Sub2ApiConfigInput,
-            Sub2ApiConfigState, Sub2ApiProviders,
+            claude_provider_base_url, codex_provider_base_url, metric_template, track_provider_id,
+            Sub2ApiConfigInput, Sub2ApiConfigState, Sub2ApiProviders,
         },
         ProviderRegistry, UsageProvider,
     },
@@ -390,6 +390,10 @@ pub async fn save_sub2api_config(
         previous: outcome
             .previous_track
             .map(|(mode, upstream)| metric_template(&provider_id, upstream, mode)),
+        upstream_provider_id: Some(track_provider_id(
+            outcome.state.mode,
+            outcome.state.upstream,
+        )),
     });
     // First setup enables the provider; editing an existing connection preserves its toggle.
     let enable = settings

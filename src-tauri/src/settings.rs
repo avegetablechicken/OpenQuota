@@ -623,7 +623,25 @@ impl SettingsService {
                 provider.metrics.clear();
                 Vec::new()
             };
-            let defaults = apply_metric_template(&mut provider.metrics, &change.template, &applied);
+            let connection_configured = self
+                .registry
+                .catalog()
+                .connection_config_provider_ids
+                .iter()
+                .any(|id| id == provider_id);
+            let defaults = apply_metric_template(
+                &mut provider.metrics,
+                &change.template,
+                &applied,
+                |metric_id| {
+                    !connection_configured
+                        || crate::providers::sub2api::metric_supported(
+                            provider_id,
+                            metric_id,
+                            change.upstream_provider_id,
+                        )
+                },
+            );
             self.storage
                 .save_settings_with_metric_template_defaults(&next, provider_id, &defaults)
         } else {
@@ -951,6 +969,8 @@ pub struct MetricTemplateChange {
     pub template: Vec<MetricLayout>,
     /// Stands in for the recorded defaults of layouts saved before they were tracked.
     pub previous: Option<Vec<MetricLayout>>,
+    /// The new track's upstream id; decides which pins count toward the per-provider cap.
+    pub upstream_provider_id: Option<&'static str>,
 }
 
 /// Moves an already customized layout onto a new template without losing user choices.
@@ -959,14 +979,19 @@ pub struct MetricTemplateChange {
 /// it take the new default, so a metric one track hides appears on a track that shows it.
 /// Anything the user changed keeps its settings, and the existing order is retained.
 ///
+/// Pins the user chose take priority: a new default's pin is dropped when it would push the
+/// supported pins past `MAX_PINS_PER_PROVIDER`.
+///
 /// Returns the defaults to record. A customized metric keeps the default it was customized
 /// from, even when it happens to match the new one, so later track changes still keep it.
 fn apply_metric_template(
     metrics: &mut Vec<MetricLayout>,
     template: &[MetricLayout],
     applied: &[MetricLayout],
+    is_supported: impl Fn(&str) -> bool,
 ) -> Vec<MetricLayout> {
     let mut recorded = Vec::with_capacity(template.len());
+    let mut adopted = Vec::new();
     for default in template {
         match metrics.iter_mut().find(|current| current.id == default.id) {
             Some(current) if !applied.contains(current) => {
@@ -981,7 +1006,26 @@ fn apply_metric_template(
             Some(current) => current.clone_from(default),
             None => metrics.push(default.clone()),
         }
+        adopted.push(default.id.clone());
         recorded.push(default.clone());
+    }
+    let counts_toward_cap = |metric: &MetricLayout| metric.pinned && is_supported(&metric.id);
+    let mut pins = metrics
+        .iter()
+        .filter(|metric| counts_toward_cap(metric) && !adopted.contains(&metric.id))
+        .count();
+    for metric in metrics.iter_mut() {
+        if !adopted.contains(&metric.id) || !counts_toward_cap(metric) {
+            continue;
+        }
+        if pins < MAX_PINS_PER_PROVIDER {
+            pins += 1;
+            continue;
+        }
+        metric.pinned = false;
+        if let Some(default) = recorded.iter_mut().find(|default| default.id == metric.id) {
+            default.pinned = false;
+        }
     }
     recorded
 }
@@ -1056,7 +1100,9 @@ mod tests {
         },
         providers::{
             antigravity, claude, codex, cursor, openrouter,
-            sub2api::{metric_template, Sub2ApiMode, Sub2ApiProviders, Sub2ApiUpstream},
+            sub2api::{
+                metric_template, track_provider_id, Sub2ApiMode, Sub2ApiProviders, Sub2ApiUpstream,
+            },
             CredentialProbeResults, CredentialProbeStatus, ProviderError, ProviderRegistry,
             UsageProvider,
         },
@@ -2210,6 +2256,7 @@ mod tests {
                 Some(MetricTemplateChange {
                     template: template.clone(),
                     previous: None,
+                    upstream_provider_id: None,
                 }),
             )
             .unwrap();
@@ -2236,7 +2283,7 @@ mod tests {
     #[test]
     fn sub2api_track_changes_preserve_all_preferences() {
         use crate::providers::sub2api::{
-            metric_template, Sub2ApiMode, Sub2ApiProviders, Sub2ApiUpstream,
+            metric_template, track_provider_id, Sub2ApiMode, Sub2ApiProviders, Sub2ApiUpstream,
         };
 
         for pinned in [
@@ -2266,6 +2313,7 @@ mod tests {
                     Some(MetricTemplateChange {
                         template: template.clone(),
                         previous: None,
+                        upstream_provider_id: None,
                     }),
                 )
                 .unwrap();
@@ -2309,6 +2357,7 @@ mod tests {
                         Some(MetricTemplateChange {
                             template: metric_template("sub2api", upstream, mode),
                             previous: Some(metric_template("sub2api", previous.1, previous.0)),
+                            upstream_provider_id: Some(track_provider_id(mode, upstream)),
                         }),
                     )
                     .unwrap();
@@ -2346,6 +2395,7 @@ mod tests {
                     template: metric_template("sub2api", upstream, mode),
                     previous: previous
                         .map(|(mode, upstream)| metric_template("sub2api", upstream, mode)),
+                    upstream_provider_id: Some(track_provider_id(mode, upstream)),
                 }),
             )
             .unwrap()
@@ -2411,6 +2461,39 @@ mod tests {
         );
         assert!(sub2api_metric(&saved, "daily").enabled);
         assert!(sub2api_metric(&saved, "monthly").enabled);
+    }
+
+    #[test]
+    fn sub2api_track_changes_keep_user_pins_within_the_pin_cap() {
+        let grok_admin = (Sub2ApiMode::Admin, Sub2ApiUpstream::Grok);
+        let directory = tempdir().unwrap();
+        let service = sub2api_settings_service(directory.path());
+        let mut settings = reconcile_sub2api_track(&service, grok_admin, None);
+        for metric in &mut settings.providers[0].metrics {
+            if matches!(metric.id.as_str(), "sub2api.weekly" | "sub2api.monthly") {
+                metric.enabled = true;
+                metric.pinned = true;
+            }
+        }
+        service.update(settings).unwrap();
+        assert!(!sub2api_metric(&service.get(), "daily").pinned);
+
+        // Subscription pins Daily by default, but the user's two pins already fill the cap.
+        let saved = reconcile_sub2api_track(
+            &service,
+            (Sub2ApiMode::Subscription, Sub2ApiUpstream::Grok),
+            Some(grok_admin),
+        );
+        assert!(sub2api_metric(&saved, "weekly").pinned);
+        assert!(sub2api_metric(&saved, "monthly").pinned);
+        let daily = sub2api_metric(&saved, "daily");
+        assert!(daily.enabled && !daily.pinned);
+        let pins = saved.providers[0]
+            .metrics
+            .iter()
+            .filter(|metric| metric.pinned)
+            .count();
+        assert!(pins <= MAX_PINS_PER_PROVIDER);
     }
 
     #[test]
