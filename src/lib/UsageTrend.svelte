@@ -85,14 +85,20 @@
     if (hoverTimer) clearTimeout(hoverTimer);
     hoverTimer = setTimeout(() => {
       hoverTimer = undefined;
-      detailVisible = false;
+      closeDetail();
     }, 180);
   }
 
   function dismissDetail() {
     if (hoverTimer) clearTimeout(hoverTimer);
     hoverTimer = undefined;
+    closeDetail();
+  }
+
+  // Unmounting the bars sends no mouseleave, so the hovered day is cleared here.
+  function closeDetail() {
     detailVisible = false;
+    hoveredDate = null;
   }
 
   $effect(() => {
