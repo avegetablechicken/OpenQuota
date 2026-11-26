@@ -19,6 +19,7 @@
     isSub2ApiSubscription,
     showSub2ApiMetric,
     sub2ApiUpstreamAccountName,
+    sub2ApiUpstreamOptions,
     sub2ApiPinAllowed,
     sub2ApiUpstreams,
   } from './sub2ApiUpstreams';
@@ -192,6 +193,14 @@
   const providerMessage = (id: string, message: string) =>
     catalog.displayMessage(id, message, providerDisplayName(id));
   const providerSupportsSpend = (id: string) => catalog.supportsSpend(id);
+  function connectionSource(providerId: string) {
+    const snapshot = viewState.providers[providerId]?.snapshot;
+    if (isSub2ApiSubscription(snapshot)) return 'subscription';
+    return (
+      sub2ApiUpstreamOptions.find((upstream) => upstream === snapshot?.upstreamProviderId) ??
+      $sub2ApiUpstreams[providerId]
+    );
+  }
   function emptyProviderSnapshot(providerId: string): ProviderSnapshot {
     return {
       providerId,
@@ -254,7 +263,12 @@
         const visibleMetrics = provider.metrics.filter((metric) => {
           if (
             !metric.enabled ||
-            !showSub2ApiMetric(snapshot, metric.id, isSub2ApiSubscription(state?.snapshot))
+            !showSub2ApiMetric(
+              snapshot,
+              metric.id,
+              isSub2ApiSubscription(state?.snapshot),
+              connectionSource(provider.id),
+            )
           )
             return false;
           const source = metricDefinition(metric.id)?.source.kind;

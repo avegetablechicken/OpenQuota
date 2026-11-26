@@ -79,7 +79,13 @@ export function showSub2ApiMetric(
   snapshot: ProviderSnapshot,
   metricId: string,
   subscription = isSub2ApiSubscription(snapshot),
+  upstream: Sub2ApiSource | undefined = sub2ApiUpstreamOptions.find(
+    (id) => id === snapshot.upstreamProviderId,
+  ),
 ) {
+  const source = subscription ? 'subscription' : upstream;
+  // Retain saved layout preferences, but omit metrics unavailable on this track/upstream.
+  if (source && !sub2ApiMetricSupported(snapshot.providerId, metricId, source)) return false;
   if (metricId !== `${snapshot.providerId}.monthly` || !subscription) return true;
   return snapshot.quotas.some((window) => window.id === 'monthly' && (window.limitValue ?? 0) > 0);
 }
