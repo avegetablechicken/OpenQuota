@@ -868,3 +868,58 @@ fn transient_account_quota_failure_is_propagated_with_local_history() {
 
     assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
 }
+
+#[test]
+fn ollama_stays_unpriced_in_opencode_others_and_kimi_short_aliases_route_to_kimi() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("opencode.db");
+    let connection = create_database(&path, false);
+    insert_message(
+        &connection,
+        "session-1",
+        "m-ollama",
+        timestamp(),
+        r#"{
+            "role":"assistant",
+            "providerID":"ollama",
+            "modelID":"glm-4.7-flash",
+            "tokens":{"input":1000,"output":500,"reasoning":0,"cache":{"read":0,"write":0}}
+        }"#,
+    );
+    insert_message(
+        &connection,
+        "session-1",
+        "m-kimi",
+        timestamp(),
+        r#"{
+            "role":"assistant",
+            "providerID":"moonshot-cn",
+            "modelID":"k2p5",
+            "tokens":{"input":1000,"output":500,"reasoning":0,"cache":{"read":0,"write":0}}
+        }"#,
+    );
+    drop(connection);
+
+    let pricing = crate::pricing::test_bundled_pricing();
+    let scanner = OpenCodeUsageScanner::for_paths(vec![path.clone()]);
+    let opencode = scanner
+        .scan_paths(vec![path.clone()], now(), &pricing)
+        .unwrap()
+        .unwrap();
+    assert!(opencode.usage.today.is_none());
+    let other_today = opencode.usage.other_usage.unwrap().today.unwrap();
+    assert_eq!(other_today.tokens, 1500);
+    assert_eq!(other_today.estimated_cost_usd, None);
+
+    let mut zai_acc = DailyUsageAccumulator::default();
+    assert!(!scanner
+        .scan_into(now(), &pricing, "zai", &mut zai_acc)
+        .unwrap());
+    assert!(zai_acc.build(now(), "test").today.is_none());
+
+    let mut kimi_acc = DailyUsageAccumulator::default();
+    assert!(scanner
+        .scan_into(now(), &pricing, "kimi", &mut kimi_acc)
+        .unwrap());
+    assert_eq!(kimi_acc.build(now(), "test").today.unwrap().tokens, 1500);
+}

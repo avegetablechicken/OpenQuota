@@ -17,10 +17,12 @@ use crate::{
 use super::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
-    model_scope::{card_for_model, model_belongs_to_card},
+    model_scope::{
+        card_for_model, is_local_runtime_provider, model_belongs_to_card, normalize_provider_model,
+    },
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 9;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 10;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum PiUsageSource {
@@ -198,13 +200,13 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    let model = message
+    let provider = message.get("provider")?.as_str()?;
+    let raw_model = message
         .get("model")
         .and_then(Value::as_str)
         .map(str::trim)
-        .unwrap_or_default()
-        .to_owned();
-    let provider = message.get("provider")?.as_str()?;
+        .unwrap_or_default();
+    let model = normalize_provider_model(provider, raw_model);
     let card_id = mapped_card(provider, &model)?;
     let usage = message.get("usage")?.as_object()?;
     let cache_write = unsigned_number(usage.get("cacheWrite")).unwrap_or_default();
@@ -234,14 +236,20 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
 }
 
 fn mapped_card(provider: &str, model: &str) -> Option<&'static str> {
-    if let Some(card) = card_for_model(model) {
+    if is_local_runtime_provider(provider) {
+        return None;
+    }
+    let normalized_model = normalize_provider_model(provider, model);
+    if let Some(card) = card_for_model(&normalized_model) {
         return Some(card);
     }
     match provider.trim().to_ascii_lowercase().as_str() {
         "anthropic" | "claude-agent-sdk" => Some("claude"),
         "openai" | "openai-codex" => Some("codex"),
         "xai" | "x-ai" | "xai-oauth" | "grok" => Some("grok"),
-        "kimi" | "kimi-code" | "kimi-coding" | "moonshot" | "moonshotai" => Some("kimi"),
+        "kimi" | "kimi-code" | "kimi-coding" | "moonshot" | "moonshot-cn" | "moonshotai" => {
+            Some("kimi")
+        }
         "minimax" => Some("minimax"),
         "zai" | "z-ai" | "z_ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
         "google-antigravity" | "antigravity" | "antigravity-cli" => Some("antigravity"),
@@ -874,5 +882,75 @@ mod tests {
 
         let dirs = sessions_directories(None, None, home);
         assert_eq!(dirs, [(PiUsageSource::OhMyPi, omp_sessions)]);
+    }
+
+    #[test]
+    fn ollama_sessions_are_not_billed_to_cloud_cards_and_kimi_short_aliases_route_to_kimi() {
+        let directory = tempdir().unwrap();
+        let pi_sessions = directory.path().join("pi");
+        fs::create_dir_all(&pi_sessions).unwrap();
+        let at = now();
+        let ts = at.to_rfc3339();
+        let lines = [
+            serde_json::json!({
+                "type": "message",
+                "id": "ollama-1",
+                "timestamp": ts,
+                "message": {
+                    "role": "assistant",
+                    "provider": "ollama",
+                    "model": "glm-4.7-flash",
+                    "usage": { "input": 1000, "output": 500, "totalTokens": 1500, "cost": { "total": 0.0 } }
+                }
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "kimi-short-1",
+                "timestamp": ts,
+                "message": {
+                    "role": "assistant",
+                    "provider": "moonshot-cn",
+                    "model": "k2p5",
+                    "usage": { "input": 1000, "output": 500, "totalTokens": 1500, "cost": { "total": 0.0 } }
+                }
+            }),
+        ]
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        fs::write(pi_sessions.join("session.jsonl"), lines).unwrap();
+
+        let bundled = crate::pricing::test_bundled_pricing();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let mut zai_acc = DailyUsageAccumulator::default();
+        let zai_sources = scan_directories_into(
+            &storage,
+            &[(PiUsageSource::Pi, pi_sessions.clone())],
+            at,
+            &bundled,
+            "zai",
+            &mut zai_acc,
+        )
+        .unwrap();
+        assert!(!zai_sources.pi);
+        assert!(zai_acc.build(at, "test").today.is_none());
+
+        let mut kimi_acc = DailyUsageAccumulator::default();
+        let kimi_sources = scan_directories_into(
+            &storage,
+            &[(PiUsageSource::Pi, pi_sessions)],
+            at,
+            &bundled,
+            "kimi",
+            &mut kimi_acc,
+        )
+        .unwrap();
+        assert!(kimi_sources.pi);
+        let kimi_history = kimi_acc.build(at, "test");
+        let kimi_today = kimi_history.today.unwrap();
+        assert_eq!(kimi_today.tokens, 1500);
+        assert!(kimi_today.estimated_cost_usd.is_some());
+        assert!(kimi_history.other_usage.is_none());
     }
 }

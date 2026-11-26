@@ -3,7 +3,9 @@ use serde_json::{Map, Value};
 
 use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
-    providers::model_scope::{card_for_model, model_belongs_to_card},
+    providers::model_scope::{
+        card_for_model, is_local_runtime_provider, model_belongs_to_card, normalize_provider_model,
+    },
 };
 
 pub(crate) const GO_PROVIDER_ID: &str = "opencode-go";
@@ -16,7 +18,9 @@ fn provider_hint(provider_id: &str) -> Option<&'static str> {
         "openai" | "openai-codex" | "codex" => Some("codex"),
         "xai" | "x-ai" | "xai-oauth" | "grok" => Some("grok"),
         "zai" | "z-ai" | "z_ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
-        "kimi" | "kimi-code" | "kimi-coding" | "moonshot" | "moonshotai" => Some("kimi"),
+        "kimi" | "kimi-code" | "kimi-coding" | "moonshot" | "moonshot-cn" | "moonshotai" => {
+            Some("kimi")
+        }
         "minimax" => Some("minimax"),
         "google-antigravity" | "antigravity" | "antigravity-cli" => Some("antigravity"),
         _ => None,
@@ -28,11 +32,18 @@ pub(super) fn usage_card(provider_id: &str, model: &str) -> Option<&'static str>
     if matches!(provider.as_str(), GO_PROVIDER_ID | "opencode") {
         return Some("opencode");
     }
-    if let Some(card) = card_for_model(model) {
+    if is_local_runtime_provider(&provider) {
+        return None;
+    }
+    let normalized_model = normalize_provider_model(&provider, model);
+    if let Some(card) = card_for_model(&normalized_model) {
         return Some(card);
     }
     let hint = provider_hint(&provider)?;
-    if model.trim().is_empty() || model == "Unattributed" || model_belongs_to_card(hint, model) {
+    if normalized_model.is_empty()
+        || normalized_model == "Unattributed"
+        || model_belongs_to_card(hint, &normalized_model)
+    {
         Some(hint)
     } else {
         None
@@ -175,7 +186,10 @@ pub(super) fn parse_message(
         return None;
     }
     let provider_id = provider_id(value)?;
-    let model = model_id(value).unwrap_or_else(|| "Unattributed".into());
+    let model = model_id(value)
+        .map(|raw| normalize_provider_model(&provider_id, &raw))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Unattributed".into());
     let target = usage_card(&provider_id, &model);
     let is_other = match target {
         Some(target) if target == card_id => false,
@@ -297,17 +311,36 @@ fn estimate_cost(
     model: &str,
     tokens: TokenBreakdown,
 ) -> Option<f64> {
-    if tokens.total_tokens() == 0 || model == "Unattributed" {
+    if tokens.total_tokens() == 0
+        || model == "Unattributed"
+        || is_local_runtime_provider(provider_id)
+    {
         return None;
     }
-    let provider = usage_card(provider_id, model).unwrap_or(provider_id);
-    let cost = if let Some(rates) = pricing.historical_rates(
-        provider,
-        model,
-        timestamp,
-        ServiceTier::Standard,
-        tokens.prompt_tokens(),
-    ) {
+    let mapped_provider = usage_card(provider_id, model);
+    let provider = mapped_provider.unwrap_or(provider_id);
+    let historical = pricing
+        .historical_rates(
+            provider,
+            model,
+            timestamp,
+            ServiceTier::Standard,
+            tokens.prompt_tokens(),
+        )
+        .or_else(|| {
+            (mapped_provider.is_none() && provider != "opencode")
+                .then(|| {
+                    pricing.historical_rates(
+                        "opencode",
+                        model,
+                        timestamp,
+                        ServiceTier::Standard,
+                        tokens.prompt_tokens(),
+                    )
+                })
+                .flatten()
+        });
+    let cost = if let Some(rates) = historical {
         rates?.cost_dollars(tokens, true)
     } else {
         pricing

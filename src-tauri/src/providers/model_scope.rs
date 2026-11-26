@@ -77,6 +77,32 @@ fn is_zai_slug(slug: &str) -> bool {
     has_prefix_or_exact(slug, "glm") || slug.starts_with("chatglm") || slug.starts_with("codegeex")
 }
 
+pub(super) fn is_local_runtime_provider(provider_id: &str) -> bool {
+    provider_id.trim().eq_ignore_ascii_case("ollama")
+}
+
+pub(super) fn is_kimi_provider_alias(provider_id: &str) -> bool {
+    matches!(
+        provider_id.trim().to_ascii_lowercase().as_str(),
+        "kimi" | "kimi-code" | "kimi-coding" | "moonshot" | "moonshot-cn" | "moonshotai"
+    )
+}
+
+/// Expands bare Kimi short-series slugs (`k2p5`, `k3`, `k3.1-pro`) when paired with a Kimi provider.
+pub(super) fn normalize_provider_model(provider_id: &str, model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() || trimmed.contains('/') || !is_kimi_provider_alias(provider_id) {
+        return trimmed.to_owned();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    if bytes.len() >= 2 && bytes[0] == b'k' && bytes[1].is_ascii_digit() {
+        format!("kimi-{lower}")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// Dedicated model-family card that owns `model`, based solely on the model name.
 ///
 /// Local runtimes (`ollama/*`) and model families without a dedicated OpenQuota card

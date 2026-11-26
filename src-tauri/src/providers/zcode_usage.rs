@@ -16,7 +16,10 @@ use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     providers::{
         daily_usage::DailyUsageAccumulator,
-        model_scope::{card_for_model, model_belongs_to_card},
+        model_scope::{
+            card_for_model, is_local_runtime_provider, model_belongs_to_card,
+            normalize_provider_model,
+        },
     },
 };
 
@@ -170,6 +173,7 @@ impl ZCodeUsageScanner {
             if is_delegated_cli(&event.provider_id.trim().to_ascii_lowercase()) {
                 continue;
             }
+            let is_ollama = is_local_runtime_provider(&event.provider_id);
             let configured_owner =
                 provider_kind(&event.provider_id, configured.get(&event.provider_id));
             if event.model.is_empty() {
@@ -179,7 +183,17 @@ impl ZCodeUsageScanner {
                 }
                 continue;
             }
-            let model_owner = card_for_model(&event.model).and_then(ZCodeProvider::from_card_id);
+            let mut event = event;
+            event.model = if configured_owner == Some(ZCodeProvider::Kimi) {
+                normalize_provider_model("kimi", &event.model)
+            } else {
+                normalize_provider_model(&event.provider_id, &event.model)
+            };
+            let model_owner = if is_ollama {
+                None
+            } else {
+                card_for_model(&event.model).and_then(ZCodeProvider::from_card_id)
+            };
             if let Some(owner) = model_owner {
                 if owner == target {
                     contributed = true;
@@ -196,7 +210,7 @@ impl ZCodeUsageScanner {
             }
             let other_owner = configured_owner.unwrap_or(ZCodeProvider::Zai);
             if other_owner == target {
-                add_other_event(accumulator, date, &event, pricing, target);
+                add_other_event(accumulator, date, &event, pricing, target, is_ollama);
             }
         }
         Ok(contributed)
@@ -374,12 +388,15 @@ fn add_other_event(
     event: &UsageEvent,
     pricing: &ModelPricing,
     target: ZCodeProvider,
+    is_local_runtime: bool,
 ) {
     let provider = target.as_str();
     let (variant_model, fallback) = resolve_rate_model(event, pricing, provider);
     let rate_model = variant_model.as_deref().unwrap_or(fallback);
     let tokens = event_tokens(event);
-    let cost = pricing.estimated_cost_at(provider, rate_model, event.timestamp, tokens, true);
+    let cost = (!is_local_runtime)
+        .then(|| pricing.estimated_cost_at(provider, rate_model, event.timestamp, tokens, true))
+        .flatten();
     accumulator.add_other(date, event.total, cost, true, rate_model);
 }
 
@@ -742,5 +759,41 @@ mod tests {
         let changed =
             ZCodeUsageScanner::for_paths(changed_path, directory.path().join("missing.json"));
         assert!(changed.scan(now, &pricing, ZCodeProvider::Kimi).is_err());
+    }
+
+    #[test]
+    fn ollama_models_stay_unpriced_in_others_and_kimi_short_aliases_stay_in_kimi() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("zcode.sqlite");
+        let config = directory.path().join("config.json");
+        let connection = create_database(&database);
+        let now = Utc.with_ymd_and_hms(2026, 8, 27, 12, 0, 0).unwrap();
+        insert(
+            &connection,
+            "ollama",
+            "glm-4.7-flash",
+            now.timestamp_millis(),
+            [1000, 500, 0, 1500],
+        );
+        insert(
+            &connection,
+            "kimi-coding",
+            "k3",
+            now.timestamp_millis(),
+            [2000, 500, 0, 2500],
+        );
+        drop(connection);
+
+        let pricing = test_bundled_pricing();
+        let scanner = ZCodeUsageScanner::for_paths(database, config);
+        let zai = scanner.scan(now, &pricing, ZCodeProvider::Zai).unwrap();
+        assert!(zai.today.is_none());
+        let zai_other = zai.other_usage.unwrap().today.unwrap();
+        assert_eq!(zai_other.tokens, 1500);
+        assert_eq!(zai_other.estimated_cost_usd, None);
+
+        let kimi = scanner.scan(now, &pricing, ZCodeProvider::Kimi).unwrap();
+        assert_eq!(kimi.today.unwrap().tokens, 2500);
+        assert!(kimi.other_usage.is_none());
     }
 }
