@@ -49,12 +49,9 @@ describe('popover geometry contract', () => {
     expect(css).toMatch(/\.provider-card\s*{[^}]*border-radius: 12px;/s);
     expect(css).not.toContain('.provider-card--pending');
     expect(css).toMatch(
-      /\.provider-warning::after,[\s\S]*right: 0;[\s\S]*left: auto;[\s\S]*transform-origin: top right;/,
+      /\.floating-tooltip\s*{[^}]*position: fixed;[^}]*z-index: 110;[^}]*max-width: min\(190px, calc\(100vw - 24px\)\);[^}]*background: var\(--tray\);/s,
     );
-    expect(css).toMatch(
-      /\.total-card__info::after,[\s\S]*right: auto;[\s\S]*left: 0;[\s\S]*transform-origin: top left;/,
-    );
-    expect(css).toContain('max-width: min(190px, calc(100vw - 24px))');
+    expect(css).not.toMatch(/\.demand-metrics\s*{[^}]*overflow: hidden;/s);
     expect(css).toMatch(/\.metric\s*{[^}]*padding: 10px 14px;/s);
     expect(css).toMatch(/\.meter\s*{[^}]*height: 5px;/s);
     expect(css).not.toContain('.spend-scope-switcher');
@@ -129,7 +126,8 @@ describe('popover geometry contract', () => {
   });
 
   it('keeps usage warning tooltips out of a local stacking context so later rows do not paint over them', () => {
-    const warningRule = coLocatedComponentCss.match(/\.usage-label-warning\s*{([^}]*)}/s)?.[1] ?? '';
+    const warningRule =
+      coLocatedComponentCss.match(/\.usage-label-warning\s*{([^}]*)}/s)?.[1] ?? '';
     expect(warningRule).not.toContain('transform:');
     expect(warningRule).not.toContain('z-index:');
     expect(warningRule).toContain('top: -1px');

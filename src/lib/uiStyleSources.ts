@@ -2,6 +2,7 @@ import appSource from '../App.svelte?raw';
 import customizeDetailSource from './CustomizeProviderDetail.svelte?raw';
 import customizeListSource from './CustomizeProviderList.svelte?raw';
 import dashboardSource from './Dashboard.svelte?raw';
+import floatingTooltipSource from './FloatingTooltip.svelte?raw';
 import iconSource from './Icon.svelte?raw';
 import modelUsageDetailSource from './ModelUsageDetail.svelte?raw';
 import providerIconSource from './ProviderIcon.svelte?raw';
@@ -18,6 +19,7 @@ const componentSources = [
   customizeDetailSource,
   customizeListSource,
   dashboardSource,
+  floatingTooltipSource,
   iconSource,
   modelUsageDetailSource,
   providerIconSource,

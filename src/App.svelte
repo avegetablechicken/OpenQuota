@@ -39,6 +39,7 @@
   import ConfirmationSheet from './lib/ConfirmationSheet.svelte';
   import { restoreCustomization } from './lib/customizationHistory';
   import Dashboard from './lib/Dashboard.svelte';
+  import FloatingTooltip from './lib/FloatingTooltip.svelte';
   import Icon from './lib/Icon.svelte';
   import { editsText, handleMenuBarKey } from './lib/menuKeys';
   import { dropFocusUntilInteraction } from './lib/initialFocus';
@@ -1192,6 +1193,7 @@
       onpointerdown={handlePanelResizePointerDown}
     ></div>
   {/if}
+  <FloatingTooltip />
 </main>
 
 <style>

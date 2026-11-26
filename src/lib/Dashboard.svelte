@@ -1058,10 +1058,6 @@
       place-items: center;
     }
 
-    .demand-metrics {
-      overflow: hidden;
-    }
-
     .usage-scope-heading {
       display: flex;
       align-items: center;
