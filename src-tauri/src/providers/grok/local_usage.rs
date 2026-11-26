@@ -12,7 +12,7 @@ use crate::{
     models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
-        claude, codex,
+        antigravity, claude, codex,
         daily_usage::DailyUsageAccumulator,
         kimi,
         log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
@@ -169,6 +169,26 @@ fn scan_path(
     } else {
         pi_usage::PiUsageSources::default()
     };
+    let includes_antigravity = if fold_external {
+        match antigravity::local_usage::scan_routed_usage_into(
+            storage,
+            now,
+            pricing,
+            "grok",
+            &mut accumulator,
+        ) {
+            Ok(includes_antigravity) => includes_antigravity,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:antigravity",
+                    "Antigravity usage history could not be folded into Grok"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
     let includes_claude = if fold_external {
         match claude::local_usage::scan_routed_usage_into(
             storage,
@@ -260,6 +280,9 @@ fn scan_path(
     }
     if includes_pi.oh_my_pi {
         extras.push("oh-my-pi");
+    }
+    if includes_antigravity {
+        extras.push("Antigravity");
     }
     if includes_claude {
         extras.push("Claude Code");

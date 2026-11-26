@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
-    providers::model_scope::{card_for_model, is_known_unowned_foreign_model},
+    providers::model_scope::{card_for_model, model_belongs_to_card},
 };
 
 pub(crate) const GO_PROVIDER_ID: &str = "opencode-go";
@@ -14,11 +14,11 @@ fn provider_hint(provider_id: &str) -> Option<&'static str> {
     match provider_id {
         "anthropic" | "claude" => Some("claude"),
         "openai" | "openai-codex" | "codex" => Some("codex"),
-        "xai" | "x-ai" | "grok" => Some("grok"),
-        "zai" | "z-ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
-        "kimi" | "moonshot" | "moonshotai" => Some("kimi"),
+        "xai" | "x-ai" | "xai-oauth" | "grok" => Some("grok"),
+        "zai" | "z-ai" | "z_ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
+        "kimi" | "kimi-code" | "kimi-coding" | "moonshot" | "moonshotai" => Some("kimi"),
         "minimax" => Some("minimax"),
-        "google-antigravity" | "antigravity" => Some("antigravity"),
+        "google-antigravity" | "antigravity" | "antigravity-cli" => Some("antigravity"),
         _ => None,
     }
 }
@@ -31,13 +31,12 @@ pub(super) fn usage_card(provider_id: &str, model: &str) -> Option<&'static str>
     if let Some(card) = card_for_model(model) {
         return Some(card);
     }
-    if matches!(provider.as_str(), "google-antigravity" | "antigravity") {
-        return Some("antigravity");
+    let hint = provider_hint(&provider)?;
+    if model.trim().is_empty() || model == "Unattributed" || model_belongs_to_card(hint, model) {
+        Some(hint)
+    } else {
+        None
     }
-    if is_known_unowned_foreign_model(model) {
-        return None;
-    }
-    provider_hint(&provider)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

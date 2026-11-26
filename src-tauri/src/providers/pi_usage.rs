@@ -20,7 +20,7 @@ use super::{
     model_scope::{card_for_model, model_belongs_to_card},
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 8;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 9;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum PiUsageSource {
@@ -32,33 +32,6 @@ enum PiUsageSource {
 pub struct PiUsageSources {
     pub pi: bool,
     pub oh_my_pi: bool,
-}
-
-pub fn usage_source_note(
-    base: &str,
-    pi_sources: PiUsageSources,
-    includes_opencode: bool,
-    includes_zcode: bool,
-) -> String {
-    let mut sources = Vec::new();
-    if pi_sources.pi {
-        sources.push("pi");
-    }
-    if pi_sources.oh_my_pi {
-        sources.push("oh-my-pi");
-    }
-    if includes_opencode {
-        sources.push("OpenCode");
-    }
-    if includes_zcode {
-        sources.push("ZCode");
-    }
-    let suffix = match sources.as_slice() {
-        [] => String::new(),
-        [source] => format!(" and {source}"),
-        [leading @ .., last] => format!(", {}, and {last}", leading.join(", ")),
-    };
-    format!("From your {base}{suffix} (estimated)")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -408,8 +381,7 @@ mod tests {
 
     use super::{
         aggregate_into, deduplicate, mapped_card, parse_line, scan_directories_into,
-        sessions_directories, usage_source_note, PiTokenBreakdown, PiUsageEvent, PiUsageSource,
-        PiUsageSources,
+        sessions_directories, PiTokenBreakdown, PiUsageEvent, PiUsageSource, PiUsageSources,
     };
     use crate::{
         pricing::{ModelPricing, ModelRates, PricingCatalog, PricingSupplement},
@@ -522,7 +494,11 @@ mod tests {
         assert_eq!(mapped_card("anthropic", "MiniMax-M2.7"), Some("minimax"));
         assert_eq!(mapped_card("custom", "grok-4"), Some("grok"));
         assert_eq!(mapped_card("xai-oauth", "future-model"), Some("grok"));
-        assert_eq!(mapped_card("github-copilot", "gemini-3-pro"), None);
+        assert_eq!(
+            mapped_card("github-copilot", "gemini-3-pro"),
+            Some("antigravity")
+        );
+        assert_eq!(mapped_card("google", "gemini-3-pro"), Some("antigravity"));
         assert_eq!(mapped_card("nvidia-nim", "deepseek-v4"), None);
     }
 
@@ -800,23 +776,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn source_note_names_only_contributing_local_clients() {
-        assert_eq!(
-            usage_source_note(
-                "Codex logs",
-                PiUsageSources {
-                    pi: true,
-                    oh_my_pi: true,
-                },
-                true,
-                false,
-            ),
-            "From your Codex logs, pi, oh-my-pi, and OpenCode (estimated)"
-        );
-        assert_eq!(
-            usage_source_note("Codex logs", PiUsageSources::default(), false, false),
-            "From your Codex logs (estimated)"
-        );
-    }
 }

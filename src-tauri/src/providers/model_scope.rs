@@ -37,12 +37,36 @@ fn is_codex_slug(slug: &str) -> bool {
         })
 }
 
+fn is_antigravity_slug(slug: &str) -> bool {
+    has_prefix_or_exact(slug, "gemini")
+}
+
+fn is_gpt_oss_slug(slug: &str) -> bool {
+    has_prefix_or_exact(slug, "gpt-oss")
+}
+
 fn is_grok_slug(slug: &str) -> bool {
     has_prefix_or_exact(slug, "grok")
 }
 
 fn is_kimi_slug(slug: &str) -> bool {
     has_prefix_or_exact(slug, "kimi") || has_prefix_or_exact(slug, "moonshot")
+}
+
+fn is_kimi_namespaced_short_model(normalized_model: &str, slug: &str) -> bool {
+    let bytes = slug.as_bytes();
+    let is_short_series = bytes.len() >= 2 && bytes[0] == b'k' && bytes[1].is_ascii_digit();
+    is_short_series
+        && [
+            "kimi/",
+            "kimi-code/",
+            "kimi-coding/",
+            "moonshot/",
+            "moonshot-cn/",
+            "moonshotai/",
+        ]
+        .iter()
+        .any(|prefix| normalized_model.starts_with(prefix))
 }
 
 fn is_minimax_slug(slug: &str) -> bool {
@@ -56,7 +80,7 @@ fn is_zai_slug(slug: &str) -> bool {
 /// Dedicated model-family card that owns `model`, based solely on the model name.
 ///
 /// Local runtimes (`ollama/*`) and model families without a dedicated OpenQuota card
-/// (`deepseek`, `qwen`, `llama`, `mistral`, `gemini`, `gpt-oss`, ...) return `None`.
+/// (`deepseek`, `qwen`, `llama`, `mistral`, `gpt-oss`, ...) return `None`.
 pub(super) fn card_for_model(model: &str) -> Option<&'static str> {
     let normalized = normalized(model);
     let slug = model_slug(&normalized)?;
@@ -64,9 +88,11 @@ pub(super) fn card_for_model(model: &str) -> Option<&'static str> {
         Some("claude")
     } else if is_codex_slug(slug) {
         Some("codex")
+    } else if is_antigravity_slug(slug) {
+        Some("antigravity")
     } else if is_grok_slug(slug) {
         Some("grok")
-    } else if is_kimi_slug(slug) {
+    } else if is_kimi_slug(slug) || is_kimi_namespaced_short_model(&normalized, slug) {
         Some("kimi")
     } else if is_minimax_slug(slug) {
         Some("minimax")
@@ -75,37 +101,6 @@ pub(super) fn card_for_model(model: &str) -> Option<&'static str> {
     } else {
         None
     }
-}
-
-/// Models that clearly belong to a third-party family with no dedicated first-party card.
-pub(super) fn is_known_unowned_foreign_model(model: &str) -> bool {
-    let normalized = normalized(model);
-    if normalized.is_empty() || card_for_model(&normalized).is_some() {
-        return false;
-    }
-    [
-        "qwen",
-        "gemini",
-        "gpt-oss",
-        "ollama/",
-        "llama",
-        "mistral",
-        "deepseek",
-        "openrouter/",
-        "gemma",
-        "command-r",
-        "phi-",
-        "yi-",
-        "doubao",
-        "ernie",
-        "hunyuan",
-        "baichuan",
-        "internlm",
-        "step-",
-        "nova-",
-    ]
-    .iter()
-    .any(|marker| normalized.starts_with(marker) || normalized.contains(&format!("/{marker}")))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,32 +122,31 @@ pub(super) fn native_log_disposition(home_card: &str, model: &str) -> LocalModel
             LocalModelDisposition::RoutedTo(owner)
         };
     }
-    if is_model_obviously_foreign_to_card(home_card, model) {
-        LocalModelDisposition::Other
-    } else {
+    if model_belongs_to_card(home_card, model) {
         LocalModelDisposition::Home
+    } else {
+        LocalModelDisposition::Other
     }
 }
 
 pub(super) fn model_belongs_to_card(card_id: &str, model: &str) -> bool {
     match card_id {
-        "codex" => card_for_model(model) == Some("codex"),
-        "claude" => {
-            card_for_model(model) == Some("claude")
-                || (card_for_model(model).is_none() && !is_known_unowned_foreign_model(model))
+        "claude" | "codex" | "grok" | "kimi" | "minimax" | "zai" => {
+            card_for_model(model) == Some(card_id)
         }
-        "grok" | "kimi" | "minimax" | "zai" => card_for_model(model) == Some(card_id),
+        "antigravity" => {
+            card_for_model(model) == Some("antigravity")
+                || model_slug(&normalized(model)).is_some_and(is_gpt_oss_slug)
+        }
         _ => true,
     }
 }
 
+#[cfg(test)]
 pub(super) fn is_model_obviously_foreign_to_card(card_id: &str, model: &str) -> bool {
     match card_id {
-        "codex" => card_for_model(model) != Some("codex"),
-        "claude" => !model_belongs_to_card("claude", model),
-        "grok" | "kimi" | "minimax" | "zai" => {
-            card_for_model(model).is_some_and(|owner| owner != card_id)
-                || is_known_unowned_foreign_model(model)
+        "claude" | "codex" | "grok" | "kimi" | "minimax" | "zai" | "antigravity" => {
+            !model_belongs_to_card(card_id, model)
         }
         _ => false,
     }
@@ -190,6 +184,8 @@ mod tests {
             ("grok-code-fast-1", Some("grok")),
             ("xai/grok-4", Some("grok")),
             ("kimi-k2.5", Some("kimi")),
+            ("kimi-code/k3", Some("kimi")),
+            ("kimi-code/k2.7-code", Some("kimi")),
             ("moonshot/kimi-k3.1-pro", Some("kimi")),
             ("moonshot-v1-8k", Some("kimi")),
             ("MiniMax-M2.7", Some("minimax")),
@@ -200,9 +196,12 @@ mod tests {
             ("chatglm-4", Some("zai")),
             ("deepseek-v4-flash", None),
             ("qwen3.8:27b - mlx", None),
-            ("gemini-3-flash", None),
+            ("gemini-3-flash", Some("antigravity")),
+            ("google/gemini-4-neon-high", Some("antigravity")),
+            ("gemma-3-27b", None),
             ("gpt-oss-20b", None),
             ("ollama/glm4", None),
+            ("ollama/gemini", None),
             ("ollama/qwen3", None),
             ("openrouter/auto", None),
         ] {
@@ -217,8 +216,16 @@ mod tests {
             LocalModelDisposition::Home
         );
         assert_eq!(
-            native_log_disposition("claude", "future-unpriced-model"),
+            native_log_disposition("claude", "claude-future-unpriced"),
             LocalModelDisposition::Home
+        );
+        assert_eq!(
+            native_log_disposition("claude", "future-unpriced-model"),
+            LocalModelDisposition::Other
+        );
+        assert_eq!(
+            native_log_disposition("claude", "gemini-3-flash"),
+            LocalModelDisposition::RoutedTo("antigravity")
         );
         assert_eq!(
             native_log_disposition("claude", "glm-5.3-flash"),
@@ -249,8 +256,32 @@ mod tests {
             LocalModelDisposition::RoutedTo("claude")
         );
         assert_eq!(
+            native_log_disposition("codex", "gemini-3-flash"),
+            LocalModelDisposition::RoutedTo("antigravity")
+        );
+        assert_eq!(
+            native_log_disposition("antigravity", "gemini-4-neon-high"),
+            LocalModelDisposition::Home
+        );
+        assert_eq!(
+            native_log_disposition("antigravity", "gpt-oss-120b"),
+            LocalModelDisposition::Home
+        );
+        assert_eq!(
+            native_log_disposition("antigravity", "claude-sonnet-4-6"),
+            LocalModelDisposition::RoutedTo("claude")
+        );
+        assert_eq!(
+            native_log_disposition("antigravity", "deepseek-v4"),
+            LocalModelDisposition::Other
+        );
+        assert_eq!(
             native_log_disposition("grok", "grok-unknown-model"),
             LocalModelDisposition::Home
+        );
+        assert_eq!(
+            native_log_disposition("grok", "future-unpriced-model"),
+            LocalModelDisposition::Other
         );
         assert_eq!(
             native_log_disposition("grok", "deepseek-v4"),
@@ -262,10 +293,19 @@ mod tests {
     fn card_membership_helpers_stay_consistent() {
         assert!(model_belongs_to_card("codex", "gpt-5.4"));
         assert!(!model_belongs_to_card("codex", "gpt-oss-20b"));
+        assert!(model_belongs_to_card("antigravity", "gemini-3-pro"));
+        assert!(model_belongs_to_card("antigravity", "gpt-oss-120b"));
+        assert!(!model_belongs_to_card("antigravity", "claude-sonnet-4-6"));
+        assert!(!model_belongs_to_card("antigravity", "deepseek-v4"));
         assert!(model_belongs_to_card("claude", "claude-sonnet-4-6"));
-        assert!(model_belongs_to_card("claude", "future-unpriced-model"));
+        assert!(model_belongs_to_card("claude", "claude-future-unpriced"));
+        assert!(!model_belongs_to_card("claude", "future-unpriced-model"));
         assert!(!model_belongs_to_card("claude", "glm-5"));
         assert!(is_model_obviously_foreign_to_card("claude", "glm-5"));
+        assert!(is_model_obviously_foreign_to_card(
+            "claude",
+            "future-unpriced-model"
+        ));
         assert!(is_model_obviously_foreign_to_card(
             "zai",
             "claude-sonnet-4-6"

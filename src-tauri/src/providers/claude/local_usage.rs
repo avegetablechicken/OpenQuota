@@ -811,7 +811,7 @@ mod tests {
 
     #[test]
     fn advisor_iteration_uses_its_own_model_price_alongside_parent_cost() {
-        let content = r#"{"timestamp":"2026-07-15T08:00:00Z","requestId":"req_1","costUSD":0.001,"message":{"id":"msg_1","model":"main-model","usage":{"input_tokens":1,"output_tokens":2,"iterations":[{"type":"advisor_message","model":"claude-opus-4-6","input_tokens":10,"output_tokens":2}]}}}"#;
+        let content = r#"{"timestamp":"2026-07-15T08:00:00Z","requestId":"req_1","costUSD":0.001,"message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":2,"iterations":[{"type":"advisor_message","model":"claude-opus-4-6","input_tokens":10,"output_tokens":2}]}}}"#;
         let pricing = test_bundled_pricing();
         let advisor_cost = pricing
             .estimated_cost_dollars(
@@ -969,19 +969,19 @@ mod tests {
     #[test]
     fn unpriced_usage_keeps_tokens_while_marking_estimate_incomplete() {
         let content = r#"{"timestamp":"2026-07-15T08:00:00Z","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100,"output_tokens":10}}}
-{"timestamp":"2026-07-15T09:00:00Z","message":{"model":"future-unpriced-model","usage":{"input_tokens":500,"output_tokens":20}}}"#;
+{"timestamp":"2026-07-15T09:00:00Z","message":{"model":"claude-future-unpriced-model","usage":{"input_tokens":500,"output_tokens":20}}}"#;
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
         let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 630);
         assert!(today.estimated_cost_usd.is_some());
         assert!(!today.estimate_complete);
-        assert_eq!(today.unknown_models, ["future-unpriced-model"]);
+        assert_eq!(today.unknown_models, ["claude-future-unpriced-model"]);
         let breakdown = today.model_breakdown.unwrap();
         let unpriced = breakdown
             .models
             .iter()
-            .find(|entry| entry.model == "future-unpriced-model")
+            .find(|entry| entry.model == "claude-future-unpriced-model")
             .unwrap();
         assert_eq!(unpriced.total_tokens, 520);
         assert_eq!(unpriced.cost_usd, None);
@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn explicit_cost_wins_even_when_model_has_no_catalog_entry() {
-        let content = r#"{"timestamp":"2026-07-15T08:00:00Z","costUSD":1.75,"message":{"model":"future-unpriced-model","usage":{"input_tokens":500,"output_tokens":20}}}"#;
+        let content = r#"{"timestamp":"2026-07-15T08:00:00Z","costUSD":1.75,"message":{"model":"claude-future-unpriced-model","usage":{"input_tokens":500,"output_tokens":20}}}"#;
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
         let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.unwrap();
@@ -1051,7 +1051,8 @@ mod tests {
     #[test]
     fn foreign_local_models_are_excluded_from_claude_history() {
         let content = r#"{"timestamp":"2026-07-15T08:00:00Z","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100,"output_tokens":10}}}
-{"timestamp":"2026-07-15T09:00:00Z","message":{"model":"qwen3.8:27b - mlx","usage":{"input_tokens":500,"output_tokens":20}}}"#;
+{"timestamp":"2026-07-15T09:00:00Z","message":{"model":"qwen3.8:27b - mlx","usage":{"input_tokens":500,"output_tokens":20}}}
+{"timestamp":"2026-07-15T10:00:00Z","message":{"model":"future-unpriced-model","usage":{"input_tokens":300,"output_tokens":10}}}"#;
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
         let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.as_ref().unwrap();
@@ -1059,7 +1060,7 @@ mod tests {
         assert_eq!(today.tokens, 110);
         assert!(today.unknown_models.is_empty());
         let other = history.other_usage.unwrap().today.unwrap();
-        assert_eq!(other.tokens, 520);
+        assert_eq!(other.tokens, 830);
         assert_eq!(other.priced_tokens, 0);
         assert!(other.estimated_cost_usd.is_none());
     }

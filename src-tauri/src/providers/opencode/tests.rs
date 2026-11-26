@@ -238,19 +238,19 @@ fn provider_ids_route_direct_usage_without_leaking_into_opencode() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("opencode.db");
     let connection = create_database(&path, false);
-    for (message, provider, cost, tokens) in [
-        ("hosted", "opencode-go", 1.0, 100),
-        ("claude", "anthropic", 2.0, 200),
-        ("openai", "openai", 3.0, 300),
-        ("codex", "openai-codex", 4.0, 400),
-        ("unsupported", "google", 5.0, 500),
+    for (message, provider, model, cost, tokens) in [
+        ("hosted", "opencode-go", "priced-model", 1.0, 100),
+        ("claude", "anthropic", "claude-sonnet-4-6", 2.0, 200),
+        ("openai", "openai", "gpt-5.4", 3.0, 300),
+        ("codex", "openai-codex", "gpt-5.3-codex", 4.0, 400),
+        ("unsupported", "google", "priced-model", 5.0, 500),
     ] {
         insert_message(
             &connection,
             "session",
             message,
             timestamp(),
-            &exact_message(provider, "priced-model", cost, tokens, 0),
+            &exact_message(provider, model, cost, tokens, 0),
         );
     }
     drop(connection);

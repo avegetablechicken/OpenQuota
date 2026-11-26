@@ -16,7 +16,7 @@ use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     providers::{
         daily_usage::DailyUsageAccumulator,
-        model_scope::{card_for_model, is_known_unowned_foreign_model},
+        model_scope::{card_for_model, model_belongs_to_card},
     },
 };
 
@@ -36,6 +36,7 @@ const REQUIRED_COLUMNS: &[&str] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ZCodeProvider {
+    Antigravity,
     Claude,
     Codex,
     Grok,
@@ -47,6 +48,7 @@ pub(crate) enum ZCodeProvider {
 impl ZCodeProvider {
     pub(crate) fn from_card_id(card_id: &str) -> Option<Self> {
         match card_id {
+            "antigravity" => Some(Self::Antigravity),
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "grok" => Some(Self::Grok),
@@ -59,6 +61,7 @@ impl ZCodeProvider {
 
     fn as_str(self) -> &'static str {
         match self {
+            Self::Antigravity => "antigravity",
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Grok => "grok",
@@ -177,16 +180,16 @@ impl ZCodeUsageScanner {
                 }
                 continue;
             }
-            if is_known_unowned_foreign_model(&event.model) {
-                let other_owner = configured_owner.unwrap_or(ZCodeProvider::Zai);
-                if other_owner == target {
-                    add_other_event(accumulator, date, &event, pricing, target);
-                }
-                continue;
-            }
-            if configured_owner == Some(target) {
+            if configured_owner == Some(target)
+                && model_belongs_to_card(target.as_str(), &event.model)
+            {
                 contributed = true;
                 add_event(accumulator, date, &event, pricing, target);
+                continue;
+            }
+            let other_owner = configured_owner.unwrap_or(ZCodeProvider::Zai);
+            if other_owner == target {
+                add_other_event(accumulator, date, &event, pricing, target);
             }
         }
         Ok(contributed)
@@ -420,6 +423,10 @@ fn provider_kind(provider_id: &str, config: Option<&ZCodeProviderConfig>) -> Opt
         ("claude", ZCodeProvider::Claude),
         ("openai", ZCodeProvider::Codex),
         ("codex", ZCodeProvider::Codex),
+        ("antigravity", ZCodeProvider::Antigravity),
+        ("google-antigravity", ZCodeProvider::Antigravity),
+        ("google", ZCodeProvider::Antigravity),
+        ("gemini", ZCodeProvider::Antigravity),
         ("minimax", ZCodeProvider::MiniMax),
         ("moonshot", ZCodeProvider::Kimi),
         ("kimi", ZCodeProvider::Kimi),
@@ -475,6 +482,11 @@ fn provider_from_metadata(name: &str, base_url: &str) -> Option<ZCodeProvider> {
     }
     if base_url.contains("api.openai.com") || matches!(name.trim(), "openai" | "codex") {
         return Some(ZCodeProvider::Codex);
+    }
+    if base_url.contains("generativelanguage.googleapis.com")
+        || matches!(name.trim(), "google" | "gemini" | "antigravity")
+    {
+        return Some(ZCodeProvider::Antigravity);
     }
     None
 }
@@ -651,6 +663,7 @@ mod tests {
             ("my-relay", "kimi-k3", 400),
             ("my-relay", "MiniMax-M2.7", 500),
             ("anthropic", "GLM-5.3-Flash", 600),
+            ("my-relay", "gemini-3-pro", 650),
             ("builtin:codex-cli", "gpt-5.4", 9_999),
             ("anthropic", "deepseek-flash", 700),
             ("bailian", "qwen3-coder", 800),
@@ -667,6 +680,9 @@ mod tests {
 
         let scanner = ZCodeUsageScanner::for_paths(database, config);
         let pricing = test_bundled_pricing();
+        let antigravity = scanner
+            .scan(now, &pricing, ZCodeProvider::Antigravity)
+            .unwrap();
         let claude = scanner.scan(now, &pricing, ZCodeProvider::Claude).unwrap();
         let codex = scanner.scan(now, &pricing, ZCodeProvider::Codex).unwrap();
         let grok = scanner.scan(now, &pricing, ZCodeProvider::Grok).unwrap();
@@ -674,6 +690,7 @@ mod tests {
         let minimax = scanner.scan(now, &pricing, ZCodeProvider::MiniMax).unwrap();
         let zai = scanner.scan(now, &pricing, ZCodeProvider::Zai).unwrap();
 
+        assert_eq!(antigravity.today.as_ref().unwrap().tokens, 650);
         assert_eq!(claude.today.as_ref().unwrap().tokens, 100);
         assert_eq!(codex.today.as_ref().unwrap().tokens, 200);
         assert_eq!(grok.today.as_ref().unwrap().tokens, 300);

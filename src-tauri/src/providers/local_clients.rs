@@ -6,7 +6,7 @@ use crate::{
     models::UsageHistory,
     pricing::PricingStore,
     providers::{
-        claude, codex,
+        antigravity, claude, codex,
         daily_usage::DailyUsageAccumulator,
         grok, kimi,
         log_usage::scan_or_cached_usage,
@@ -76,6 +76,23 @@ impl RoutedLocalUsage {
                         crate::app_warn!(
                             "plugin:pi",
                             "pi/oh-my-pi usage history could not be folded into {provider_name}"
+                        );
+                    }
+                }
+                match antigravity::local_usage::scan_routed_usage_into(
+                    &self.storage,
+                    now,
+                    &pricing,
+                    provider_id,
+                    &mut accumulator,
+                ) {
+                    Ok(true) => sources.push("Antigravity"),
+                    Ok(false) => {}
+                    Err(_) => {
+                        had_error = true;
+                        crate::app_warn!(
+                            "plugin:antigravity",
+                            "Antigravity usage history could not be folded into {provider_name}"
                         );
                     }
                 }

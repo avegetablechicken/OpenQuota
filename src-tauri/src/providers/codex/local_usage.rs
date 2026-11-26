@@ -18,7 +18,7 @@ use crate::{
 
 use super::CodexError;
 use crate::providers::{
-    claude,
+    antigravity, claude,
     daily_usage::DailyUsageAccumulator,
     grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
@@ -101,6 +101,22 @@ pub fn scan_local_usage(
             pi_usage::PiUsageSources::default()
         }
     };
+    let includes_antigravity = match antigravity::local_usage::scan_routed_usage_into(
+        storage,
+        now,
+        pricing,
+        "codex",
+        &mut accumulator,
+    ) {
+        Ok(includes_antigravity) => includes_antigravity,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:antigravity",
+                "Antigravity usage history could not be folded into Codex"
+            );
+            false
+        }
+    };
     let includes_claude = match claude::local_usage::scan_routed_usage_into(
         storage,
         now,
@@ -181,6 +197,9 @@ pub fn scan_local_usage(
     }
     if includes_pi.oh_my_pi {
         extras.push("oh-my-pi");
+    }
+    if includes_antigravity {
+        extras.push("Antigravity");
     }
     if includes_claude {
         extras.push("Claude Code");

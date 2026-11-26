@@ -16,10 +16,15 @@ use crate::{
 
 use super::AntigravityError;
 use crate::providers::{
+    claude, codex,
     daily_usage::DailyUsageAccumulator,
+    grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp},
-    model_scope::card_for_model,
+    model_scope::{
+        card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
+    },
     opencode, pi_usage,
+    zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
 
 pub(super) const USAGE_SOURCE_NOTE: &str = "From your Antigravity transcripts (estimated)";
@@ -104,7 +109,7 @@ pub(crate) fn scan_routed_usage_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, AntigravityError> {
-    if card_id != "claude" {
+    if card_id == "antigravity" {
         return Ok(false);
     }
     let roots = default_roots();
@@ -173,6 +178,86 @@ fn scan_roots(
     } else {
         pi_usage::PiUsageSources::default()
     };
+    let includes_claude = if fold_pi {
+        match claude::local_usage::scan_routed_usage_into(
+            storage,
+            now,
+            pricing,
+            "antigravity",
+            &mut accumulator,
+        ) {
+            Ok(includes_claude) => includes_claude,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:claude",
+                    "Claude Code usage history could not be folded into Antigravity"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let includes_codex = if fold_pi {
+        match codex::local_usage::scan_routed_usage_into(
+            storage,
+            now,
+            pricing,
+            "antigravity",
+            &mut accumulator,
+        ) {
+            Ok(includes_codex) => includes_codex,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:codex",
+                    "Codex CLI usage history could not be folded into Antigravity"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let includes_grok = if fold_pi {
+        match grok::local_usage::scan_routed_usage_into(
+            storage,
+            now,
+            pricing,
+            "antigravity",
+            &mut accumulator,
+        ) {
+            Ok(includes_grok) => includes_grok,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:grok",
+                    "Grok CLI usage history could not be folded into Antigravity"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let includes_kimi = if fold_pi {
+        match kimi::local_usage::scan_routed_usage_into(
+            storage,
+            now,
+            pricing,
+            "antigravity",
+            &mut accumulator,
+        ) {
+            Ok(includes_kimi) => includes_kimi,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:kimi",
+                    "Kimi Code usage history could not be folded into Antigravity"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
     let includes_opencode = if fold_pi {
         match opencode::scan_routed_usage_into(now, pricing, "antigravity", &mut accumulator) {
             Ok(includes_opencode) => includes_opencode,
@@ -187,12 +272,51 @@ fn scan_roots(
     } else {
         false
     };
-    let source_note = pi_usage::usage_source_note(
-        "Antigravity transcripts",
-        includes_pi,
-        includes_opencode,
-        false,
-    );
+    let includes_zcode = if fold_pi {
+        match ZCodeUsageScanner::new().scan_into(
+            now,
+            pricing,
+            ZCodeProvider::Antigravity,
+            &mut accumulator,
+        ) {
+            Ok(includes_zcode) => includes_zcode,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:zcode",
+                    "ZCode usage history could not be folded into Antigravity"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let mut extras = Vec::new();
+    if includes_pi.pi {
+        extras.push("pi");
+    }
+    if includes_pi.oh_my_pi {
+        extras.push("oh-my-pi");
+    }
+    if includes_claude {
+        extras.push("Claude Code");
+    }
+    if includes_codex {
+        extras.push("Codex");
+    }
+    if includes_grok {
+        extras.push("Grok");
+    }
+    if includes_kimi {
+        extras.push("Kimi Code");
+    }
+    if includes_opencode {
+        extras.push("OpenCode");
+    }
+    if includes_zcode {
+        extras.push("ZCode");
+    }
+    let source_note = format_source_note("Antigravity transcripts", &extras);
     Ok(accumulator.build(now, &source_note))
 }
 
@@ -448,18 +572,29 @@ fn aggregate_into(
             accumulator.add_unpriced(date, total, "Unattributed");
             continue;
         };
-        if card_for_model(model_name) == Some("claude") {
-            continue;
+        match native_log_disposition("antigravity", model_name) {
+            LocalModelDisposition::Home => {
+                add_priced_event(
+                    accumulator,
+                    date,
+                    &event,
+                    model_name,
+                    "antigravity",
+                    pricing,
+                );
+            }
+            LocalModelDisposition::RoutedTo(_) => continue,
+            LocalModelDisposition::Other => {
+                let cost = pricing.estimated_cost_at(
+                    "antigravity",
+                    model_name,
+                    event.timestamp,
+                    event.pricing_tokens(),
+                    true,
+                );
+                accumulator.add_other(date, total, cost, true, model_name);
+            }
         }
-
-        add_priced_event(
-            accumulator,
-            date,
-            &event,
-            model_name,
-            "antigravity",
-            pricing,
-        );
     }
 }
 
