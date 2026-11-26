@@ -18,6 +18,7 @@ use super::AntigravityError;
 use crate::providers::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp},
+    model_scope::card_for_model,
     opencode, pi_usage,
 };
 
@@ -54,32 +55,20 @@ impl AntigravityTokenEvent {
     }
 }
 
-pub fn scan_local_usage(
-    storage: &Storage,
-    now: DateTime<Utc>,
-    pricing: &ModelPricing,
-) -> Result<UsageHistory, AntigravityError> {
+fn default_roots() -> Vec<PathBuf> {
     let home = home_directory();
-    let roots = antigravity_roots(
+    antigravity_roots(
         env_text("ANTIGRAVITY_HOME").as_deref(),
         env_text("ANTIGRAVITY_DATA_DIR").as_deref(),
         &home,
-    );
-    scan_roots(storage, &roots, now, pricing, true)
+    )
 }
 
-fn scan_roots(
+fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
-    now: DateTime<Utc>,
-    pricing: &ModelPricing,
-    fold_pi: bool,
-) -> Result<UsageHistory, AntigravityError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
+    since_date: NaiveDate,
+) -> Result<Vec<AntigravityTokenEvent>, AntigravityError> {
     let paths = discover_transcript_files(roots);
     let mut seen_paths = HashSet::with_capacity(paths.len());
     let mut events = Vec::new();
@@ -105,6 +94,68 @@ fn scan_roots(
     storage
         .prune_log_events("antigravity", &seen_paths)
         .map_err(|_| AntigravityError::LocalUsage)?;
+    Ok(events)
+}
+
+pub(crate) fn scan_routed_usage_into(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> Result<bool, AntigravityError> {
+    if card_id != "claude" {
+        return Ok(false);
+    }
+    let roots = default_roots();
+    scan_routed_roots_into(storage, &roots, now, pricing, card_id, accumulator)
+}
+
+fn scan_routed_roots_into(
+    storage: &Storage,
+    roots: &[PathBuf],
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> Result<bool, AntigravityError> {
+    let since_date = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(30))
+        .unwrap_or(NaiveDate::MIN);
+    let events = load_local_events(storage, roots, since_date)?;
+    Ok(aggregate_routed_into(
+        events,
+        now,
+        pricing,
+        card_id,
+        accumulator,
+    ))
+}
+
+pub fn scan_local_usage(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+) -> Result<UsageHistory, AntigravityError> {
+    let roots = default_roots();
+    scan_roots(storage, &roots, now, pricing, true)
+}
+
+fn scan_roots(
+    storage: &Storage,
+    roots: &[PathBuf],
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    fold_pi: bool,
+) -> Result<UsageHistory, AntigravityError> {
+    let since_date = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(30))
+        .unwrap_or(NaiveDate::MIN);
+    let events = load_local_events(storage, roots, since_date)?;
 
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(events, now, pricing, &mut accumulator);
@@ -342,13 +393,27 @@ fn integer(value: Option<&Value>) -> Option<u64> {
     }
 }
 
-/// The rate card of a model served through Antigravity: Claude models keep Anthropic's prices.
-pub(crate) fn billing_provider(model: &str) -> &'static str {
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized.starts_with("claude-") || normalized.contains("/claude-") {
-        "claude"
+fn add_priced_event(
+    accumulator: &mut DailyUsageAccumulator,
+    date: NaiveDate,
+    event: &AntigravityTokenEvent,
+    model_name: &str,
+    provider: &str,
+    pricing: &ModelPricing,
+) {
+    let total = event.total_tokens();
+    let tokens = event.pricing_tokens();
+    if let Some(cost) =
+        pricing.estimated_cost_at(provider, model_name, event.timestamp, tokens, true)
+    {
+        let family = pricing.display_family(model_name);
+        if family != model_name {
+            accumulator.add_variant(date, total, cost, &family, model_name);
+        } else {
+            accumulator.add(date, total, cost, &family);
+        }
     } else {
-        "antigravity"
+        accumulator.add_unpriced(date, total, model_name);
     }
 }
 
@@ -373,7 +438,6 @@ fn aggregate_into(
         if total == 0 {
             continue;
         }
-        let tokens = event.pricing_tokens();
         let model_name = event
             .model
             .as_deref()
@@ -384,21 +448,56 @@ fn aggregate_into(
             accumulator.add_unpriced(date, total, "Unattributed");
             continue;
         };
-
-        let provider = billing_provider(model_name);
-        if let Some(cost) =
-            pricing.estimated_cost_at(provider, model_name, event.timestamp, tokens, true)
-        {
-            let family = pricing.display_family(model_name);
-            if family != model_name {
-                accumulator.add_variant(date, total, cost, &family, model_name);
-            } else {
-                accumulator.add(date, total, cost, &family);
-            }
-        } else {
-            accumulator.add_unpriced(date, total, model_name);
+        if card_for_model(model_name) == Some("claude") {
+            continue;
         }
+
+        add_priced_event(
+            accumulator,
+            date,
+            &event,
+            model_name,
+            "antigravity",
+            pricing,
+        );
     }
+}
+
+fn aggregate_routed_into(
+    events: Vec<AntigravityTokenEvent>,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> bool {
+    let since = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(30))
+        .unwrap_or(NaiveDate::MIN);
+    let mut contributed = false;
+
+    for event in events {
+        let date = event.timestamp.with_timezone(&Local).date_naive();
+        if date < since || event.timestamp > now || event.total_tokens() == 0 {
+            continue;
+        }
+        let Some(model_name) = event
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        if card_for_model(model_name) != Some(card_id) {
+            continue;
+        }
+
+        add_priced_event(accumulator, date, &event, model_name, card_id, pricing);
+        contributed = true;
+    }
+    contributed
 }
 
 #[cfg(test)]
@@ -409,9 +508,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        antigravity_roots, discover_transcript_files, parse_jsonl, scan_roots, USAGE_SOURCE_NOTE,
+        antigravity_roots, discover_transcript_files, parse_jsonl, scan_roots,
+        scan_routed_roots_into, USAGE_SOURCE_NOTE,
     };
-    use crate::{pricing::test_bundled_pricing, storage::Storage};
+    use crate::{
+        pricing::test_bundled_pricing, providers::daily_usage::DailyUsageAccumulator,
+        storage::Storage,
+    };
 
     fn local_noon(year: i32, month: u32, day: u32) -> DateTime<Utc> {
         Local
@@ -515,20 +618,20 @@ mod tests {
         write_transcript(&root, "conv-1", "transcript.jsonl", &body);
 
         let pricing = test_bundled_pricing();
-        let history = scan_roots(&storage, &[root], now, &pricing, false).unwrap();
+        let history =
+            scan_roots(&storage, std::slice::from_ref(&root), now, &pricing, false).unwrap();
 
         let today = history.today.expect("today usage should exist");
-        assert_eq!(today.tokens, 420_000);
+        assert_eq!(today.tokens, 310_000);
         assert!(today.estimate_complete);
         assert!(today.unknown_models.is_empty());
         // gemini-4-neon: 0.1M * $3 + 0.2M * $0.15 + 0.01M * $15 = $0.30 + $0.03 + $0.15 = $0.48
-        // claude-sonnet-4-6: 0.1M * $3 + 0.01M * $15 = $0.45
-        // total = $0.93
+        // claude-sonnet-4-6 is routed to Claude and excluded from Antigravity.
         let cost = today.estimated_cost_usd.expect("today cost should exist");
-        assert!((cost - 0.93).abs() < 0.000_001, "unexpected cost: {cost}");
+        assert!((cost - 0.48).abs() < 0.000_001, "unexpected cost: {cost}");
         let breakdown = today.model_breakdown.expect("breakdown should exist");
         assert_eq!(breakdown.source_note, USAGE_SOURCE_NOTE);
-        assert_eq!(breakdown.models.len(), 2);
+        assert_eq!(breakdown.models.len(), 1);
         let neon = breakdown
             .models
             .iter()
@@ -549,8 +652,33 @@ mod tests {
         assert_eq!(yesterday.unknown_models, ["gemini-mystery-preview"]);
 
         let last30 = history.last_30_days.expect("30d usage should exist");
-        assert_eq!(last30.tokens, 475_000);
+        assert_eq!(last30.tokens, 365_000);
         assert!(!last30.estimate_complete);
         assert_eq!(last30.unknown_models, ["gemini-mystery-preview"]);
+
+        let mut claude_accumulator = DailyUsageAccumulator::default();
+        assert!(scan_routed_roots_into(
+            &storage,
+            std::slice::from_ref(&root),
+            now,
+            &pricing,
+            "claude",
+            &mut claude_accumulator,
+        )
+        .unwrap());
+        let claude_history = claude_accumulator.build(now, "From Antigravity");
+        let claude_today = claude_history
+            .today
+            .expect("routed Claude usage should exist");
+        assert_eq!(claude_today.tokens, 110_000);
+        // claude-sonnet-4-6: 0.1M * $3 + 0.01M * $15 = $0.45
+        let claude_cost = claude_today
+            .estimated_cost_usd
+            .expect("routed Claude cost should exist");
+        assert!(
+            (claude_cost - 0.45).abs() < 0.000_001,
+            "unexpected routed Claude cost: {claude_cost}"
+        );
+        assert!(claude_history.yesterday.is_none());
     }
 }
