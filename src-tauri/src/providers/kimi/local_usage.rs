@@ -942,12 +942,20 @@ mod tests {
         fs::create_dir_all(sub_wire.parent().unwrap()).unwrap();
         fs::write(
             &main_wire,
-            kimi_code_wire(now.timestamp_millis(), "kimi-code/k3", [10_000, 1_000, 0, 0]),
+            kimi_code_wire(
+                now.timestamp_millis(),
+                "kimi-code/k3",
+                [10_000, 1_000, 0, 0],
+            ),
         )
         .unwrap();
         fs::write(
             &sub_wire,
-            kimi_code_wire(now.timestamp_millis(), "kimi-code/k3", [20_000, 2_000, 0, 0]),
+            kimi_code_wire(
+                now.timestamp_millis(),
+                "kimi-code/k3",
+                [20_000, 2_000, 0, 0],
+            ),
         )
         .unwrap();
 
@@ -995,7 +1003,11 @@ mod tests {
         fs::create_dir_all(legacy_wire.parent().unwrap()).unwrap();
         fs::write(
             &code_wire,
-            kimi_code_wire(now.timestamp_millis(), "kimi-code/k3", [10_000, 1_000, 0, 0]),
+            kimi_code_wire(
+                now.timestamp_millis(),
+                "kimi-code/k3",
+                [10_000, 1_000, 0, 0],
+            ),
         )
         .unwrap();
         fs::write(

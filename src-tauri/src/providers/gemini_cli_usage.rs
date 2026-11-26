@@ -126,13 +126,7 @@ fn scan_tmp_directories_into(
         .checked_sub_days(Days::new(30))
         .unwrap_or(NaiveDate::MIN);
     let events = load_local_events(storage, tmp_dirs, since_date)?;
-    Ok(aggregate_into(
-        events,
-        now,
-        pricing,
-        card_id,
-        accumulator,
-    ))
+    Ok(aggregate_into(events, now, pricing, card_id, accumulator))
 }
 
 fn load_local_events(
@@ -283,8 +277,7 @@ fn parse_chat_file(content: &str) -> Vec<GeminiCliTokenEvent> {
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_log_timestamp);
-        if let Some(event) =
-            parse_message_record(record, session_id.as_deref(), fallback_timestamp)
+        if let Some(event) = parse_message_record(record, session_id.as_deref(), fallback_timestamp)
         {
             events.push(event);
         }
@@ -312,7 +305,8 @@ fn parse_message_record(
         .and_then(parse_log_timestamp)
         .or(fallback_timestamp)?;
     let id = non_empty_str(record.get("id"));
-    let session_id = non_empty_str(record.get("sessionId")).or_else(|| session_id.map(str::to_owned));
+    let session_id =
+        non_empty_str(record.get("sessionId")).or_else(|| session_id.map(str::to_owned));
     let model = non_empty_str(record.get("model"));
 
     Some(GeminiCliTokenEvent {
@@ -362,7 +356,8 @@ fn extract_token_buckets(tokens: &Map<String, Value>) -> Option<(u64, u64, u64)>
 fn deduplicate(events: Vec<GeminiCliTokenEvent>) -> Vec<GeminiCliTokenEvent> {
     let mut deduplicated: Vec<GeminiCliTokenEvent> = Vec::with_capacity(events.len());
     let mut by_id = HashMap::<String, usize>::new();
-    let mut seen_without_id = HashSet::<(Option<String>, i64, Option<String>, u64, u64, u64)>::new();
+    let mut seen_without_id =
+        HashSet::<(Option<String>, i64, Option<String>, u64, u64, u64)>::new();
 
     for event in events {
         if let Some(id) = event.id.as_ref() {
@@ -779,13 +774,21 @@ mod tests {
         .unwrap());
         let antigravity = antigravity_acc.build(now, "test");
         assert_eq!(antigravity.today.unwrap().tokens, 100_000);
-        assert_eq!(antigravity.other_usage.unwrap().today.unwrap().tokens, 300_000);
+        assert_eq!(
+            antigravity.other_usage.unwrap().today.unwrap().tokens,
+            300_000
+        );
 
         let mut claude_acc = DailyUsageAccumulator::default();
-        assert!(
-            scan_tmp_directories_into(&storage, &roots, now, &pricing, "claude", &mut claude_acc)
-                .unwrap()
-        );
+        assert!(scan_tmp_directories_into(
+            &storage,
+            &roots,
+            now,
+            &pricing,
+            "claude",
+            &mut claude_acc
+        )
+        .unwrap());
         let claude = claude_acc.build(now, "test");
         assert_eq!(claude.today.unwrap().tokens, 200_000);
         assert!(claude.other_usage.is_none());
