@@ -126,9 +126,50 @@ mod bundled_resource_tests {
         assert_rates("cursor-grok-4.6-medium", [2.0, 2.0, 0.5, 6.0]);
         assert_rates("grok-4.6-fast-high", [4.0, 4.0, 1.0, 12.0]);
         assert_rates("gemini-4-neon-high", [3.0, 3.0, 0.15, 15.0]);
+        assert_rates("gemini-4-neon-tiered-high", [3.0, 3.0, 0.15, 15.0]);
+        assert_rates("gemini-4-hydrogen", [1.5, 1.5, 0.075, 7.5]);
+        assert_rates("gemini-4-hydrogen-tiered-high", [1.5, 1.5, 0.075, 7.5]);
+        assert_rates(
+            "google/gemini-4-hydrogen-tiered-high",
+            [1.5, 1.5, 0.075, 7.5],
+        );
+        assert_rates(
+            "models/gemini-4-hydrogen-preview-tiered-xhigh",
+            [1.5, 1.5, 0.075, 7.5],
+        );
+        assert_rates("gemini-4-argon-tiered-high", [2.0, 2.0, 0.1, 10.0]);
         assert_rates("gemini-4-carbon-high", [2.0, 2.0, 0.1, 10.0]);
+        assert_rates("gemini-4-carbon-tiered-high", [2.0, 2.0, 0.1, 10.0]);
+        assert_rates("gemini-3.8-flash-tiered-high", [0.75, 0.75, 0.075, 3.75]);
+        assert_rates(
+            "vertex_ai/gemini-3-8-flash-preview-thinking-low",
+            [0.75, 0.75, 0.075, 3.75],
+        );
+        assert_rates("gemini-3.7-flash-medium", [0.75, 0.75, 0.075, 3.75]);
         assert_rates("gemini-3.6-flash-medium", [0.75, 0.75, 0.075, 3.75]);
+        assert_rates("gemini-3.5-flash-lite-tiered-high", [0.3, 0.3, 0.03, 2.5]);
         assert_rates("gemini-3.1-pro-high", [2.0, 2.0, 0.2, 12.0]);
+        assert_rates(
+            "publishers/google/models/gemini-3-1-pro-preview-customtools-high",
+            [2.0, 2.0, 0.2, 12.0],
+        );
+        assert_rates(
+            "google-gemini-cli/gemini-2.5-pro-thinking-high",
+            [1.25, 1.25, 0.125, 10.0],
+        );
+        assert_eq!(
+            pricing.display_family("gemini-4-hydrogen-tiered-high"),
+            "gemini-4-hydrogen"
+        );
+        assert_eq!(
+            pricing.display_family("vertex_ai/gemini-3-8-flash-preview-thinking-low"),
+            "gemini-3.8-flash"
+        );
+        assert_eq!(
+            pricing.display_family("gemini-mystery-preview"),
+            "gemini-mystery-preview"
+        );
+        assert!(pricing.resolve("gemini-mystery-preview").is_none());
         assert_eq!(
             pricing.resolve("grok-build-0.1").unwrap().input_per_million,
             1.0
@@ -197,5 +238,88 @@ mod bundled_resource_tests {
         assert!(pricing
             .estimated_cost_at("kimi", "kimi-code/k3.1-pro", before_k31, tokens, true)
             .is_none());
+    }
+
+    #[test]
+    fn gemini_4_hydrogen_tiered_aliases_resolve_through_historical_schedules() {
+        use chrono::{TimeZone, Utc};
+
+        let pricing = test_bundled_pricing();
+        let tokens = TokenBreakdown {
+            input: 1_000_000,
+            cache_read: 1_000_000,
+            output: 100_000,
+            ..TokenBreakdown::default()
+        };
+        let launch_date = Utc.with_ymd_and_hms(2026, 11, 20, 0, 0, 0).unwrap();
+        let cost = pricing
+            .estimated_cost_at(
+                "antigravity",
+                "gemini-4-hydrogen-tiered-high",
+                launch_date,
+                tokens,
+                true,
+            )
+            .unwrap();
+        // 1M * $1.50 + 1M * $0.075 + 0.1M * $7.50 = $2.325
+        assert!((cost - 2.325).abs() < 1e-6, "unexpected cost: {cost}");
+
+        let before_launch = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+        assert!(pricing
+            .estimated_cost_at(
+                "antigravity",
+                "gemini-4-hydrogen-tiered-high",
+                before_launch,
+                tokens,
+                true,
+            )
+            .is_none());
+
+        // Hyphenated minor versions + namespaces + -preview/-tiered/-thinking resolve historically.
+        let flash_38_intro = pricing
+            .estimated_cost_at(
+                "antigravity",
+                "models/gemini-3-8-flash-preview-tiered-high",
+                launch_date,
+                tokens,
+                true,
+            )
+            .unwrap();
+        // 1M * $0.75 + 1M * $0.075 + 0.1M * $3.75 = $1.20
+        assert!(
+            (flash_38_intro - 1.2).abs() < 1e-6,
+            "unexpected 3.8 flash intro cost: {flash_38_intro}"
+        );
+
+        let after_2027 = Utc.with_ymd_and_hms(2027, 1, 2, 0, 0, 0).unwrap();
+        let flash_38_std = pricing
+            .estimated_cost_at(
+                "antigravity",
+                "google-gemini-cli/gemini-3.8-flash-thinking-low",
+                after_2027,
+                tokens,
+                true,
+            )
+            .unwrap();
+        // 1M * $1.50 + 1M * $0.15 + 0.1M * $7.50 = $2.40
+        assert!(
+            (flash_38_std - 2.4).abs() < 1e-6,
+            "unexpected 3.8 flash std cost: {flash_38_std}"
+        );
+
+        let argon_after_intro = pricing
+            .estimated_cost_at(
+                "antigravity",
+                "vertex_ai/gemini-4-argon-tiered-xhigh",
+                Utc.with_ymd_and_hms(2026, 12, 2, 0, 0, 0).unwrap(),
+                tokens,
+                true,
+            )
+            .unwrap();
+        // 1M * $4.00 + 1M * $0.20 + 0.1M * $20.00 = $6.20
+        assert!(
+            (argon_after_intro - 6.2).abs() < 1e-6,
+            "unexpected argon std cost: {argon_after_intro}"
+        );
     }
 }

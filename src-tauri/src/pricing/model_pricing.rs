@@ -82,7 +82,14 @@ impl ModelPricing {
             )
             | ("minimax", Some(("minimax", id)))
             | ("zai", Some(("zai" | "z-ai" | "zhipu" | "zhipuai" | "bigmodel", id)))
-            | ("antigravity", Some(("google" | "gemini" | "google-antigravity", id)))
+            | (
+                "antigravity",
+                Some((
+                    "google" | "gemini" | "google-antigravity" | "google-gemini-cli"
+                    | "google-vertex" | "vertex_ai" | "vertex" | "models",
+                    id,
+                )),
+            )
             | ("deepseek", Some(("deepseek", id))) => id,
             _ => &normalized,
         };
@@ -110,7 +117,15 @@ impl ModelPricing {
         };
         let (rows, suffix_fast) = lookup(name)
             .or_else(|| self.supplement.canonical_name(name).and_then(lookup))
-            .or_else(|| self.supplement.canonical_name(&normalized).and_then(lookup))?;
+            .or_else(|| self.supplement.canonical_name(&normalized).and_then(lookup))
+            .or_else(|| {
+                (provider == "antigravity").then(|| {
+                    gemini_candidates(&normalized).into_iter().find_map(|cand| {
+                        lookup(&cand)
+                            .or_else(|| self.supplement.canonical_name(&cand).and_then(lookup))
+                    })
+                })?
+            })?;
         let tier = if suffix_fast && tier == ServiceTier::Standard {
             ServiceTier::Fast
         } else {
@@ -154,12 +169,19 @@ impl ModelPricing {
     /// variant. Alias rules are the same source of truth used for pricing; fast variants fold into
     /// their base family without guessing at otherwise unknown names.
     pub fn display_family(&self, model: &str) -> String {
-        let canonical = self.supplement.canonical_name(model).unwrap_or(model);
-        canonical
-            .strip_suffix("-fast")
-            .filter(|base| !base.is_empty())
-            .unwrap_or(canonical)
-            .to_owned()
+        if let Some(canonical) = self.supplement.canonical_name(model) {
+            return strip_fast_family(canonical);
+        }
+        let normalized = model.trim().to_ascii_lowercase();
+        if normalized != model {
+            if let Some(canonical) = self.supplement.canonical_name(&normalized) {
+                return strip_fast_family(canonical);
+            }
+        }
+        if let Some(family) = self.gemini_display_family(&normalized) {
+            return family;
+        }
+        strip_fast_family(model)
     }
 
     fn resolve_uncached(&self, model: &str) -> Option<ModelRates> {
@@ -168,10 +190,21 @@ impl ModelPricing {
                 return self.lookup(canonical).or_else(|| self.lookup(model));
             }
         }
-        self.lookup(model)
+        if let Some(rates) = self.lookup_exact(model) {
+            return Some(rates);
+        }
+        if let Some(rates) = self.lookup_gemini_normalized(model) {
+            return Some(rates);
+        }
+        self.lookup_fallback(model)
     }
 
     fn lookup(&self, name: &str) -> Option<ModelRates> {
+        self.lookup_exact(name)
+            .or_else(|| self.lookup_fallback(name))
+    }
+
+    fn lookup_exact(&self, name: &str) -> Option<ModelRates> {
         if let Some(rates) = self.supplement.pricing.get(name) {
             return Some(*rates);
         }
@@ -181,6 +214,10 @@ impl ModelPricing {
         if let Some(rates) = self.fast_variant(name) {
             return Some(rates);
         }
+        None
+    }
+
+    fn lookup_fallback(&self, name: &str) -> Option<ModelRates> {
         if name.ends_with("-fast") {
             return self.secondary.find_exact(name).map(|(_, rates)| rates);
         }
@@ -188,6 +225,60 @@ impl ModelPricing {
             return Some(rates);
         }
         self.secondary.find_exact(name).map(|(_, rates)| rates)
+    }
+
+    fn lookup_gemini_normalized(&self, model: &str) -> Option<ModelRates> {
+        let candidates = gemini_candidates(model);
+        if candidates.is_empty() {
+            return None;
+        }
+        for candidate in &candidates {
+            if let Some(rates) = self.supplement.pricing.get(candidate.as_str()) {
+                return Some(*rates);
+            }
+            if let Some(canonical) = self.supplement.canonical_name(candidate) {
+                if let Some(rates) = self.lookup(canonical) {
+                    return Some(rates);
+                }
+            }
+        }
+        for candidate in &candidates {
+            if let Some((_, rates)) = self.primary.find_exact(candidate) {
+                return Some(rates);
+            }
+        }
+        for candidate in &candidates {
+            if let Some((_, rates)) = self.secondary.find_exact(candidate) {
+                return Some(rates);
+            }
+        }
+        None
+    }
+
+    fn gemini_display_family(&self, normalized: &str) -> Option<String> {
+        let candidates = gemini_candidates(normalized);
+        if candidates.is_empty() {
+            return None;
+        }
+        for candidate in &candidates {
+            if let Some(canonical) = self.supplement.canonical_name(candidate) {
+                return Some(strip_fast_family(canonical));
+            }
+            if self.supplement.pricing.contains_key(candidate.as_str()) {
+                return Some(strip_fast_family(candidate));
+            }
+        }
+        for candidate in &candidates {
+            if self.primary.find_exact(candidate).is_some() {
+                return Some(strip_fast_family(candidate));
+            }
+        }
+        for candidate in &candidates {
+            if self.secondary.find_exact(candidate).is_some() {
+                return Some(strip_fast_family(candidate));
+            }
+        }
+        None
     }
 
     fn fast_variant(&self, name: &str) -> Option<ModelRates> {
@@ -215,6 +306,177 @@ impl ModelPricing {
             .or_else(|| self.primary.find_fuzzy(base))
             .or_else(|| self.secondary.find_exact(base))
     }
+}
+
+fn strip_fast_family(model: &str) -> String {
+    model
+        .strip_suffix("-fast")
+        .filter(|base| !base.is_empty())
+        .unwrap_or(model)
+        .to_owned()
+}
+
+fn strip_gemini_namespace(mut slug: &str) -> &str {
+    slug = slug.strip_prefix("openrouter/").unwrap_or(slug);
+    slug = slug.strip_prefix("publishers/google/").unwrap_or(slug);
+    for prefix in [
+        "google-antigravity/",
+        "google-gemini-cli/",
+        "google-vertex/",
+        "vertex_ai/",
+        "vertex/",
+        "google/",
+        "gemini/",
+    ] {
+        if let Some(rest) = slug.strip_prefix(prefix) {
+            slug = rest;
+            break;
+        }
+    }
+    slug.strip_prefix("models/").unwrap_or(slug)
+}
+
+fn normalize_gemini_minor_version(slug: &str) -> String {
+    let Some(rest) = slug.strip_prefix("gemini-") else {
+        return slug.to_owned();
+    };
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 5
+        && bytes[0].is_ascii_digit()
+        && bytes[1] == b'-'
+        && bytes[2].is_ascii_digit()
+        && bytes[3] == b'-'
+        && !bytes[4].is_ascii_digit()
+    {
+        return format!(
+            "gemini-{}.{}-{}",
+            bytes[0] as char,
+            bytes[2] as char,
+            &rest[4..]
+        );
+    }
+    slug.to_owned()
+}
+
+fn strip_gemini_variant_modifiers(mut slug: &str) -> &str {
+    loop {
+        let stripped = [
+            "[1m]",
+            "-extra-high",
+            "-minimal",
+            "-none",
+            "-low",
+            "-medium",
+            "-high",
+            "-xhigh",
+            "-max",
+            "-ultra",
+            "-tiered",
+            "-thinking",
+            "-customtools",
+        ]
+        .into_iter()
+        .find_map(|suffix| slug.strip_suffix(suffix));
+        match stripped {
+            Some(next) if !next.is_empty() => slug = next,
+            _ => return slug,
+        }
+    }
+}
+
+fn strip_gemini_release_suffix(slug: &str) -> Option<&str> {
+    let without_snapshot = super::history::strip_snapshot(slug);
+    if without_snapshot != slug {
+        return Some(without_snapshot);
+    }
+    // Trailing `-MM-YYYY` (e.g. `-09-2025`)
+    if let Some((base, suffix)) = slug
+        .len()
+        .checked_sub(8)
+        .and_then(|i| slug.get(..i).zip(slug.get(i..)))
+    {
+        let bytes = suffix.as_bytes();
+        if bytes[0] == b'-'
+            && bytes[1].is_ascii_digit()
+            && bytes[2].is_ascii_digit()
+            && bytes[3] == b'-'
+            && bytes[4] == b'2'
+            && bytes[5] == b'0'
+            && bytes[6].is_ascii_digit()
+            && bytes[7].is_ascii_digit()
+        {
+            return Some(base);
+        }
+    }
+    // Trailing `-MM-DD` (e.g. `-05-06`, `-06-17`)
+    if let Some((base, suffix)) = slug
+        .len()
+        .checked_sub(6)
+        .and_then(|i| slug.get(..i).zip(slug.get(i..)))
+    {
+        let bytes = suffix.as_bytes();
+        if bytes[0] == b'-'
+            && bytes[1].is_ascii_digit()
+            && bytes[2].is_ascii_digit()
+            && bytes[3] == b'-'
+            && bytes[4].is_ascii_digit()
+            && bytes[5].is_ascii_digit()
+        {
+            let month = (bytes[1] - b'0') * 10 + (bytes[2] - b'0');
+            let day = (bytes[4] - b'0') * 10 + (bytes[5] - b'0');
+            if (1..=12).contains(&month) && (1..=31).contains(&day) {
+                return Some(base);
+            }
+        }
+    }
+    for suffix in ["-preview", "-exp", "-latest"] {
+        if let Some(base) = slug.strip_suffix(suffix) {
+            if !base.is_empty() && base != "gemini" {
+                return Some(base);
+            }
+        }
+    }
+    None
+}
+
+fn gemini_candidates(model: &str) -> Vec<String> {
+    let bare = strip_gemini_namespace(model.trim());
+    if !bare.starts_with("gemini-") {
+        return Vec::new();
+    }
+    let versioned = normalize_gemini_minor_version(bare);
+    let base = strip_gemini_variant_modifiers(&versioned);
+    if base.is_empty() || base == "gemini" {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    let mut push_unique = |value: String| {
+        if !candidates.contains(&value) {
+            candidates.push(value);
+        }
+    };
+
+    push_unique(base.to_owned());
+    let mut current = base;
+    while let Some(shorter) = strip_gemini_release_suffix(current) {
+        let shorter = strip_gemini_variant_modifiers(shorter);
+        if shorter.is_empty() || shorter == "gemini" {
+            break;
+        }
+        push_unique(shorter.to_owned());
+        current = shorter;
+    }
+
+    if let Some(root) = candidates.last().cloned() {
+        if !root.ends_with("-preview") {
+            let preview = format!("{root}-preview");
+            if !candidates.contains(&preview) {
+                candidates.push(preview);
+            }
+        }
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -358,5 +620,59 @@ mod tests {
             .resolve("provider/secondary-model-20260715")
             .is_some());
         assert!(model_pricing.resolve("secondary-model").is_none());
+    }
+
+    #[test]
+    fn gemini_normalization_handles_future_catalog_models_without_conflating_variants() {
+        let supplement = r#"{
+          "pricing": {
+            "gemini-3.5-flash-lite": {"input_per_million": 0.3, "output_per_million": 2.5}
+          },
+          "alias_rules": []
+        }"#;
+        let model_pricing = pricing(
+            Some(supplement),
+            &[
+                ("gemini-3.5-flash", rates(1.5, 9.0)),
+                ("gemini-4-helium-preview", rates(1.25, 6.0)),
+            ],
+            &[],
+        );
+
+        // Supplement flash-lite must beat primary fuzzy match on flash.
+        assert_eq!(
+            model_pricing
+                .resolve("gemini-3.5-flash-lite-tiered-high")
+                .unwrap()
+                .input_per_million,
+            0.3
+        );
+        // Brand-new primary catalog Gemini model resolves across namespaces/modifiers/snapshots.
+        assert_eq!(
+            model_pricing
+                .resolve("google-antigravity/gemini-4-helium-tiered-high")
+                .unwrap()
+                .input_per_million,
+            1.25
+        );
+        assert_eq!(
+            model_pricing
+                .resolve("models/gemini-4-helium-2026-12-01-thinking-xhigh")
+                .unwrap()
+                .output_per_million,
+            6.0
+        );
+        assert_eq!(
+            model_pricing.display_family("google-antigravity/gemini-4-helium-tiered-high"),
+            "gemini-4-helium-preview"
+        );
+        // Unknown Gemini slugs still fail closed.
+        assert!(model_pricing
+            .resolve("google/gemini-4-unknown-tiered-high")
+            .is_none());
+        assert_eq!(
+            model_pricing.display_family("google/gemini-4-unknown-tiered-high"),
+            "google/gemini-4-unknown-tiered-high"
+        );
     }
 }

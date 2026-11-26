@@ -1,6 +1,6 @@
 {
   "$comment": "OpenQuota pricing supplement. Prices models that no public catalog carries, supplies fast-variant multipliers the catalogs omit, and maps provider log model slugs to canonical pricing keys (LiteLLM keys, models.dev ids, or entries in this file). The history section stores source-linked rates by billing provider and model, with inclusive UTC starts and exclusive ends. The raw main-branch file is refreshed by installed apps, so merged corrections arrive without an app release. Rates are USD per million tokens.",
-  "updated_at": "2026-11-20T00:00:00Z",
+  "updated_at": "2026-11-26T00:00:00Z",
   "history": {
     "deepseek": {
       "deepseek-flash": [
@@ -245,13 +245,31 @@
       ]
     },
     "antigravity": {
+      "gemini-3.5-flash-lite": [
+        {"from": "2026-07-21T00:00:00Z", "input": 0.3, "read": 0.03, "write": 0.3, "output": 2.5, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
+      ],
       "gemini-3.6-flash": [
         {"from": "2026-07-21T00:00:00Z", "until": "2027-01-01T00:00:00Z", "input": 0.75, "read": 0.075, "write": 0.75, "output": 3.75, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
         {"from": "2027-01-01T00:00:00Z", "input": 1.5, "read": 0.15, "write": 1.5, "output": 7.5, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
       ],
+      "gemini-3.7-flash": [
+        {"from": "2026-08-13T00:00:00Z", "until": "2027-01-01T00:00:00Z", "input": 0.75, "read": 0.075, "write": 0.75, "output": 3.75, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
+        {"from": "2027-01-01T00:00:00Z", "input": 1.5, "read": 0.15, "write": 1.5, "output": 7.5, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
+      ],
+      "gemini-3.8-flash": [
+        {"from": "2026-09-02T00:00:00Z", "until": "2027-01-01T00:00:00Z", "input": 0.75, "read": 0.075, "write": 0.75, "output": 3.75, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
+        {"from": "2027-01-01T00:00:00Z", "input": 1.5, "read": 0.15, "write": 1.5, "output": 7.5, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
+      ],
+      "gemini-4-argon": [
+        {"from": "2026-09-30T00:00:00Z", "until": "2026-12-01T00:00:00Z", "input": 2.0, "read": 0.1, "write": 2.0, "output": 10.0, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
+        {"from": "2026-12-01T00:00:00Z", "input": 4.0, "read": 0.2, "write": 4.0, "output": 20.0, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
+      ],
       "gemini-4-carbon": [
         {"from": "2026-10-28T00:00:00Z", "until": "2026-12-01T00:00:00Z", "input": 2.0, "read": 0.1, "write": 2.0, "output": 10.0, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
         {"from": "2026-12-01T00:00:00Z", "input": 4.0, "read": 0.2, "write": 4.0, "output": 20.0, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
+      ],
+      "gemini-4-hydrogen": [
+        {"from": "2026-11-12T00:00:00Z", "input": 1.5, "read": 0.075, "write": 1.5, "output": 7.5, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
       ],
       "gemini-4-neon": [
         {"from": "2026-11-18T00:00:00Z", "input": 3.0, "read": 0.15, "write": 3.0, "output": 15.0, "source": "https://ai.google.dev/gemini-api/docs/pricing"}
@@ -436,6 +454,13 @@
       "cache_read_per_million": 0.02,
       "output_per_million": 1.2
     },
+    "gemini-3.5-flash-lite": {
+      "$comment": "Google Gemini API paid-tier rate for Gemini 3.5 Flash-Lite.",
+      "input_per_million": 0.3,
+      "cache_write_per_million": 0.3,
+      "cache_read_per_million": 0.03,
+      "output_per_million": 2.5
+    },
     "gemini-3.6-flash": {
       "$comment": "Google Gemini API introductory rate for Gemini 3.6 Flash through 2026-12-31; historical schedule lives under history.antigravity.",
       "input_per_million": 0.75,
@@ -443,12 +468,40 @@
       "cache_read_per_million": 0.075,
       "output_per_million": 3.75
     },
+    "gemini-3.7-flash": {
+      "$comment": "Google Gemini API introductory rate for Gemini 3.7 Flash through 2026-12-31; historical schedule lives under history.antigravity.",
+      "input_per_million": 0.75,
+      "cache_write_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "output_per_million": 3.75
+    },
+    "gemini-3.8-flash": {
+      "$comment": "Google Gemini API introductory rate for Gemini 3.8 Flash through 2026-12-31; historical schedule lives under history.antigravity.",
+      "input_per_million": 0.75,
+      "cache_write_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "output_per_million": 3.75
+    },
+    "gemini-4-argon": {
+      "$comment": "Google Gemini API introductory rate for Gemini 4 Argon through 2026-11-30; historical schedule lives under history.antigravity.",
+      "input_per_million": 2.0,
+      "cache_write_per_million": 2.0,
+      "cache_read_per_million": 0.1,
+      "output_per_million": 10.0
+    },
     "gemini-4-carbon": {
       "$comment": "Google Gemini API introductory rate for Gemini 4 Carbon through 2026-11-30; historical schedule lives under history.antigravity.",
       "input_per_million": 2.0,
       "cache_write_per_million": 2.0,
       "cache_read_per_million": 0.1,
       "output_per_million": 10.0
+    },
+    "gemini-4-hydrogen": {
+      "$comment": "Google Gemini API paid-tier rate for Gemini 4 Hydrogen (flat across 1M context; implicit caching provides a 95% discount).",
+      "input_per_million": 1.5,
+      "cache_write_per_million": 1.5,
+      "cache_read_per_million": 0.075,
+      "output_per_million": 7.5
     },
     "gemini-4-neon": {
       "$comment": "Google Gemini API paid-tier rate for Gemini 4 Neon (implicit caching provides a 95% discount).",
@@ -519,14 +572,22 @@
     { "pattern": "^claude-opus-5(?:\\[1m\\])?(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-opus-5" },
     { "pattern": "^claude-fable-5(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-fable-5" },
     { "pattern": "^claude-sonnet-5(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-sonnet-5" },
-    { "pattern": "^gemini-2\\.5-flash$", "canonical": "gemini-2.5-flash" },
-    { "pattern": "^gemini-3-flash(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3-flash-preview" },
-    { "pattern": "^gemini-3\\.5-flash(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.5-flash" },
-    { "pattern": "^gemini-3\\.6-flash(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.6-flash" },
-    { "pattern": "^gemini-3-pro(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3-pro-preview" },
-    { "pattern": "^gemini-3\\.1-pro(?:-preview)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.1-pro-preview" },
-    { "pattern": "^gemini-4-carbon(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-4-carbon" },
-    { "pattern": "^gemini-4-neon(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-4-neon" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-2\\.5-flash-lite(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-2.5-flash-lite" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-2\\.5-flash(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-2.5-flash" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-2\\.5-pro(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-2.5-pro" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3-flash(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3-flash-preview" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3[.-]1-flash-lite(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.1-flash-lite" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3[.-]5-flash-lite(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.5-flash-lite" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3[.-]5-flash(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.5-flash" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3[.-]6-flash(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.6-flash" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3[.-]7-flash(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.7-flash" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3[.-]8-flash(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.8-flash" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3-pro(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3-pro-preview" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-3[.-]1-pro(?:-preview)?(?:-customtools)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-3.1-pro-preview" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-4-argon(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-4-argon" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-4-carbon(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-4-carbon" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-4-hydrogen(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-4-hydrogen" },
+    { "pattern": "^(?:(?:google|gemini|google-antigravity|google-gemini-cli|models)/)?gemini-4-neon(?:-preview)?(?:-tiered)?(?:-thinking)?(?:-(?:minimal|none|low|medium|high|xhigh|max))?$", "canonical": "gemini-4-neon" },
     { "pattern": "^gpt-5(?:-(?:low|high))?-fast$", "canonical": "gpt-5-fast" },
     { "pattern": "^gpt-5(?:-(?:low|high))?$", "canonical": "gpt-5" },
     { "pattern": "^gpt-5\\.1(?:-(?:low|high))?-fast$", "canonical": "gpt-5-fast" },
@@ -591,6 +652,13 @@
     { "pattern": "(?i)^GPT-5\\.6 Terra \\(Auto[^)]*\\)$", "canonical": "gpt-5.6-terra" },
     { "pattern": "(?i)^GPT-5\\.6 Luna \\(Auto[^)]*\\)$", "canonical": "gpt-5.6-luna" },
     { "pattern": "(?i)^Gemini 3\\.1 Pro \\(Auto[^)]*\\)$", "canonical": "gemini-3.1-pro-preview" },
+    { "pattern": "(?i)^Gemini 3\\.6 Flash \\(Auto[^)]*\\)$", "canonical": "gemini-3.6-flash" },
+    { "pattern": "(?i)^Gemini 3\\.7 Flash \\(Auto[^)]*\\)$", "canonical": "gemini-3.7-flash" },
+    { "pattern": "(?i)^Gemini 3\\.8 Flash \\(Auto[^)]*\\)$", "canonical": "gemini-3.8-flash" },
+    { "pattern": "(?i)^Gemini 4 Argon \\(Auto[^)]*\\)$", "canonical": "gemini-4-argon" },
+    { "pattern": "(?i)^Gemini 4 Carbon \\(Auto[^)]*\\)$", "canonical": "gemini-4-carbon" },
+    { "pattern": "(?i)^Gemini 4 Hydrogen \\(Auto[^)]*\\)$", "canonical": "gemini-4-hydrogen" },
+    { "pattern": "(?i)^Gemini 4 Neon \\(Auto[^)]*\\)$", "canonical": "gemini-4-neon" },
     { "pattern": "(?i)^GLM 5\\.2 \\(Auto[^)]*\\)$", "canonical": "glm-5.2" },
     { "pattern": "(?i)^Kimi K3 \\(Auto[^)]*\\)$", "canonical": "kimi-k3" }
   ]
