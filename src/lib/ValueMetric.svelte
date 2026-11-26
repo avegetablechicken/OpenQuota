@@ -110,8 +110,13 @@
     showTimer = undefined;
     detailOpen = true;
   }
-  async function dismissDetail() {
+  async function dismissDetail({ restoreFocus = false } = {}) {
+    if (showTimer) clearTimeout(showTimer);
+    showTimer = undefined;
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = undefined;
     detailOpen = false;
+    if (!restoreFocus) return;
     await tick();
     restoringTriggerFocus = true;
     detailTrigger?.focus();
@@ -176,7 +181,7 @@
     anchor={detailAnchor ?? undefined}
     onEnter={keepOpen}
     onLeave={scheduleHide}
-    onDismiss={() => void dismissDetail()}
+    onDismiss={(options) => void dismissDetail(options)}
   />
 {/if}
 

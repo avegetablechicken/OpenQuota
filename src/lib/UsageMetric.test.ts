@@ -128,7 +128,8 @@ describe('UsageMetric model detail', () => {
       },
     });
 
-    const reading = screen.getByRole('button', { name: '$0.03 · 500 tokens' });
+    const reading = screen.getByText('$0.03 · 500 tokens');
+    expect(reading.tagName).toBe('STRONG');
     expect(reading).toHaveAttribute(
       'data-tooltip',
       '$0.03\n500 tokens\nEstimated locally, so it may be off',
@@ -150,7 +151,9 @@ describe('UsageMetric model detail', () => {
       },
     });
 
-    expect(screen.getByRole('button', { name: '$2.1K · 1.5B tokens' })).toHaveAttribute(
+    const reading = screen.getByText('$2.1K · 1.5B tokens');
+    expect(reading.tagName).toBe('STRONG');
+    expect(reading).toHaveAttribute(
       'data-tooltip',
       '$2,059.07\n1,506,025,363 tokens\nEstimated locally, so it may be off',
     );

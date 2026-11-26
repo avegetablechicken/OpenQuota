@@ -151,9 +151,15 @@
         aria-expanded={expanded}
         aria-controls={expanded ? `provider-proxy-editor-${provider.id}` : undefined}
         onclick={() => {
-          if (!expanded) resetEditor();
+          if (expanded) {
+            if (error) return;
+            onContentMorph();
+            expanded = false;
+            return;
+          }
+          resetEditor();
           onContentMorph();
-          expanded = !expanded;
+          expanded = true;
         }}>{expanded ? 'Done' : 'Edit'}</button
       >
     </div>

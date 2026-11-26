@@ -139,6 +139,13 @@ it('rejects invalid URLs and allows Escape to restore the saved address', async 
   await fireEvent.blur(input);
   expect(screen.getByRole('alert')).toBeTruthy();
   expect(onChange).not.toHaveBeenCalled();
+  // Clicking Done while an invalid URL error is shown keeps the editor open so the alert stays visible.
+  await fireEvent.click(screen.getByRole('button', { name: 'Done editing proxy' }));
+  expect(screen.getByRole('alert')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Done editing proxy' })).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  );
   await fireEvent.keyDown(input, { key: 'Escape' });
   expect(input.value).toBe('http://localhost:7890');
   expect(onChange).not.toHaveBeenCalled();

@@ -95,16 +95,18 @@
         ><Icon name="warning" size={10} strokeWidth={2.2} /></i
       >{/if}</span
   >
-  <button
-    type="button"
-    class:usage-reading-interactive={period?.modelBreakdown?.models.length}
-    data-tooltip={valueTooltip(period)}
-    disabled={!period?.modelBreakdown?.models.length}
-    onmouseenter={scheduleShow}
-    onmouseleave={scheduleHide}
-    onfocus={scheduleShow}
-    onblur={scheduleHide}>{formatUsageReading(period, tokensOnly)}</button
-  >
+  {#if period?.modelBreakdown?.models.length}
+    <button
+      type="button"
+      class="usage-reading-interactive"
+      onmouseenter={scheduleShow}
+      onmouseleave={scheduleHide}
+      onfocus={scheduleShow}
+      onblur={scheduleHide}>{formatUsageReading(period, tokensOnly)}</button
+    >
+  {:else}
+    <strong data-tooltip={valueTooltip(period)}>{formatUsageReading(period, tokensOnly)}</strong>
+  {/if}
 </div>
 
 {#if open && period?.modelBreakdown}

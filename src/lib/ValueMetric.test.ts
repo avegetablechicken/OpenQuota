@@ -224,4 +224,36 @@ describe('ValueMetric', () => {
       vi.useRealTimers();
     }
   });
+
+  it('closes on external scroll without stealing focus back to the trigger', async () => {
+    vi.useFakeTimers();
+    try {
+      render(ValueMetric, {
+        label: 'Rate Limit Resets',
+        now: Date.parse('2026-10-08T12:00:00Z'),
+        resetDisplay: 'countdown',
+        timeFormat: 'system',
+        metric: {
+          id: 'rateLimitResets',
+          label: 'Rate Limit Resets',
+          values: [{ number: 1, kind: 'count', label: 'available', estimated: false }],
+          expiriesAt: ['2026-10-09T12:00:00Z'],
+        },
+      });
+      const trigger = screen.getByRole('button', { name: 'Rate Limit Resets: 1 available' });
+      await fireEvent.mouseEnter(trigger);
+      await vi.advanceTimersByTimeAsync(350);
+      expect(screen.getByRole('dialog', { name: 'Rate Limit Resets details' })).toBeVisible();
+
+      window.dispatchEvent(new Event('scroll'));
+      await vi.waitFor(() =>
+        expect(
+          screen.queryByRole('dialog', { name: 'Rate Limit Resets details' }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(trigger).not.toHaveFocus();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

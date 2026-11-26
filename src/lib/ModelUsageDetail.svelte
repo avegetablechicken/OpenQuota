@@ -31,7 +31,17 @@
   let detailEl = $state<HTMLDivElement>();
   let resolvedTop = $state<number | null>(null);
 
+  const models = $derived(
+    tokensOnly
+      ? [...breakdown.models].sort(
+          (a, b) => b.totalTokens - a.totalTokens || a.model.localeCompare(b.model),
+        )
+      : breakdown.models,
+  );
+
   $effect(() => {
+    void models.length;
+    void tokensOnly;
     const height = detailEl?.offsetHeight ?? 0;
     if (height <= 0) {
       resolvedTop = top;
@@ -55,14 +65,6 @@
       window.removeEventListener('resize', dismiss);
     };
   });
-
-  const models = $derived(
-    tokensOnly
-      ? [...breakdown.models].sort(
-          (a, b) => b.totalTokens - a.totalTokens || a.model.localeCompare(b.model),
-        )
-      : breakdown.models,
-  );
   const shares = $derived.by(() => {
     const costs = !tokensOnly && models.every((model) => model.costUsd !== null);
     const costTotal = costs ? models.reduce((sum, model) => sum + (model.costUsd ?? 0), 0) : 0;

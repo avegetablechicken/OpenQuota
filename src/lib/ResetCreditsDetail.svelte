@@ -20,7 +20,7 @@
     anchor?: VerticalBounds;
     onEnter: () => void;
     onLeave: () => void;
-    onDismiss: () => void;
+    onDismiss: (options?: { restoreFocus?: boolean }) => void;
   }
 
   let { title, count, expiries, now, timeFormat, top, anchor, onEnter, onLeave, onDismiss }: Props =
@@ -81,7 +81,7 @@
       void cancelClaim();
       return;
     }
-    if (!pendingExpiry) onDismiss();
+    if (!pendingExpiry) onDismiss({ restoreFocus: true });
   }
 
   async function beginClaim(expiry: string, triggerIndex: number) {
@@ -148,10 +148,10 @@
     const onScroll = (event: Event) => {
       if (confirmingExpiry || pendingExpiry) return;
       if (event.target instanceof Node && dialogElement?.contains(event.target)) return;
-      onDismiss();
+      onDismiss({ restoreFocus: false });
     };
     const onResize = () => {
-      if (!confirmingExpiry && !pendingExpiry) onDismiss();
+      if (!confirmingExpiry && !pendingExpiry) onDismiss({ restoreFocus: false });
     };
     window.addEventListener('scroll', onScroll, { capture: true, passive: true });
     window.addEventListener('resize', onResize);

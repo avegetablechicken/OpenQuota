@@ -327,7 +327,7 @@ describe('OpenQuota dashboard', () => {
       expect(within(total).getByText('$5.11')).toBeVisible();
       const card = container.querySelector<HTMLElement>(`[data-provider-id="${id}"]`)!;
       const reading = mode === 'admin' ? '$5.11 · 3M tokens' : '3M tokens';
-      expect(within(card).getByRole('button', { name: reading })).toBeVisible();
+      expect(within(card).getByText(reading)).toBeVisible();
     },
   );
 
