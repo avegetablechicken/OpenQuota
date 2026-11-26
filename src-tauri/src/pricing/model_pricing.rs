@@ -59,7 +59,8 @@ impl ModelPricing {
         // Foreign models in native logs use upstream API-equivalent pricing. A reseller export
         // keeps its own provider scope.
         let provider = match provider {
-            "codex" | "claude" | "grok" | "kimi" | "minimax" | "zai" | "opencode"
+            "codex" | "claude" | "antigravity" | "grok" | "kimi" | "minimax" | "zai"
+            | "opencode"
                 if normalized.starts_with("deepseek-")
                     || normalized.ends_with("/deepseek-flash") =>
             {
@@ -91,6 +92,7 @@ impl ModelPricing {
                 )),
             )
             | ("deepseek", Some(("deepseek", id))) => id,
+            ("deepseek", Some(_)) if normalized.ends_with("/deepseek-flash") => "deepseek-flash",
             _ => &normalized,
         };
         let lookup = |candidate: &str| {
@@ -228,7 +230,8 @@ impl ModelPricing {
     }
 
     fn lookup_gemini_normalized(&self, model: &str) -> Option<ModelRates> {
-        let candidates = gemini_candidates(model);
+        let normalized = model.to_ascii_lowercase();
+        let candidates = gemini_candidates(&normalized);
         if candidates.is_empty() {
             return None;
         }
@@ -639,10 +642,24 @@ mod tests {
             &[],
         );
 
-        // Supplement flash-lite must beat primary fuzzy match on flash.
+        // Supplement flash-lite must beat primary fuzzy match on flash (including mixed case).
         assert_eq!(
             model_pricing
                 .resolve("gemini-3.5-flash-lite-tiered-high")
+                .unwrap()
+                .input_per_million,
+            0.3
+        );
+        assert_eq!(
+            model_pricing
+                .resolve("Google/gemini-3.5-flash-lite-tiered-high")
+                .unwrap()
+                .input_per_million,
+            0.3
+        );
+        assert_eq!(
+            model_pricing
+                .resolve("gemini-3.5-flash-lite-HIGH")
                 .unwrap()
                 .input_per_million,
             0.3
@@ -674,5 +691,30 @@ mod tests {
             model_pricing.display_family("google/gemini-4-unknown-tiered-high"),
             "google/gemini-4-unknown-tiered-high"
         );
+
+        let bundled = crate::pricing::test_bundled_pricing();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-20T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        assert!(bundled
+            .historical_rates(
+                "antigravity",
+                "deepseek-flash",
+                at,
+                crate::pricing::ServiceTier::Standard,
+                0
+            )
+            .flatten()
+            .is_some());
+        assert!(bundled
+            .historical_rates(
+                "opencode",
+                "openrouter/deepseek-flash",
+                at,
+                crate::pricing::ServiceTier::Standard,
+                0
+            )
+            .flatten()
+            .is_some());
     }
 }
