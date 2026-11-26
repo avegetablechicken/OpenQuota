@@ -99,7 +99,25 @@ fn load_local_events(
     storage
         .prune_log_events("antigravity", &seen_paths)
         .map_err(|_| AntigravityError::LocalUsage)?;
-    Ok(events)
+    Ok(deduplicate(events))
+}
+
+fn deduplicate(events: Vec<AntigravityTokenEvent>) -> Vec<AntigravityTokenEvent> {
+    let mut seen = HashSet::with_capacity(events.len());
+    events
+        .into_iter()
+        .filter(|event| {
+            seen.insert((
+                event.timestamp,
+                event.step_index,
+                event.model.clone(),
+                event.input,
+                event.cache_write,
+                event.cache_read,
+                event.output,
+            ))
+        })
+        .collect()
 }
 
 pub(crate) fn scan_routed_usage_into(
@@ -388,7 +406,8 @@ fn antigravity_roots(
 
 fn discover_transcript_files(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    let mut by_conversation = HashMap::<String, (usize, u64, Option<std::time::SystemTime>)>::new();
     for root in roots {
         let brain = root.join("brain");
         for conversation in child_directories(&brain) {
@@ -403,9 +422,31 @@ fn discover_transcript_files(roots: &[PathBuf]) -> Vec<PathBuf> {
                 continue;
             };
             let canonical = fs::canonicalize(&candidate).unwrap_or(candidate);
-            if seen.insert(canonical.clone()) {
-                paths.push(canonical);
+            if !seen_paths.insert(canonical.clone()) {
+                continue;
             }
+            let metadata = fs::metadata(&canonical).ok();
+            let size = metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
+            let modified = metadata.and_then(|meta| meta.modified().ok());
+            if let Some(conv_key) = conversation
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_ascii_lowercase)
+            {
+                if let Some((index, best_size, best_modified)) = by_conversation.get_mut(&conv_key)
+                {
+                    if (size, modified) > (*best_size, *best_modified) {
+                        paths[*index] = canonical;
+                        *best_size = size;
+                        *best_modified = modified;
+                    }
+                    continue;
+                }
+                by_conversation.insert(conv_key, (paths.len(), size, modified));
+            }
+            paths.push(canonical);
         }
     }
     paths.sort();
@@ -832,5 +873,75 @@ mod tests {
             "unexpected routed Claude cost: {claude_cost}"
         );
         assert!(claude_history.yesterday.is_none());
+    }
+
+    #[test]
+    fn deduplicates_same_conversation_across_roots_preferring_more_complete_transcript() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        let now = local_noon(2026, 11, 21);
+        let ts1 = (now - chrono::Duration::minutes(20)).to_rfc3339();
+        let ts2 = (now - chrono::Duration::minutes(10)).to_rfc3339();
+
+        let backup_root = directory.path().join(".gemini").join("antigravity-backup");
+        let live_root = directory.path().join(".gemini").join("antigravity-cli");
+        let step1 = format!(
+            r#"{{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"{ts1}","model":"gemini-4-neon-high","input_tokens":10000,"cache_read_tokens":0,"output_tokens":1000}}"#
+        );
+        let step2 = format!(
+            r#"{{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"{ts2}","model":"gemini-4-neon-high","input_tokens":20000,"cache_read_tokens":5000,"output_tokens":2000}}"#
+        );
+
+        write_transcript(&backup_root, "conv-shared", "transcript.jsonl", &step1);
+        write_transcript(
+            &live_root,
+            "conv-shared",
+            "transcript.jsonl",
+            &format!("{step1}\n{step2}\n"),
+        );
+
+        let roots = [backup_root, live_root];
+        let files = discover_transcript_files(&roots);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().contains("antigravity-cli"));
+
+        let history = scan_roots(&storage, &roots, now, &test_bundled_pricing(), false).unwrap();
+        assert_eq!(history.today.unwrap().tokens, 38_000);
+    }
+
+    #[test]
+    fn deduplicates_forked_history_events_across_conversations_while_keeping_new_steps() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        let root = directory.path().join(".gemini").join("antigravity-cli");
+        let now = local_noon(2026, 11, 21);
+        let ts_parent = (now - chrono::Duration::minutes(20)).to_rfc3339();
+        let ts_fork = (now - chrono::Duration::minutes(5)).to_rfc3339();
+
+        let shared_step = format!(
+            r#"{{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"{ts_parent}","model":"gemini-4-neon-high","input_tokens":10000,"cache_read_tokens":0,"output_tokens":1000}}"#
+        );
+        let fork_step = format!(
+            r#"{{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"{ts_fork}","model":"gemini-4-neon-high","input_tokens":5000,"cache_read_tokens":10000,"output_tokens":500}}"#
+        );
+
+        write_transcript(&root, "conv-parent", "transcript.jsonl", &shared_step);
+        write_transcript(
+            &root,
+            "conv-fork",
+            "transcript.jsonl",
+            &format!("{shared_step}\n{fork_step}\n"),
+        );
+
+        let history = scan_roots(
+            &storage,
+            std::slice::from_ref(&root),
+            now,
+            &test_bundled_pricing(),
+            false,
+        )
+        .unwrap();
+        // shared_step (11_000) counted once + fork_step (15_500) = 26_500.
+        assert_eq!(history.today.unwrap().tokens, 26_500);
     }
 }
