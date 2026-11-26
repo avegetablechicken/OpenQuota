@@ -13,7 +13,7 @@ use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
         daily_usage::DailyUsageAccumulator,
-        log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+        log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
         model_scope::{card_for_model, native_log_disposition, LocalModelDisposition},
     },
     storage::Storage,
@@ -129,12 +129,24 @@ fn scan_tmp_directories_into(
     Ok(aggregate_into(events, now, pricing, card_id, accumulator))
 }
 
+static LOADED_EVENTS: LoadedEventsMemo<GeminiCliTokenEvent> = LoadedEventsMemo::new();
+
 fn load_local_events(
     storage: &Storage,
     tmp_dirs: &[PathBuf],
     since_date: NaiveDate,
 ) -> Result<Vec<GeminiCliTokenEvent>, LogCacheError> {
     let paths = discover_chat_files(tmp_dirs);
+    LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
+        load_chat_files(storage, paths, since_date)
+    })
+}
+
+fn load_chat_files(
+    storage: &Storage,
+    paths: Vec<PathBuf>,
+    since_date: NaiveDate,
+) -> Result<Vec<GeminiCliTokenEvent>, LogCacheError> {
     let mut seen_paths = HashSet::with_capacity(paths.len());
     let mut events = Vec::new();
 

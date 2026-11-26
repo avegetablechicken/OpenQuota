@@ -14,7 +14,7 @@ use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
         daily_usage::DailyUsageAccumulator,
-        log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+        log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
         model_scope::{
             card_for_model, is_local_runtime_provider, native_log_disposition,
             LocalModelDisposition,
@@ -133,12 +133,28 @@ fn scan_roots_into(
     Ok(aggregate_into(events, now, pricing, card_id, accumulator))
 }
 
+static LOADED_EVENTS: LoadedEventsMemo<KimiTokenEvent> = LoadedEventsMemo::new();
+
 fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
     since_date: NaiveDate,
 ) -> Result<Vec<KimiTokenEvent>, LogCacheError> {
     let discovered = discover_wire_files(roots);
+    let paths = discovered
+        .iter()
+        .map(|(_, path)| path.clone())
+        .collect::<Vec<_>>();
+    LOADED_EVENTS.load(storage, paths, since_date, || {
+        load_wire_files(storage, discovered, since_date)
+    })
+}
+
+fn load_wire_files(
+    storage: &Storage,
+    discovered: Vec<(PathBuf, PathBuf)>,
+    since_date: NaiveDate,
+) -> Result<Vec<KimiTokenEvent>, LogCacheError> {
     let mut seen_paths = HashSet::with_capacity(discovered.len());
     let mut default_models = HashMap::<PathBuf, Option<String>>::new();
     let mut events = Vec::new();

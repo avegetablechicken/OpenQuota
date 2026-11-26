@@ -19,7 +19,7 @@ use crate::providers::{
     claude, codex,
     daily_usage::DailyUsageAccumulator,
     gemini_cli_usage, grok, kimi,
-    log_usage::{load_or_parse_log, parse_log_timestamp},
+    log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
     model_scope::{
         card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
     },
@@ -69,12 +69,24 @@ fn default_roots() -> Vec<PathBuf> {
     )
 }
 
+static LOADED_EVENTS: LoadedEventsMemo<AntigravityTokenEvent> = LoadedEventsMemo::new();
+
 fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
     since_date: NaiveDate,
 ) -> Result<Vec<AntigravityTokenEvent>, AntigravityError> {
     let paths = discover_transcript_files(roots);
+    LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
+        load_transcript_files(storage, paths, since_date)
+    })
+}
+
+fn load_transcript_files(
+    storage: &Storage,
+    paths: Vec<PathBuf>,
+    since_date: NaiveDate,
+) -> Result<Vec<AntigravityTokenEvent>, AntigravityError> {
     let mut seen_paths = HashSet::with_capacity(paths.len());
     let mut events = Vec::new();
     for path in paths {

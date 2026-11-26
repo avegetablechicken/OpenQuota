@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Days, Local, Utc};
+use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -15,7 +15,7 @@ use crate::{
         antigravity, claude, codex,
         daily_usage::DailyUsageAccumulator,
         gemini_cli_usage, kimi,
-        log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+        log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
         model_scope::{
             card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
         },
@@ -118,7 +118,15 @@ struct TokenEvent {
     reasoning: u64,
 }
 
+static LOADED_EVENTS: LoadedEventsMemo<TokenEvent> = LoadedEventsMemo::new();
+
 fn load_events(storage: &Storage, path: &Path) -> Result<Vec<TokenEvent>, GrokError> {
+    LOADED_EVENTS.load(storage, [path.to_path_buf()], NaiveDate::MIN, || {
+        load_log_file(storage, path)
+    })
+}
+
+fn load_log_file(storage: &Storage, path: &Path) -> Result<Vec<TokenEvent>, GrokError> {
     let (events, seen_paths) = match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => (
             load_or_parse_log(storage, "grok", path, LOG_CACHE_SCHEMA_VERSION, parse_jsonl)

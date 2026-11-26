@@ -20,7 +20,7 @@ use crate::providers::{
     antigravity, codex,
     daily_usage::DailyUsageAccumulator,
     gemini_cli_usage, grok, kimi,
-    log_usage::{load_or_parse_log, parse_log_timestamp},
+    log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
     model_scope::{
         card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
     },
@@ -55,12 +55,24 @@ impl ClaudeTokenEvent {
     }
 }
 
+static LOADED_EVENTS: LoadedEventsMemo<ClaudeTokenEvent> = LoadedEventsMemo::new();
+
 fn load_local_events(
     storage: &Storage,
     since_date: NaiveDate,
 ) -> Result<Vec<ClaudeTokenEvent>, ClaudeError> {
-    let mut events = Vec::new();
     let paths = discover_files();
+    LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
+        load_files(storage, paths, since_date)
+    })
+}
+
+fn load_files(
+    storage: &Storage,
+    paths: Vec<PathBuf>,
+    since_date: NaiveDate,
+) -> Result<Vec<ClaudeTokenEvent>, ClaudeError> {
+    let mut events = Vec::new();
     let mut seen_paths = HashSet::with_capacity(paths.len());
     for path in paths {
         seen_paths.insert(path.clone());

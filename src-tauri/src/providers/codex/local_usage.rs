@@ -21,7 +21,7 @@ use crate::providers::{
     antigravity, claude,
     daily_usage::DailyUsageAccumulator,
     gemini_cli_usage, grok, kimi,
-    log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+    log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     model_scope::{
         card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
     },
@@ -234,13 +234,25 @@ pub fn scan_local_usage(
     Ok(accumulator.build(now, &source_note))
 }
 
+static LOADED_EVENTS: LoadedEventsMemo<TokenEvent> = LoadedEventsMemo::new();
+
 fn scan_codex_events(
     storage: &Storage,
     homes: &[PathBuf],
     since_date: NaiveDate,
 ) -> Result<Vec<TokenEvent>, CodexError> {
-    let mut events = Vec::new();
     let paths = discover_session_files(homes);
+    LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
+        load_session_files(storage, paths, since_date)
+    })
+}
+
+fn load_session_files(
+    storage: &Storage,
+    paths: Vec<PathBuf>,
+    since_date: NaiveDate,
+) -> Result<Vec<TokenEvent>, CodexError> {
+    let mut events = Vec::new();
     let mut seen_paths = HashSet::with_capacity(paths.len());
 
     for path in paths {

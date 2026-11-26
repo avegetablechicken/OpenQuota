@@ -16,7 +16,7 @@ use crate::{
 
 use super::{
     daily_usage::DailyUsageAccumulator,
-    log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+    log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     model_scope::{
         card_for_model, is_local_runtime_provider, model_belongs_to_card, normalize_provider_model,
     },
@@ -105,6 +105,35 @@ fn scan_directories_into(
                 .map(|path| (*source, path))
         })
         .collect::<Vec<_>>();
+    let files = paths
+        .iter()
+        .map(|(_, path)| path.clone())
+        .collect::<Vec<_>>();
+    let events = LOADED_EVENTS.load(storage, files, NaiveDate::MIN, || {
+        load_session_files(storage, paths)
+    })?;
+
+    let since = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(30))
+        .unwrap_or(NaiveDate::MIN);
+    Ok(aggregate_into(
+        events,
+        card_id,
+        since,
+        now,
+        pricing,
+        accumulator,
+    ))
+}
+
+static LOADED_EVENTS: LoadedEventsMemo<PiUsageEvent> = LoadedEventsMemo::new();
+
+fn load_session_files(
+    storage: &Storage,
+    paths: Vec<(PiUsageSource, PathBuf)>,
+) -> Result<Vec<PiUsageEvent>, LogCacheError> {
     let mut seen_paths = HashSet::with_capacity(paths.len());
     let mut events = Vec::new();
     for (source, path) in paths {
@@ -121,20 +150,7 @@ fn scan_directories_into(
         events.extend(parsed);
     }
     storage.prune_log_events("pi", &seen_paths)?;
-
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    Ok(aggregate_into(
-        deduplicate(events),
-        card_id,
-        since,
-        now,
-        pricing,
-        accumulator,
-    ))
+    Ok(deduplicate(events))
 }
 
 fn sessions_directories(

@@ -1,10 +1,11 @@
 use std::{
     fs::{self, Metadata},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
@@ -29,6 +30,73 @@ impl LogFileFingerprint {
     }
 }
 
+/// Identifies one load of a client's logs: the storage, the date window, and every file's state.
+#[derive(PartialEq, Eq)]
+struct LoadedEventsKey {
+    storage: usize,
+    since_date: NaiveDate,
+    files: Vec<(PathBuf, Option<LogFileFingerprint>)>,
+}
+
+/// Reuses one client's loaded events while none of its log files changed.
+///
+/// Every card folds in the usage other clients routed to it, so a refresh loads each client's
+/// logs once per card. The memo keeps the last result and holds its lock while loading, so
+/// concurrent cards wait for one load instead of each decoding the same cache rows.
+pub struct LoadedEventsMemo<T> {
+    entry: Mutex<Option<(LoadedEventsKey, Arc<Vec<T>>)>>,
+}
+
+impl<T: Clone> LoadedEventsMemo<T> {
+    pub const fn new() -> Self {
+        Self {
+            entry: Mutex::new(None),
+        }
+    }
+
+    /// Returns the events `load` produced for the same `paths` and `since_date`, or runs it.
+    /// A failed load, or one that skipped an unreadable file, is not remembered, so the next
+    /// refresh retries it.
+    pub fn load<E>(
+        &self,
+        storage: &Storage,
+        paths: impl IntoIterator<Item = PathBuf>,
+        since_date: NaiveDate,
+        load: impl FnOnce() -> Result<Vec<T>, E>,
+    ) -> Result<Vec<T>, E> {
+        let key = LoadedEventsKey {
+            storage: std::ptr::from_ref(storage) as usize,
+            since_date,
+            files: paths
+                .into_iter()
+                .map(|path| {
+                    let fingerprint = fs::metadata(&path)
+                        .ok()
+                        .and_then(|metadata| LogFileFingerprint::from_metadata(&metadata));
+                    (path, fingerprint)
+                })
+                .collect(),
+        };
+        let mut entry = self
+            .entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cached_key, events)) = entry.as_ref() {
+            if *cached_key == key {
+                return Ok(events.as_ref().clone());
+            }
+        }
+        let unreadable_before = UNREADABLE_LOGS.with(std::cell::Cell::get);
+        let events = load()?;
+        if UNREADABLE_LOGS.with(std::cell::Cell::get) == unreadable_before {
+            *entry = Some((key, Arc::new(events.clone())));
+        } else {
+            *entry = None;
+        }
+        Ok(events)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LogCacheError {
     #[error(transparent)]
@@ -47,6 +115,16 @@ struct CachedLogEvents<T> {
 struct CachedLogEventsRef<'a, T> {
     schema_version: u8,
     events: &'a [T],
+}
+
+thread_local! {
+    /// Counts files this thread could not read, so a memoized load can tell it was incomplete.
+    static UNREADABLE_LOGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn note_unreadable_log(provider_id: &str, path: &Path) {
+    crate::logging::local_usage_file_failed(provider_id, path);
+    UNREADABLE_LOGS.with(|count| count.set(count.get().wrapping_add(1)));
 }
 
 /// Loads one parsed log file from the persistent cache or refreshes it from disk. An unreadable file
@@ -68,14 +146,14 @@ where
             if error.kind() == std::io::ErrorKind::NotFound {
                 crate::logging::local_usage_file_recovered(provider_id, path);
             } else {
-                crate::logging::local_usage_file_failed(provider_id, path);
+                note_unreadable_log(provider_id, path);
             }
             storage.remove_log_events(provider_id, path)?;
             return Ok(None);
         }
     };
     let Some(fingerprint) = LogFileFingerprint::from_metadata(&metadata) else {
-        crate::logging::local_usage_file_failed(provider_id, path);
+        note_unreadable_log(provider_id, path);
         storage.remove_log_events(provider_id, path)?;
         return Ok(None);
     };
@@ -99,7 +177,7 @@ where
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(_) => {
-            crate::logging::local_usage_file_failed(provider_id, path);
+            note_unreadable_log(provider_id, path);
             storage.remove_log_events(provider_id, path)?;
             return Ok(None);
         }
@@ -226,7 +304,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
-    use super::{load_or_parse_log, parse_log_timestamp, scan_or_cached_usage, LogFileFingerprint};
+    use super::{
+        load_or_parse_log, parse_log_timestamp, scan_or_cached_usage, LoadedEventsMemo,
+        LogFileFingerprint,
+    };
     use crate::{
         models::{DailyUsage, ProviderSnapshot, UsageHistory},
         storage::Storage,
@@ -412,5 +493,65 @@ mod tests {
         assert_eq!(other_account, UsageHistory::default());
         assert_eq!(same_account, cached_usage);
         assert_eq!(unresolved_account, same_account);
+    }
+
+    #[test]
+    fn loaded_events_memo_reloads_only_when_the_files_change() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        let first = directory.path().join("first.jsonl");
+        let second = directory.path().join("second.jsonl");
+        fs::write(&first, "a").unwrap();
+        let since = chrono::NaiveDate::MIN;
+        let memo = LoadedEventsMemo::<u32>::new();
+        let loads = Cell::new(0);
+        let load = || -> Result<Vec<u32>, ()> {
+            loads.set(loads.get() + 1);
+            Ok(vec![loads.get()])
+        };
+
+        assert_eq!(
+            memo.load(&storage, [first.clone()], since, load),
+            Ok(vec![1])
+        );
+        assert_eq!(
+            memo.load(&storage, [first.clone()], since, load),
+            Ok(vec![1])
+        );
+
+        fs::write(&first, "ab").unwrap();
+        assert_eq!(
+            memo.load(&storage, [first.clone()], since, load),
+            Ok(vec![2])
+        );
+        assert_eq!(
+            memo.load(&storage, [first.clone(), second.clone()], since, load),
+            Ok(vec![3])
+        );
+
+        let failed = memo.load(&storage, [second.clone()], since, || Err::<Vec<u32>, _>(()));
+        assert_eq!(failed, Err(()));
+        assert_eq!(
+            memo.load(&storage, [second.clone()], since, load),
+            Ok(vec![4])
+        );
+        assert_eq!(loads.get(), 4);
+
+        // A load that skipped an unreadable file is retried even though nothing changed.
+        fs::write(&second, "b").unwrap();
+        let unreadable = directory.path().join("unreadable.jsonl");
+        fs::create_dir(&unreadable).unwrap();
+        let skipping = || -> Result<Vec<u32>, ()> {
+            assert_eq!(
+                load_or_parse_log(&storage, "test", &unreadable, 1, |_| vec![0u32]).unwrap(),
+                None
+            );
+            load()
+        };
+        assert_eq!(
+            memo.load(&storage, [second.clone()], since, skipping),
+            Ok(vec![5])
+        );
+        assert_eq!(memo.load(&storage, [second], since, load), Ok(vec![6]));
     }
 }
