@@ -832,12 +832,16 @@ pub fn normalize(
             .flatten();
         let provider_id = provider.id.clone();
         normalize_metrics(&mut provider.metrics, &definition.metrics, |metric_id| {
-            !connection_configured
-                || crate::providers::sub2api::metric_supported(
+            match (connection_configured, upstream_provider_id) {
+                (false, _) => true,
+                // Until the track is known, no pin counts toward the cap, so none is dropped.
+                (true, None) => false,
+                (true, Some(track)) => crate::providers::sub2api::metric_supported(
                     &provider_id,
                     metric_id,
-                    upstream_provider_id,
-                )
+                    Some(track),
+                ),
+            }
         });
         normalized.push(provider);
     }
@@ -2461,6 +2465,62 @@ mod tests {
         );
         assert!(sub2api_metric(&saved, "daily").enabled);
         assert!(sub2api_metric(&saved, "monthly").enabled);
+    }
+
+    /// A connection runtime whose current track the test sets, as a saved connection would.
+    struct TrackedConnection(ProviderDefinition, std::sync::Mutex<Option<&'static str>>);
+
+    impl UsageProvider for TrackedConnection {
+        fn definition(&self) -> ProviderDefinition {
+            self.0.clone()
+        }
+
+        fn has_local_credentials(&self) -> bool {
+            false
+        }
+
+        fn supports_connection_configuration(&self) -> bool {
+            true
+        }
+
+        fn upstream_provider_id(&self) -> Option<&'static str> {
+            *self.1.lock().unwrap()
+        }
+
+        fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn an_unknown_track_keeps_every_pin_until_the_track_is_read() {
+        let subscription = (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex);
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+        let providers = Sub2ApiProviders::new(directory.path().join("sub2api"), storage.clone());
+        let mut definition = providers.provider("sub2api").unwrap().definition();
+        definition.fallback_enabled = true;
+        let connection = Arc::new(TrackedConnection(definition, Default::default()));
+        let registry = Arc::new(ProviderRegistry::new(vec![connection.clone()]).unwrap());
+        let service = SettingsService::new_for_test(storage, registry, &HashSet::new()).unwrap();
+        *connection.1.lock().unwrap() = Some(track_provider_id(subscription.0, subscription.1));
+        let mut settings = reconcile_sub2api_track(&service, subscription, None);
+        // Session and Spark report nothing on a subscription, so they do not use up the cap.
+        for metric in &mut settings.providers[0].metrics {
+            if matches!(
+                metric.id.as_str(),
+                "sub2api.session" | "sub2api.spark" | "sub2api.daily" | "sub2api.weekly"
+            ) {
+                metric.pinned = true;
+            }
+        }
+        let expected = service.update(settings).unwrap();
+        assert!(sub2api_metric(&expected, "weekly").pinned);
+
+        // A marker from before tracks were recorded leaves the track unknown at launch.
+        *connection.1.lock().unwrap() = None;
+        let saved = service.update(expected.clone()).unwrap();
+        assert_eq!(saved.providers[0].metrics, expected.providers[0].metrics);
     }
 
     #[test]

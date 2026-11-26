@@ -208,6 +208,37 @@ pub fn track_provider_id(mode: Sub2ApiMode, upstream: Sub2ApiUpstream) -> &'stat
     }
 }
 
+/// Reads a configuration marker as its cache key and, when recorded, its track id.
+///
+/// Markers written before tracks were recorded hold only the cache key (or `configured`).
+fn parse_configuration_marker(contents: &str) -> (&str, Option<&'static str>) {
+    let mut lines = contents.lines();
+    let cache_key = lines.next().unwrap_or_default();
+    let track = match lines.next() {
+        Some(recorded) => track_for_id(recorded),
+        // Only subscriptions use this cache key, and their track does not depend on the upstream.
+        None if cache_key == SUBSCRIPTION_CACHE_KEY => {
+            Some((Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex))
+        }
+        None => None,
+    }
+    .map(|(mode, upstream)| track_provider_id(mode, upstream));
+    (cache_key, track)
+}
+
+/// The track a [`track_provider_id`] names.
+fn track_for_id(track: &str) -> Option<(Sub2ApiMode, Sub2ApiUpstream)> {
+    [
+        (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex),
+        (Sub2ApiMode::Admin, Sub2ApiUpstream::Codex),
+        (Sub2ApiMode::Admin, Sub2ApiUpstream::Claude),
+        (Sub2ApiMode::Admin, Sub2ApiUpstream::Antigravity),
+        (Sub2ApiMode::Admin, Sub2ApiUpstream::Grok),
+    ]
+    .into_iter()
+    .find(|(mode, upstream)| track_provider_id(*mode, *upstream) == track)
+}
+
 /// Whether a connection's metric can report data for its upstream, matching the Customize page.
 pub fn metric_supported(
     provider_id: &str,
@@ -1034,6 +1065,8 @@ pub struct Sub2ApiProvider {
     display_name: String,
     configured_marker: PathBuf,
     configured: AtomicBool,
+    /// The active track id, mirrored in the marker so settings never wait on the credential store.
+    track: Mutex<Option<&'static str>>,
     session: Mutex<Option<CachedSession>>,
     model_families: Mutex<Option<subscription::CachedModelFamilies>>,
 }
@@ -1045,11 +1078,16 @@ impl Sub2ApiProvider {
         configured_marker: PathBuf,
         configured: bool,
     ) -> Self {
+        let track = configured
+            .then(|| fs::read_to_string(&configured_marker).ok())
+            .flatten()
+            .and_then(|contents| parse_configuration_marker(&contents).1);
         Self {
             provider_id,
             display_name,
             configured_marker,
             configured: AtomicBool::new(configured),
+            track: Mutex::new(track),
             session: Mutex::new(None),
             model_families: Mutex::new(None),
         }
@@ -1118,7 +1156,7 @@ impl Sub2ApiProvider {
         }
         let connections = StoredConnections::with_active(config, previous);
         self.write_connections(&connections)?;
-        self.set_configuration_marker(Some(connections.active.cache_key()))?;
+        self.set_configuration_marker(Some(&connections.active))?;
         if let Ok(mut cached) = self.session.lock() {
             *cached = None;
         }
@@ -1362,15 +1400,16 @@ impl Sub2ApiProvider {
         }
     }
 
-    fn set_configuration_marker(&self, cache_key: Option<&str>) -> Result<(), Sub2ApiError> {
-        if let Some(cache_key) = cache_key {
-            let parent = self
-                .configured_marker
-                .parent()
-                .ok_or(Sub2ApiError::CredentialStorage)?;
-            fs::create_dir_all(parent).map_err(|_| Sub2ApiError::CredentialStorage)?;
-            fs::write(&self.configured_marker, cache_key)
-                .map_err(|_| Sub2ApiError::CredentialStorage)?;
+    fn set_configuration_marker(&self, config: Option<&StoredConfig>) -> Result<(), Sub2ApiError> {
+        let track = config.map(|config| track_provider_id(config.mode, config.upstream));
+        // The track lock orders the marker, the cached track, and the configured flag against a
+        // refresh catching up in `remember_track`.
+        let mut cached = self
+            .track
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(config) = config {
+            self.write_configuration_marker(config.cache_key(), track)?;
         } else {
             match fs::remove_file(&self.configured_marker) {
                 Ok(()) => {}
@@ -1378,8 +1417,47 @@ impl Sub2ApiProvider {
                 Err(_) => return Err(Sub2ApiError::CredentialStorage),
             }
         }
-        self.configured.store(cache_key.is_some(), Ordering::SeqCst);
+        *cached = track;
+        self.configured.store(config.is_some(), Ordering::SeqCst);
         Ok(())
+    }
+
+    fn write_configuration_marker(
+        &self,
+        cache_key: &str,
+        track: Option<&str>,
+    ) -> Result<(), Sub2ApiError> {
+        let parent = self
+            .configured_marker
+            .parent()
+            .ok_or(Sub2ApiError::CredentialStorage)?;
+        fs::create_dir_all(parent).map_err(|_| Sub2ApiError::CredentialStorage)?;
+        let contents = match track {
+            Some(track) => format!("{cache_key}\n{track}"),
+            None => cache_key.to_owned(),
+        };
+        fs::write(&self.configured_marker, contents).map_err(|_| Sub2ApiError::CredentialStorage)
+    }
+
+    /// Records the track of a configuration read from the credential store, so markers written
+    /// before tracks were recorded catch up on the first read instead of staying unknown.
+    ///
+    /// Only an unknown track is filled in: a refresh may have read the configuration just before
+    /// a save or removal, and must not restore the old track or the removed marker.
+    fn remember_track(&self, config: &StoredConfig) {
+        let Ok(mut cached) = self.track.lock() else {
+            return;
+        };
+        if cached.is_some() || !self.configured.load(Ordering::SeqCst) {
+            return;
+        }
+        let track = track_provider_id(config.mode, config.upstream);
+        if self
+            .write_configuration_marker(config.cache_key(), Some(track))
+            .is_ok()
+        {
+            *cached = Some(track);
+        }
     }
 
     fn load_config(&self) -> Result<Option<StoredConfig>, Sub2ApiError> {
@@ -1393,9 +1471,10 @@ impl Sub2ApiProvider {
             return Ok(None);
         };
         let bytes = Zeroizing::new(bytes);
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| Sub2ApiError::CredentialStorage)
+        let connections: StoredConnections =
+            serde_json::from_slice(&bytes).map_err(|_| Sub2ApiError::CredentialStorage)?;
+        self.remember_track(&connections.active);
+        Ok(Some(connections))
     }
 
     fn write_connections(&self, config: &StoredConnections) -> Result<(), Sub2ApiError> {
@@ -1498,8 +1577,9 @@ impl UsageProvider for Sub2ApiProvider {
         if !self.configured.load(Ordering::SeqCst) {
             return CacheIdentity::Resolved("sub2api-unconfigured");
         }
-        let key = match fs::read_to_string(&self.configured_marker).as_deref() {
-            Ok(SUBSCRIPTION_CACHE_KEY) => SUBSCRIPTION_CACHE_KEY,
+        let contents = fs::read_to_string(&self.configured_marker).unwrap_or_default();
+        let key = match parse_configuration_marker(&contents).0 {
+            SUBSCRIPTION_CACHE_KEY => SUBSCRIPTION_CACHE_KEY,
             _ => ADMIN_CACHE_KEY,
         };
         CacheIdentity::Resolved(key)
@@ -1509,11 +1589,13 @@ impl UsageProvider for Sub2ApiProvider {
         true
     }
 
+    /// Reads the cached track only: settings normalize under their write lock, often on an async
+    /// worker, so this must not reach the credential store.
     fn upstream_provider_id(&self) -> Option<&'static str> {
-        self.load_config()
-            .ok()
-            .flatten()
-            .map(|config| track_provider_id(config.mode, config.upstream))
+        if !self.configured.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.track.lock().ok().and_then(|cached| *cached)
     }
 
     fn refresh_for_service(&self) -> Result<super::ProviderRefresh, ProviderError> {
@@ -2280,15 +2362,79 @@ mod tests {
         assert!(!provider.has_local_credentials());
         assert!(provider.account_identity().is_none());
 
-        provider
-            .set_configuration_marker(Some(super::ADMIN_CACHE_KEY))
-            .unwrap();
+        let config = admin_config(
+            "https://sub2api.example".into(),
+            super::Sub2ApiUpstream::Grok,
+        );
+        provider.set_configuration_marker(Some(&config)).unwrap();
         assert!(provider.has_local_credentials());
         assert!(provider.supports_account_names());
         assert_eq!(provider.account_identity(), Some("sub2api@2"));
 
         provider.set_configuration_marker(None).unwrap();
         assert!(provider.account_identity().is_none());
+    }
+
+    #[test]
+    fn the_track_survives_restarts_without_reading_the_credential_store() {
+        let directory = tempdir().unwrap();
+        let marker = directory.path().join("sub2api@2.configured");
+        let slot = |configured| {
+            Sub2ApiProvider::new(
+                "sub2api@2".into(),
+                default_display_name_for_slot("sub2api@2"),
+                marker.clone(),
+                configured,
+            )
+        };
+        let provider = slot(false);
+        assert_eq!(provider.upstream_provider_id(), None);
+
+        let config = admin_config(
+            "https://sub2api.example".into(),
+            super::Sub2ApiUpstream::Antigravity,
+        );
+        provider.set_configuration_marker(Some(&config)).unwrap();
+        assert_eq!(provider.upstream_provider_id(), Some("antigravity"));
+        assert_eq!(
+            provider.cache_identity(),
+            crate::providers::CacheIdentity::Resolved(super::ADMIN_CACHE_KEY)
+        );
+        assert_eq!(slot(true).upstream_provider_id(), Some("antigravity"));
+
+        // Markers written before tracks were recorded catch up on the next credential read.
+        fs::write(&marker, super::ADMIN_CACHE_KEY).unwrap();
+        let legacy = slot(true);
+        assert_eq!(legacy.upstream_provider_id(), None);
+        legacy.remember_track(&config);
+        assert_eq!(legacy.upstream_provider_id(), Some("antigravity"));
+        assert_eq!(slot(true).upstream_provider_id(), Some("antigravity"));
+
+        // A subscription's cache key already names its track.
+        fs::write(&marker, super::SUBSCRIPTION_CACHE_KEY).unwrap();
+        let subscription = slot(true);
+        assert_eq!(subscription.upstream_provider_id(), Some("subscription"));
+        assert_eq!(
+            subscription.cache_identity(),
+            crate::providers::CacheIdentity::Resolved(super::SUBSCRIPTION_CACHE_KEY)
+        );
+
+        // A refresh that read the configuration before a save or removal changes nothing.
+        let grok = admin_config(
+            "https://sub2api.example".into(),
+            super::Sub2ApiUpstream::Grok,
+        );
+        provider.set_configuration_marker(Some(&grok)).unwrap();
+        provider.remember_track(&config);
+        assert_eq!(provider.upstream_provider_id(), Some("grok"));
+        assert_eq!(slot(true).upstream_provider_id(), Some("grok"));
+        provider.set_configuration_marker(None).unwrap();
+        provider.remember_track(&grok);
+        assert!(!marker.exists());
+
+        provider.set_configuration_marker(None).unwrap();
+        assert_eq!(provider.upstream_provider_id(), None);
+        assert_eq!(slot(false).upstream_provider_id(), None);
     }
 
     #[test]
@@ -2365,7 +2511,10 @@ mod tests {
             storage
                 .save_snapshot_for_identity(&old_snapshot, Some(key))
                 .unwrap();
-            provider.set_configuration_marker(Some(key)).unwrap();
+            provider.write_configuration_marker(key, None).unwrap();
+            provider
+                .configured
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
                 provider.cache_identity(),
                 crate::providers::CacheIdentity::Resolved(super::ADMIN_CACHE_KEY)
