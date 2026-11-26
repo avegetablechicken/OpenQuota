@@ -149,9 +149,13 @@ describe('Sub2ApiConfigSection', () => {
     expect(screen.queryByDisplayValue('test-key')).toBeNull();
   });
 
-  it.each([false, true])(
-    'keeps a saved override unless explicitly cleared (clear=%s)',
-    async (clear) => {
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+  ])(
+    'keeps a saved override unless explicitly cleared (clear=%s, typed then deleted=%s)',
+    async (clear, retyped) => {
       const saved = {
         configured: true,
         mode: 'subscription',
@@ -170,6 +174,12 @@ describe('Sub2ApiConfigSection', () => {
       expect(key).toHaveValue('');
       expect(key).toHaveAttribute('placeholder', 'Unchanged');
       if (clear) await fireEvent.click(screen.getByRole('button', { name: 'Clear saved API key' }));
+      if (retyped) {
+        await fireEvent.input(key, { target: { value: 'x' } });
+        expect(screen.queryByRole('button', { name: 'Clear saved API key' })).toBeNull();
+        await fireEvent.input(key, { target: { value: '' } });
+        expect(key).toHaveAttribute('placeholder', 'Unchanged');
+      }
       await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       const call = mocks.invoke.mock.calls.find(([command]) => command === 'save_sub2api_config');
       expect(call?.[1].config.useProviderKey ?? false).toBe(clear);

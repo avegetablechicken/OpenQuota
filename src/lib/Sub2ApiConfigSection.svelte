@@ -592,11 +592,7 @@
               <div class="password-field">
                 <input
                   type="password"
-                  value={apiKey}
-                  oninput={(event) => {
-                    apiKey = event.currentTarget.value;
-                    if (!customBaseUrl) clearSavedKey = true;
-                  }}
+                  bind:value={apiKey}
                   autocomplete="off"
                   spellcheck="false"
                   placeholder={keepSavedKey
@@ -607,7 +603,7 @@
                   aria-label="Sub2API subscription API key"
                   disabled={saving}
                 />
-                {#if !customBaseUrl && keepSavedKey}
+                {#if !customBaseUrl && keepSavedKey && !apiKey}
                   <button
                     type="button"
                     aria-label="Clear saved API key"
