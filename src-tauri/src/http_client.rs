@@ -1763,12 +1763,19 @@ mod tls_tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn certificate_hint_survives_a_real_tls_error_chain() {
-        let error = request(false, "localhost", true, false).unwrap_err();
-        let hint = super::certificate_restart_hint(&error).expect("certificate restart hint");
-        assert!(hint.contains("fully quit and restart OpenQuota"));
-        assert!(!hint.contains("https://"));
+        // Untrusted, wrong host name, and expired.
+        for (trusted, host, expired) in [
+            (false, "localhost", false),
+            (true, "127.0.0.1", false),
+            (true, "localhost", true),
+        ] {
+            let error = request(trusted, host, true, expired).unwrap_err();
+            let hint = super::certificate_restart_hint(&error)
+                .unwrap_or_else(|| panic!("certificate restart hint for {error:?}"));
+            assert!(hint.contains("fully quit and restart OpenQuota"));
+            assert!(!hint.contains("https://"));
+        }
     }
 
     #[test]
@@ -2079,7 +2086,7 @@ pub(crate) fn certificate_restart_hint(error: &reqwest::Error) -> Option<String>
     let mut source = error.source();
     while let Some(cause) = source {
         let message = cause.to_string();
-        if certificate_verification_failure(&message) {
+        if certificate_verification_failure(&message) || certificate_status_failure(cause) {
             return Some(format!("Certificate verification failed. If you updated the system certificates, fully quit and restart OpenQuota, then retry. Otherwise, check the proxy certificate and system trust settings. ({message})"));
         }
         source = cause.source();
@@ -2103,6 +2110,68 @@ fn certificate_verification_failure(message: &str) -> bool {
     ]
     .iter()
     .any(|pattern| message.contains(pattern))
+}
+
+/// Security framework statuses for a rejected server certificate.
+#[cfg(target_os = "macos")]
+const CERTIFICATE_STATUS_CODES: &[i32] = &[
+    -9807,  // errSSLXCertChainInvalid
+    -9808,  // errSSLBadCert
+    -9812,  // errSSLUnknownRootCert
+    -9813,  // errSSLNoRootCert
+    -9814,  // errSSLCertExpired
+    -9815,  // errSSLCertNotYetValid
+    -9843,  // errSSLHostNameMismatch
+    -67602, // errSecHostNameMismatch
+    -67808, // errSecVerifyFailed
+    -67818, // errSecCertificateExpired
+    -67819, // errSecCertificateNotValidYet
+    -67843, // errSecNotTrusted
+];
+
+/// SChannel and certificate chain HRESULTs for a rejected server certificate.
+#[cfg(target_os = "windows")]
+const CERTIFICATE_STATUS_CODES: &[i32] = &[
+    0x800B_0101_u32 as i32, // CERT_E_EXPIRED
+    0x800B_0109_u32 as i32, // CERT_E_UNTRUSTEDROOT
+    0x800B_010A_u32 as i32, // CERT_E_CHAINING
+    0x800B_010F_u32 as i32, // CERT_E_CN_NO_MATCH
+    0x800B_0112_u32 as i32, // CERT_E_UNTRUSTEDCA
+    0x8009_6004_u32 as i32, // TRUST_E_CERT_SIGNATURE
+    0x8009_0322_u32 as i32, // SEC_E_WRONG_PRINCIPAL
+    0x8009_0325_u32 as i32, // SEC_E_UNTRUSTED_ROOT
+    0x8009_0327_u32 as i32, // SEC_E_CERT_UNKNOWN
+    0x8009_0328_u32 as i32, // SEC_E_CERT_EXPIRED
+];
+
+/// The native TLS backends of macOS and Windows describe failures in the system language, so
+/// they are recognized by status code instead of by message.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn certificate_status_failure(cause: &(dyn std::error::Error + 'static)) -> bool {
+    let Some(error) = cause.downcast_ref::<native_tls::Error>() else {
+        return false;
+    };
+    // native-tls exposes the status only through Debug: `Error { code: -67843, .. }` from
+    // security-framework, `Os { code: -2146762487, .. }` from SChannel.
+    let debug = format!("{error:?}");
+    debug
+        .split_once("code: ")
+        .and_then(|(_, rest)| {
+            let end = rest
+                .char_indices()
+                .find(|&(index, character)| {
+                    !(character.is_ascii_digit() || (index == 0 && character == '-'))
+                })
+                .map_or(rest.len(), |(index, _)| index);
+            rest[..end].parse::<i32>().ok()
+        })
+        .is_some_and(|code| CERTIFICATE_STATUS_CODES.contains(&code))
+}
+
+/// OpenSSL and rustls describe failures in English, which the message check covers.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn certificate_status_failure(_cause: &(dyn std::error::Error + 'static)) -> bool {
+    false
 }
 
 #[cfg(test)]
