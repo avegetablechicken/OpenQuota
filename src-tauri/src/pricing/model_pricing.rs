@@ -9,6 +9,14 @@ pub struct ModelPricing {
     memo: Mutex<HashMap<String, Option<ModelRates>>>,
 }
 
+/// Models served by a local runtime (`ollama/*`) are free, even when named after a cloud model.
+fn is_local_runtime_model(model: &str) -> bool {
+    model
+        .trim()
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ollama/"))
+}
+
 impl ModelPricing {
     pub fn new(
         supplement: PricingSupplement,
@@ -25,6 +33,9 @@ impl ModelPricing {
 
     pub fn resolve(&self, model: &str) -> Option<ModelRates> {
         let model = model.trim();
+        if is_local_runtime_model(model) {
+            return None;
+        }
         if let Some(cached) = self
             .memo
             .lock()
@@ -56,6 +67,9 @@ impl ModelPricing {
         prompt: u64,
     ) -> Option<Option<ModelRates>> {
         let normalized = model.trim().to_ascii_lowercase();
+        if is_local_runtime_model(&normalized) {
+            return Some(None);
+        }
         // Foreign models in native logs use upstream API-equivalent pricing. A reseller export
         // keeps its own provider scope.
         let provider = match provider {
@@ -715,6 +729,35 @@ mod tests {
                 0
             )
             .flatten()
+            .is_some());
+    }
+
+    #[test]
+    fn local_runtime_models_stay_unpriced_even_when_named_after_cloud_models() {
+        let bundled = crate::pricing::test_bundled_pricing();
+        let tokens = TokenBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..TokenBreakdown::default()
+        };
+        let at = chrono::Utc::now();
+        for model in [
+            "ollama/deepseek-flash",
+            "ollama/claude-sonnet-4-6",
+            "Ollama/gemini-2.5-pro",
+            "ollama/gpt-5.4",
+        ] {
+            assert!(bundled.resolve(model).is_none(), "{model}");
+            for provider in ["antigravity", "codex", "claude", "grok", "kimi", "opencode"] {
+                assert_eq!(
+                    bundled.estimated_cost_at(provider, model, at, tokens, true),
+                    None,
+                    "{provider} {model}"
+                );
+            }
+        }
+        assert!(bundled
+            .estimated_cost_at("claude", "claude-sonnet-4-6", at, tokens, true)
             .is_some());
     }
 }
