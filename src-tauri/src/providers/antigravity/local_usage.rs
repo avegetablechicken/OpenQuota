@@ -18,7 +18,7 @@ use super::AntigravityError;
 use crate::providers::{
     claude, codex,
     daily_usage::DailyUsageAccumulator,
-    grok, kimi,
+    gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp},
     model_scope::{
         card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
@@ -238,6 +238,20 @@ fn scan_roots(
     } else {
         false
     };
+    let includes_gemini_cli = if fold_pi {
+        match gemini_cli_usage::scan_into(storage, now, pricing, "antigravity", &mut accumulator) {
+            Ok(includes_gemini_cli) => includes_gemini_cli,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:gemini-cli",
+                    "Gemini CLI usage history could not be folded into Antigravity"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
     let includes_kimi = if fold_pi {
         match kimi::local_usage::scan_routed_usage_into(
             storage,
@@ -306,6 +320,9 @@ fn scan_roots(
     }
     if includes_grok {
         extras.push("Grok");
+    }
+    if includes_gemini_cli {
+        extras.push("Gemini CLI");
     }
     if includes_kimi {
         extras.push("Kimi Code");

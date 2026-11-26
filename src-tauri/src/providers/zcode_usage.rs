@@ -499,7 +499,7 @@ fn provider_from_metadata(name: &str, base_url: &str) -> Option<ZCodeProvider> {
 }
 
 fn is_delegated_cli(provider_id: &str) -> bool {
-    ["codex-cli", "claude-cli", "agent-cli"]
+    ["codex-cli", "claude-cli", "gemini-cli", "agent-cli"]
         .iter()
         .any(|marker| provider_id.contains(marker))
 }
@@ -588,6 +588,7 @@ mod tests {
             Some(ZCodeProvider::Zai)
         );
         assert_eq!(provider_kind("builtin:codex-cli", None), None);
+        assert_eq!(provider_kind("builtin:gemini-cli", None), None);
 
         let openrouter: ZCodeProviderConfig = serde_json::from_str(
             r#"{"name":"OpenRouter mirror","options":{"baseURL":"https://openrouter.ai/api/v1"}}"#,

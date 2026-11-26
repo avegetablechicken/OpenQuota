@@ -29,8 +29,11 @@ to OpenQuota.
 
 Local usage is read from Antigravity's conversation transcripts under `~/.gemini/antigravity/brain/`
 and `~/.gemini/antigravity-cli/brain/` (or `ANTIGRAVITY_HOME` / `ANTIGRAVITY_DATA_DIR` when set),
-plus `google-antigravity` sessions logged by `pi` if present. Models without a known API rate still
-appear in token counts and model breakdowns with a missing-price indicator.
+Gemini CLI session logs under `~/.gemini/tmp/*/chats/` (or `GEMINI_CLI_HOME` when set, skipping
+manual checkpoints and deduplicating resumed sessions by message ID), and routed Gemini model usage
+recorded by other supported local coding clients (`pi`, `oh-my-pi`, Claude Code, Codex CLI, Grok
+CLI, Kimi Code, OpenCode, and ZCode). Models without a known API rate still appear in token counts
+and model breakdowns with a missing-price indicator.
 
 When the stored access token is rejected, OpenQuota first rereads the shared sign-in in case
 Antigravity or `agy` renewed it. Access tokens OpenQuota renews itself are saved back to the shared

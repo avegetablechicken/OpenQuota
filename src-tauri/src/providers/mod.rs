@@ -8,6 +8,7 @@ pub mod cursor;
 mod daily_usage;
 mod detection;
 pub mod devin;
+mod gemini_cli_usage;
 pub mod grok;
 pub mod kimi;
 mod local_clients;

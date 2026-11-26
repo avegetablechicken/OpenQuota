@@ -8,7 +8,7 @@ use crate::{
     providers::{
         antigravity, claude, codex,
         daily_usage::DailyUsageAccumulator,
-        grok, kimi,
+        gemini_cli_usage, grok, kimi,
         log_usage::scan_or_cached_usage,
         opencode, pi_usage,
         zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
@@ -20,8 +20,8 @@ use crate::{
 pub(crate) const DEFAULT_SOURCE_NOTE: &str = "From your local usage history (estimated)";
 
 /// Collects local-device usage from all supported local coding clients
-/// (pi/oh-my-pi, Claude Code, Codex CLI, Grok CLI, Kimi Code, OpenCode, and ZCode)
-/// for model-family providers.
+/// (pi/oh-my-pi, Antigravity, Claude Code, Codex CLI, Gemini CLI, Grok CLI,
+/// Kimi Code, OpenCode, and ZCode) for model-family providers.
 pub(crate) struct RoutedLocalUsage {
     storage: Arc<Storage>,
     pricing: Arc<PricingStore>,
@@ -161,6 +161,23 @@ impl RoutedLocalUsage {
                         crate::app_warn!(
                             "plugin:kimi",
                             "Kimi Code usage history could not be folded into {provider_name}"
+                        );
+                    }
+                }
+                match gemini_cli_usage::scan_into(
+                    &self.storage,
+                    now,
+                    &pricing,
+                    provider_id,
+                    &mut accumulator,
+                ) {
+                    Ok(true) => sources.push("Gemini CLI"),
+                    Ok(false) => {}
+                    Err(_) => {
+                        had_error = true;
+                        crate::app_warn!(
+                            "plugin:gemini-cli",
+                            "Gemini CLI usage history could not be folded into {provider_name}"
                         );
                     }
                 }

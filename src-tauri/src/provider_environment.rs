@@ -24,6 +24,7 @@ pub(crate) fn is_proxy_variable(name: &str) -> bool {
 const SNAPSHOT_KEYS: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    "GEMINI_CLI_HOME",
     "KIMI_CODE_HOME",
     "KIMI_SHARE_DIR",
     "ZCODE_HOME",

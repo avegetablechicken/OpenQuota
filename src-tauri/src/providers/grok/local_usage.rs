@@ -14,7 +14,7 @@ use crate::{
     providers::{
         antigravity, claude, codex,
         daily_usage::DailyUsageAccumulator,
-        kimi,
+        gemini_cli_usage, kimi,
         log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
         model_scope::{
             card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
@@ -249,6 +249,20 @@ fn scan_path(
     } else {
         false
     };
+    let includes_gemini_cli = if fold_external {
+        match gemini_cli_usage::scan_into(storage, now, pricing, "grok", &mut accumulator) {
+            Ok(includes_gemini_cli) => includes_gemini_cli,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:gemini-cli",
+                    "Gemini CLI usage history could not be folded into Grok"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
     let includes_opencode = if fold_external {
         match opencode::scan_routed_usage_into(now, pricing, "grok", &mut accumulator) {
             Ok(includes_opencode) => includes_opencode,
@@ -292,6 +306,9 @@ fn scan_path(
     }
     if includes_kimi {
         extras.push("Kimi Code");
+    }
+    if includes_gemini_cli {
+        extras.push("Gemini CLI");
     }
     if includes_opencode {
         extras.push("OpenCode");
