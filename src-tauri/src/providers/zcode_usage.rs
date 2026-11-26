@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -11,15 +10,17 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+use crate::models::UsageHistory;
 use crate::{
-    models::UsageHistory,
-    pricing::{ModelPricing, PricingStore, ServiceTier, TokenBreakdown},
+    pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     providers::{
-        daily_usage::DailyUsageAccumulator, log_usage::scan_or_cached_usage, CacheIdentity,
+        daily_usage::DailyUsageAccumulator,
+        model_scope::{card_for_model, is_known_unowned_foreign_model},
     },
-    storage::Storage,
 };
 
+#[cfg(test)]
 const SOURCE_NOTE: &str = "From your ZCode history (estimated)";
 const REQUIRED_COLUMNS: &[&str] = &[
     "provider_id",
@@ -43,16 +44,35 @@ pub(crate) enum ZCodeProvider {
     Zai,
 }
 
+impl ZCodeProvider {
+    pub(crate) fn from_card_id(card_id: &str) -> Option<Self> {
+        match card_id {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "grok" => Some(Self::Grok),
+            "kimi" => Some(Self::Kimi),
+            "minimax" => Some(Self::MiniMax),
+            "zai" => Some(Self::Zai),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Grok => "grok",
+            Self::Kimi => "kimi",
+            Self::MiniMax => "minimax",
+            Self::Zai => "zai",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ZCodeUsageScanner {
     database_path: PathBuf,
     config_path: PathBuf,
-}
-
-pub(crate) struct ZCodeLocalUsage {
-    storage: Arc<Storage>,
-    pricing: Arc<PricingStore>,
-    scanner: ZCodeUsageScanner,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -115,6 +135,7 @@ impl ZCodeUsageScanner {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn scan(
         &self,
         now: DateTime<Utc>,
@@ -143,43 +164,32 @@ impl ZCodeUsageScanner {
             if event.timestamp > now || date < since {
                 continue;
             }
-            if provider_kind(&event.provider_id, configured.get(&event.provider_id)) != Some(target)
-            {
+            if is_delegated_cli(&event.provider_id.trim().to_ascii_lowercase()) {
                 continue;
             }
-            contributed = true;
-            add_event(accumulator, date, &event, pricing, target);
+            let model_owner = card_for_model(&event.model).and_then(ZCodeProvider::from_card_id);
+            let configured_owner =
+                provider_kind(&event.provider_id, configured.get(&event.provider_id));
+            if let Some(owner) = model_owner {
+                if owner == target {
+                    contributed = true;
+                    add_event(accumulator, date, &event, pricing, target);
+                }
+                continue;
+            }
+            if is_known_unowned_foreign_model(&event.model) {
+                let other_owner = configured_owner.unwrap_or(ZCodeProvider::Zai);
+                if other_owner == target {
+                    add_other_event(accumulator, date, &event, pricing, target);
+                }
+                continue;
+            }
+            if configured_owner == Some(target) {
+                contributed = true;
+                add_event(accumulator, date, &event, pricing, target);
+            }
         }
         Ok(contributed)
-    }
-}
-
-impl ZCodeLocalUsage {
-    pub(crate) fn new(storage: Arc<Storage>, pricing: Arc<PricingStore>) -> Self {
-        Self {
-            storage,
-            pricing,
-            scanner: ZCodeUsageScanner::new(),
-        }
-    }
-
-    pub(crate) fn history(
-        &self,
-        provider_id: &str,
-        provider_name: &str,
-        target: ZCodeProvider,
-        now: DateTime<Utc>,
-        warnings: &mut Vec<String>,
-    ) -> UsageHistory {
-        let pricing = self.pricing.current();
-        scan_or_cached_usage(
-            &self.storage,
-            provider_id,
-            CacheIdentity::Unscoped,
-            provider_name,
-            || self.scanner.scan(now, &pricing, target),
-            warnings,
-        )
     }
 }
 
@@ -290,6 +300,39 @@ fn read_events(path: &Path, now: DateTime<Utc>) -> Result<Vec<UsageEvent>, ZCode
     Ok(events)
 }
 
+fn resolve_rate_model<'a>(
+    event: &'a UsageEvent,
+    pricing: &ModelPricing,
+    provider: &str,
+) -> (Option<String>, &'a str) {
+    let variant_model = event
+        .variant
+        .as_deref()
+        .map(|variant| format!("{}-{variant}", event.model));
+    let has_variant_rate = variant_model.as_deref().is_some_and(|model| {
+        pricing
+            .historical_rates(provider, model, event.timestamp, ServiceTier::Standard, 0)
+            .is_some()
+            || pricing.resolve(model).is_some()
+    });
+    if has_variant_rate {
+        (variant_model, &event.model)
+    } else {
+        (None, &event.model)
+    }
+}
+
+fn event_tokens(event: &UsageEvent) -> TokenBreakdown {
+    let categorized_cache = event.cache_read.saturating_add(event.cache_write);
+    TokenBreakdown {
+        input: event.input.saturating_sub(categorized_cache),
+        cache_write_5m: event.cache_write,
+        cache_read: event.cache_read,
+        output: event.output,
+        ..TokenBreakdown::default()
+    }
+}
+
 fn add_event(
     accumulator: &mut DailyUsageAccumulator,
     date: NaiveDate,
@@ -297,35 +340,10 @@ fn add_event(
     pricing: &ModelPricing,
     target: ZCodeProvider,
 ) {
-    let provider = match target {
-        ZCodeProvider::Claude => "claude",
-        ZCodeProvider::Codex => "codex",
-        ZCodeProvider::Grok => "grok",
-        ZCodeProvider::Kimi => "kimi",
-        ZCodeProvider::MiniMax => "minimax",
-        ZCodeProvider::Zai => "zai",
-    };
-    let variant_model = event
-        .variant
-        .as_deref()
-        .map(|variant| format!("{}-{variant}", event.model));
-    let rate_model = variant_model
-        .as_deref()
-        .filter(|model| {
-            pricing
-                .historical_rates(provider, model, event.timestamp, ServiceTier::Standard, 0)
-                .is_some()
-                || pricing.resolve(model).is_some()
-        })
-        .unwrap_or(&event.model);
-    let categorized_cache = event.cache_read.saturating_add(event.cache_write);
-    let tokens = TokenBreakdown {
-        input: event.input.saturating_sub(categorized_cache),
-        cache_write_5m: event.cache_write,
-        cache_read: event.cache_read,
-        output: event.output,
-        ..TokenBreakdown::default()
-    };
+    let provider = target.as_str();
+    let (variant_model, fallback) = resolve_rate_model(event, pricing, provider);
+    let rate_model = variant_model.as_deref().unwrap_or(fallback);
+    let tokens = event_tokens(event);
     let display_family = pricing.display_family(rate_model);
     if let Some(cost) =
         pricing.estimated_cost_at(provider, rate_model, event.timestamp, tokens, true)
@@ -338,6 +356,21 @@ fn add_event(
     } else {
         accumulator.add_unpriced(date, event.total, rate_model);
     }
+}
+
+fn add_other_event(
+    accumulator: &mut DailyUsageAccumulator,
+    date: NaiveDate,
+    event: &UsageEvent,
+    pricing: &ModelPricing,
+    target: ZCodeProvider,
+) {
+    let provider = target.as_str();
+    let (variant_model, fallback) = resolve_rate_model(event, pricing, provider);
+    let rate_model = variant_model.as_deref().unwrap_or(fallback);
+    let tokens = event_tokens(event);
+    let cost = pricing.estimated_cost_at(provider, rate_model, event.timestamp, tokens, true);
+    accumulator.add_other(date, event.total, cost, true, rate_model);
 }
 
 fn table_columns(
@@ -602,6 +635,59 @@ mod tests {
         );
         assert_eq!(zai.daily.len(), 1);
         assert_eq!(codex.today.as_ref().unwrap().tokens, 550_000);
+    }
+
+    #[test]
+    fn model_first_routing_handles_custom_relays_cross_provider_calls_and_others() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("db.sqlite");
+        let config = directory.path().join("missing.json");
+        let connection = create_database(&database);
+        let now = Utc.with_ymd_and_hms(2026, 10, 10, 12, 0, 0).unwrap();
+        for (provider, model, tokens) in [
+            ("my-relay", "claude-sonnet-4-6", 100),
+            ("my-relay", "gpt-5.4", 200),
+            ("my-relay", "grok-4", 300),
+            ("my-relay", "kimi-k3", 400),
+            ("my-relay", "MiniMax-M2.7", 500),
+            ("anthropic", "GLM-5.3-Flash", 600),
+            ("builtin:codex-cli", "gpt-5.4", 9_999),
+            ("anthropic", "deepseek-flash", 700),
+            ("bailian", "qwen3-coder", 800),
+        ] {
+            insert(
+                &connection,
+                provider,
+                model,
+                now.timestamp_millis(),
+                [tokens, 0, 0, tokens],
+            );
+        }
+        drop(connection);
+
+        let scanner = ZCodeUsageScanner::for_paths(database, config);
+        let pricing = test_bundled_pricing();
+        let claude = scanner.scan(now, &pricing, ZCodeProvider::Claude).unwrap();
+        let codex = scanner.scan(now, &pricing, ZCodeProvider::Codex).unwrap();
+        let grok = scanner.scan(now, &pricing, ZCodeProvider::Grok).unwrap();
+        let kimi = scanner.scan(now, &pricing, ZCodeProvider::Kimi).unwrap();
+        let minimax = scanner.scan(now, &pricing, ZCodeProvider::MiniMax).unwrap();
+        let zai = scanner.scan(now, &pricing, ZCodeProvider::Zai).unwrap();
+
+        assert_eq!(claude.today.as_ref().unwrap().tokens, 100);
+        assert_eq!(codex.today.as_ref().unwrap().tokens, 200);
+        assert_eq!(grok.today.as_ref().unwrap().tokens, 300);
+        assert_eq!(kimi.today.as_ref().unwrap().tokens, 400);
+        assert_eq!(minimax.today.as_ref().unwrap().tokens, 500);
+        assert_eq!(zai.today.as_ref().unwrap().tokens, 600);
+
+        // DeepSeek via `anthropic` lands in Claude's Others; unowned Bailian Qwen lands once in Zai's Others.
+        assert_eq!(claude.other_usage.unwrap().today.unwrap().tokens, 700);
+        assert_eq!(zai.other_usage.unwrap().today.unwrap().tokens, 800);
+        assert!(codex.other_usage.is_none());
+        assert!(grok.other_usage.is_none());
+        assert!(kimi.other_usage.is_none());
+        assert!(minimax.other_usage.is_none());
     }
 
     #[test]
