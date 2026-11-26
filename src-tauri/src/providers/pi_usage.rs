@@ -262,10 +262,8 @@ fn mapped_card(provider: &str, model: &str) -> Option<&'static str> {
     }
     match provider {
         "openai" | "openai-codex" => Some("codex"),
-        "cursor" => Some("cursor"),
         "zai" | "zhipu" => Some("zai"),
         "google-antigravity" => Some("antigravity"),
-        "github-copilot" => Some("copilot"),
         _ if model_belongs_to_card("codex", model) => Some("codex"),
         _ => None,
     }
@@ -509,8 +507,10 @@ mod tests {
             Some("antigravity")
         );
         assert_eq!(mapped_card("deepseek", "deepseek-v4"), None);
+        assert_eq!(mapped_card("cursor", "cursor-small"), None);
         assert_eq!(mapped_card("zai", "glm-5"), Some("zai"));
         assert_eq!(mapped_card("zhipu", "glm-5"), Some("zai"));
+        assert_eq!(mapped_card("github-copilot", "gemini-3-pro"), None);
         assert_eq!(mapped_card("nvidia-nim", "deepseek-v4"), None);
     }
 
