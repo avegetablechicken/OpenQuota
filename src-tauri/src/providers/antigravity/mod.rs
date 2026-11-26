@@ -52,8 +52,8 @@ pub(crate) fn definition() -> ProviderDefinition {
         fallback_enabled: false,
         local_usage_source_note: Some(USAGE_SOURCE_NOTE.into()),
         links: vec![],
-        // Antigravity reports its available pools explicitly, including idle five-hour pools.
-        // Opt every window out of the starts-on-use availability heuristic.
+        // Antigravity's five-hour and weekly pools roll their reset until first use;
+        // `started_reset` clears idle reset timestamps so they display as "Not started".
         metrics: vec![
             MetricDefinition::quota(
                 "antigravity.geminiPro",
@@ -69,7 +69,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "antigravity.geminiWeekly",
                 "Weekly",
                 "geminiWeekly",
-                false,
+                true,
                 true,
                 MetricSection::AlwaysVisible,
                 true,
@@ -89,7 +89,7 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "antigravity.claudeWeekly",
                 "Claude Weekly",
                 "claudeWeekly",
-                false,
+                true,
                 true,
                 MetricSection::OnDemand,
                 false,
