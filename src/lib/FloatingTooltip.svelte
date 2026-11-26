@@ -142,7 +142,7 @@
     if (document.documentElement.classList.contains('is-reordering')) return;
     clearHideTimer();
     clearUnmountTimer();
-    if (activeTarget === target) {
+    if (activeTarget === target && (visible || showTimer !== undefined)) {
       if (visible && tooltipEl) positionFor(target, tooltipEl);
       return;
     }

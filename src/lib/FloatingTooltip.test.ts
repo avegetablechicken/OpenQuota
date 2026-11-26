@@ -128,4 +128,38 @@ describe('FloatingTooltip', () => {
     await vi.advanceTimersByTimeAsync(120);
     expect(document.querySelector('.floating-tooltip')).toBeNull();
   });
+
+  it('restarts the show delay when the pointer returns before a pending hide', async () => {
+    render(FloatingTooltip);
+    const trigger = document.createElement('span');
+    trigger.dataset.tooltip = 'Price unavailable';
+    document.body.appendChild(trigger);
+
+    await fireEvent.mouseOver(trigger);
+    await vi.advanceTimersByTimeAsync(200);
+    await fireEvent.mouseOut(trigger, { relatedTarget: document.body });
+    await vi.advanceTimersByTimeAsync(50);
+    await fireEvent.mouseOver(trigger);
+
+    await vi.advanceTimersByTimeAsync(399);
+    expect(document.querySelector('.floating-tooltip--visible')).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector('.floating-tooltip')).toHaveClass('floating-tooltip--visible');
+  });
+
+  it('keeps the original show delay when moving between children of the same trigger', async () => {
+    render(FloatingTooltip);
+    const trigger = document.createElement('button');
+    trigger.dataset.tooltip = 'Exact figure';
+    const child = document.createElement('span');
+    trigger.appendChild(child);
+    document.body.appendChild(trigger);
+
+    await fireEvent.mouseOver(trigger);
+    await vi.advanceTimersByTimeAsync(200);
+    await fireEvent.mouseOut(trigger, { relatedTarget: child });
+    await fireEvent.mouseOver(child, { relatedTarget: trigger });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(document.querySelector('.floating-tooltip')).toHaveClass('floating-tooltip--visible');
+  });
 });
