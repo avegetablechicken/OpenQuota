@@ -433,16 +433,24 @@ pub async fn save_sub2api_config(
     let refresh_settings = settings.inner().clone();
     let refresh_notifications = notifications.inner().clone();
     let refresh_provider_id = provider_id.clone();
+    // A disabled connection keeps its toggle, so it is not fetched until it is enabled.
+    let should_refresh = settings
+        .get()
+        .providers
+        .iter()
+        .any(|provider| provider.id == provider_id && provider.enabled);
     drop(command_guard);
     drop(credential_guard);
     crate::app_info!("auth", "Sub2API connection saved");
-    spawn_sub2api_refresh(
-        app,
-        refresh_service,
-        refresh_settings,
-        refresh_notifications,
-        refresh_provider_id,
-    );
+    if should_refresh {
+        spawn_sub2api_refresh(
+            app,
+            refresh_service,
+            refresh_settings,
+            refresh_notifications,
+            refresh_provider_id,
+        );
+    }
     Ok(outcome.state)
 }
 
