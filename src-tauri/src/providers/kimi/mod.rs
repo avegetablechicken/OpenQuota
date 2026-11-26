@@ -1,5 +1,6 @@
 mod auth;
 mod client;
+pub(crate) mod local_usage;
 mod mapper;
 
 use std::sync::Arc;

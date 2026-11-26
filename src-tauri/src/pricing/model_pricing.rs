@@ -72,7 +72,14 @@ impl ModelPricing {
             ("codex", Some(("openai" | "openai-codex", id)))
             | ("claude", Some(("anthropic", id)))
             | ("grok", Some(("xai" | "x-ai" | "grok", id)))
-            | ("kimi", Some(("moonshot" | "moonshotai" | "kimi", id)))
+            | (
+                "kimi",
+                Some((
+                    "moonshot" | "moonshot-cn" | "moonshotai" | "kimi" | "kimi-code"
+                    | "kimi-coding",
+                    id,
+                )),
+            )
             | ("minimax", Some(("minimax", id)))
             | ("zai", Some(("zai" | "z-ai" | "zhipu" | "zhipuai" | "bigmodel", id)))
             | ("antigravity", Some(("google" | "gemini" | "google-antigravity", id)))

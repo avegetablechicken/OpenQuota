@@ -20,7 +20,7 @@ use super::CodexError;
 use crate::providers::{
     claude,
     daily_usage::DailyUsageAccumulator,
-    grok,
+    grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
     model_scope::{
         card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
@@ -133,6 +133,22 @@ pub fn scan_local_usage(
             false
         }
     };
+    let includes_kimi = match kimi::local_usage::scan_routed_usage_into(
+        storage,
+        now,
+        pricing,
+        "codex",
+        &mut accumulator,
+    ) {
+        Ok(includes_kimi) => includes_kimi,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:kimi",
+                "Kimi Code usage history could not be folded into Codex"
+            );
+            false
+        }
+    };
     let includes_opencode =
         match opencode::scan_routed_usage_into(now, pricing, "codex", &mut accumulator) {
             Ok(includes_opencode) => includes_opencode,
@@ -171,6 +187,9 @@ pub fn scan_local_usage(
     }
     if includes_grok {
         extras.push("Grok");
+    }
+    if includes_kimi {
+        extras.push("Kimi Code");
     }
     if includes_opencode {
         extras.push("OpenCode");

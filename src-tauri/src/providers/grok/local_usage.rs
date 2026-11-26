@@ -14,6 +14,7 @@ use crate::{
     providers::{
         claude, codex,
         daily_usage::DailyUsageAccumulator,
+        kimi,
         log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
         model_scope::{
             card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
@@ -208,6 +209,26 @@ fn scan_path(
     } else {
         false
     };
+    let includes_kimi = if fold_external {
+        match kimi::local_usage::scan_routed_usage_into(
+            storage,
+            now,
+            pricing,
+            "grok",
+            &mut accumulator,
+        ) {
+            Ok(includes_kimi) => includes_kimi,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:kimi",
+                    "Kimi Code usage history could not be folded into Grok"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
     let includes_opencode = if fold_external {
         match opencode::scan_routed_usage_into(now, pricing, "grok", &mut accumulator) {
             Ok(includes_opencode) => includes_opencode,
@@ -245,6 +266,9 @@ fn scan_path(
     }
     if includes_codex {
         extras.push("Codex");
+    }
+    if includes_kimi {
+        extras.push("Kimi Code");
     }
     if includes_opencode {
         extras.push("OpenCode");
