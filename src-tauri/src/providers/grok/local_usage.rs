@@ -12,8 +12,13 @@ use crate::{
     models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
+        claude, codex,
         daily_usage::DailyUsageAccumulator,
         log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+        model_scope::{
+            card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
+        },
+        opencode,
         zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
     },
     storage::Storage,
@@ -22,26 +27,22 @@ use crate::{
 use super::GrokError;
 
 const LOG_CACHE_SCHEMA_VERSION: u8 = 1;
+#[cfg(test)]
 const SOURCE_NOTE: &str = "From your Grok logs (estimated)";
 
 #[derive(Debug, Clone)]
 pub struct GrokLogUsageScanner {
     path: PathBuf,
     zcode: ZCodeUsageScanner,
+    fold_external: bool,
 }
 
 impl GrokLogUsageScanner {
     pub fn new() -> Self {
         Self {
-            path: log_path(
-                &home_directory(),
-                std::env::var("GROK_HOME")
-                    .ok()
-                    .map(|value| value.trim().to_owned())
-                    .filter(|value| !value.is_empty())
-                    .as_deref(),
-            ),
+            path: default_log_path(),
             zcode: ZCodeUsageScanner::new(),
+            fold_external: true,
         }
     }
 
@@ -53,6 +54,7 @@ impl GrokLogUsageScanner {
                 path.with_extension("missing-zcode.json"),
             ),
             path,
+            fold_external: false,
         }
     }
 
@@ -62,8 +64,47 @@ impl GrokLogUsageScanner {
         now: DateTime<Utc>,
         pricing: &ModelPricing,
     ) -> Result<UsageHistory, GrokError> {
-        scan_path(storage, &self.path, &self.zcode, now, pricing)
+        scan_path(
+            storage,
+            &self.path,
+            &self.zcode,
+            self.fold_external,
+            now,
+            pricing,
+        )
     }
+}
+
+pub(crate) fn scan_routed_usage_into(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> Result<bool, GrokError> {
+    if card_id == "grok" {
+        return Ok(false);
+    }
+    let path = default_log_path();
+    let events = load_events(storage, &path)?;
+    Ok(aggregate_routed_into(
+        events,
+        now,
+        pricing,
+        card_id,
+        accumulator,
+    ))
+}
+
+fn default_log_path() -> PathBuf {
+    log_path(
+        &home_directory(),
+        std::env::var("GROK_HOME")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .as_deref(),
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,13 +117,7 @@ struct TokenEvent {
     reasoning: u64,
 }
 
-fn scan_path(
-    storage: &Storage,
-    path: &Path,
-    zcode: &ZCodeUsageScanner,
-    now: DateTime<Utc>,
-    pricing: &ModelPricing,
-) -> Result<UsageHistory, GrokError> {
+fn load_events(storage: &Storage, path: &Path) -> Result<Vec<TokenEvent>, GrokError> {
     let (events, seen_paths) = match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => (
             load_or_parse_log(storage, "grok", path, LOG_CACHE_SCHEMA_VERSION, parse_jsonl)
@@ -104,9 +139,75 @@ fn scan_path(
         }
     };
     storage.prune_log_events("grok", &seen_paths)?;
+    Ok(events)
+}
+
+fn scan_path(
+    storage: &Storage,
+    path: &Path,
+    zcode: &ZCodeUsageScanner,
+    fold_external: bool,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+) -> Result<UsageHistory, GrokError> {
+    let events = load_events(storage, path)?;
 
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(events, now, pricing, &mut accumulator);
+    let includes_claude = if fold_external {
+        match claude::local_usage::scan_routed_usage_into(
+            storage,
+            now,
+            pricing,
+            "grok",
+            &mut accumulator,
+        ) {
+            Ok(includes_claude) => includes_claude,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:claude",
+                    "Claude Code usage history could not be folded into Grok"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let includes_codex = if fold_external {
+        match codex::local_usage::scan_routed_usage_into(
+            storage,
+            now,
+            pricing,
+            "grok",
+            &mut accumulator,
+        ) {
+            Ok(includes_codex) => includes_codex,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:codex",
+                    "Codex CLI usage history could not be folded into Grok"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let includes_opencode = if fold_external {
+        match opencode::scan_routed_usage_into(now, pricing, "grok", &mut accumulator) {
+            Ok(includes_opencode) => includes_opencode,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:opencode",
+                    "OpenCode usage history could not be folded into Grok"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
     let includes_zcode = match zcode.scan_into(now, pricing, ZCodeProvider::Grok, &mut accumulator)
     {
         Ok(includes_zcode) => includes_zcode,
@@ -118,12 +219,21 @@ fn scan_path(
             false
         }
     };
-    let source_note = if includes_zcode {
-        "From your Grok logs and ZCode history (estimated)"
-    } else {
-        SOURCE_NOTE
-    };
-    Ok(accumulator.build(now, source_note))
+    let mut extras = Vec::new();
+    if includes_claude {
+        extras.push("Claude Code");
+    }
+    if includes_codex {
+        extras.push("Codex");
+    }
+    if includes_opencode {
+        extras.push("OpenCode");
+    }
+    if includes_zcode {
+        extras.push("ZCode");
+    }
+    let source_note = format_source_note("Grok logs", &extras);
+    Ok(accumulator.build(now, &source_note))
 }
 
 fn log_path(home: &Path, configured_home: Option<&str>) -> PathBuf {
@@ -240,7 +350,7 @@ fn aggregate_into(
 
     for event in events {
         let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since {
+        if date < since || event.timestamp > now {
             continue;
         }
         let Some(model) = event.model.as_deref() else {
@@ -256,13 +366,66 @@ fn aggregate_into(
             .prompt
             .saturating_add(event.completion)
             .saturating_add(event.reasoning);
+        match native_log_disposition("grok", model) {
+            LocalModelDisposition::Home => {}
+            LocalModelDisposition::RoutedTo(_) => continue,
+            LocalModelDisposition::Other => {
+                let cost = pricing.estimated_cost_at("grok", model, event.timestamp, tokens, true);
+                accumulator.add_other(date, total, cost, true, model);
+                continue;
+            }
+        }
         if let Some(cost) = pricing.estimated_cost_at("grok", model, event.timestamp, tokens, true)
         {
             accumulator.add(date, total, cost, model);
         } else if total > 0 {
-            accumulator.add_unknown_model(date, model);
+            accumulator.add_unpriced(date, total, model);
         }
     }
+}
+
+fn aggregate_routed_into(
+    events: Vec<TokenEvent>,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> bool {
+    let today = now.with_timezone(&Local).date_naive();
+    let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
+    let mut contributed = false;
+
+    for event in events {
+        let date = event.timestamp.with_timezone(&Local).date_naive();
+        if date < since || event.timestamp > now {
+            continue;
+        }
+        let Some(model) = event.model.as_deref() else {
+            continue;
+        };
+        if card_for_model(model) != Some(card_id) {
+            continue;
+        }
+        let tokens = TokenBreakdown {
+            input: event.prompt.saturating_sub(event.cached_prompt),
+            cache_read: event.cached_prompt,
+            output: event.completion.saturating_add(event.reasoning),
+            ..TokenBreakdown::default()
+        };
+        let total = event
+            .prompt
+            .saturating_add(event.completion)
+            .saturating_add(event.reasoning);
+        if let Some(cost) = pricing.estimated_cost_at(card_id, model, event.timestamp, tokens, true)
+        {
+            accumulator.add(date, total, cost, model);
+            contributed = true;
+        } else if total > 0 {
+            accumulator.add_unpriced(date, total, model);
+            contributed = true;
+        }
+    }
+    contributed
 }
 
 fn integer_u64(value: &Value) -> Option<u64> {
@@ -325,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_models_warn_without_inflating_totals_and_unattributed_rows_drop() {
+    fn unknown_models_retain_tokens_as_incomplete_and_unattributed_rows_drop() {
         let content = r#"{"ts":"2026-06-18T08:00:00Z","pid":1,"msg":"model changed","ctx":{"model":"grok-unknown-model"}}
 {"ts":"2026-06-18T09:00:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000}}
 {"ts":"2026-06-18T10:00:00Z","pid":2,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000}}
@@ -333,9 +496,37 @@ mod tests {
 {"ts":"2026-06-18T12:00:00Z","pid":3,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":500000}}"#;
         let history = aggregate(parse_jsonl(content), now(), &test_bundled_pricing());
 
-        assert_eq!(history.today.as_ref().unwrap().tokens, 500_000);
+        assert_eq!(history.today.as_ref().unwrap().tokens, 1_500_000);
         assert_eq!(history.unknown_models, ["grok-unknown-model"]);
         assert!(!history.today.unwrap().estimate_complete);
+    }
+
+    #[test]
+    fn foreign_models_in_grok_logs_route_to_their_card_or_others() {
+        let content = r#"{"ts":"2026-06-18T08:00:00Z","pid":1,"msg":"model changed","ctx":{"model":"grok-build"}}
+{"ts":"2026-06-18T09:00:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":100000}}
+{"ts":"2026-06-18T09:10:00Z","pid":1,"msg":"model changed","ctx":{"model":"claude-sonnet-4-6"}}
+{"ts":"2026-06-18T09:20:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":200000}}
+{"ts":"2026-06-18T09:30:00Z","pid":1,"msg":"model changed","ctx":{"model":"deepseek-v4"}}
+{"ts":"2026-06-18T09:40:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":300000}}"#;
+        let events = parse_jsonl(content);
+        let pricing = test_bundled_pricing();
+        let grok = aggregate(events.clone(), now(), &pricing);
+        assert_eq!(grok.today.as_ref().unwrap().tokens, 100_000);
+        assert_eq!(grok.other_usage.unwrap().today.unwrap().tokens, 300_000);
+
+        let mut claude = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        assert!(super::aggregate_routed_into(
+            events,
+            now(),
+            &pricing,
+            "claude",
+            &mut claude
+        ));
+        assert_eq!(
+            claude.build(now(), "test").today.as_ref().unwrap().tokens,
+            200_000
+        );
     }
 
     #[test]

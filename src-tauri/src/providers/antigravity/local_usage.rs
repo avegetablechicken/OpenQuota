@@ -18,7 +18,7 @@ use super::AntigravityError;
 use crate::providers::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp},
-    pi_usage,
+    opencode, pi_usage,
 };
 
 pub(super) const USAGE_SOURCE_NOTE: &str = "From your Antigravity transcripts (estimated)";
@@ -122,8 +122,26 @@ fn scan_roots(
     } else {
         pi_usage::PiUsageSources::default()
     };
-    let source_note =
-        pi_usage::usage_source_note("Antigravity transcripts", includes_pi, false, false);
+    let includes_opencode = if fold_pi {
+        match opencode::scan_routed_usage_into(now, pricing, "antigravity", &mut accumulator) {
+            Ok(includes_opencode) => includes_opencode,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:opencode",
+                    "OpenCode usage history could not be folded into Antigravity"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let source_note = pi_usage::usage_source_note(
+        "Antigravity transcripts",
+        includes_pi,
+        includes_opencode,
+        false,
+    );
     Ok(accumulator.build(now, &source_note))
 }
 

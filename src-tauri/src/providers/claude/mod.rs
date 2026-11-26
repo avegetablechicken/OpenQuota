@@ -2,7 +2,7 @@ mod accounts;
 pub mod auth;
 mod client;
 pub mod config;
-mod local_usage;
+pub(crate) mod local_usage;
 mod mapper;
 mod refresh_lock;
 

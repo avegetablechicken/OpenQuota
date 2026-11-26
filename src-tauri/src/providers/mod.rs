@@ -10,6 +10,7 @@ mod detection;
 pub mod devin;
 pub mod grok;
 pub mod kimi;
+mod local_clients;
 mod log_usage;
 pub mod minimax;
 mod model_scope;

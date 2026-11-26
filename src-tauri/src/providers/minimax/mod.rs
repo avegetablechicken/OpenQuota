@@ -24,7 +24,8 @@ use self::{
 };
 
 use super::{
-    zcode_usage::{ZCodeLocalUsage, ZCodeProvider},
+    local_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
+    zcode_usage::ZCodeProvider,
     ProviderError, UsageProvider,
 };
 
@@ -34,7 +35,7 @@ pub(crate) fn definition() -> ProviderDefinition {
         display_name: "MiniMax".into(),
         short_name: "M".into(),
         fallback_enabled: false,
-        local_usage_source_note: Some("From your ZCode history (estimated)".into()),
+        local_usage_source_note: Some(DEFAULT_SOURCE_NOTE.into()),
         links: vec![
             ProviderLink::new("Dashboard", "https://platform.minimax.io/console/plan"),
             ProviderLink::new("API Keys", "https://platform.minimax.io/console/access"),
@@ -126,7 +127,7 @@ impl From<MiniMaxError> for ProviderError {
 pub struct MiniMaxProvider {
     auth: MiniMaxAuthStore,
     client: Arc<MiniMaxClient>,
-    local_usage: Option<ZCodeLocalUsage>,
+    local_usage: Option<RoutedLocalUsage>,
 }
 
 impl MiniMaxProvider {
@@ -134,7 +135,7 @@ impl MiniMaxProvider {
         Ok(Self {
             auth: MiniMaxAuthStore::new(),
             client: Arc::new(MiniMaxClient::new().map_err(ProviderError::from)?),
-            local_usage: Some(ZCodeLocalUsage::new(storage, pricing)),
+            local_usage: Some(RoutedLocalUsage::new(storage, pricing)),
         })
     }
 
@@ -388,7 +389,7 @@ mod tests {
         assert_eq!(definition.display_name, "MiniMax");
         assert_eq!(
             definition.local_usage_source_note.as_deref(),
-            Some("From your ZCode history (estimated)")
+            Some(super::DEFAULT_SOURCE_NOTE)
         );
         assert_eq!(
             definition

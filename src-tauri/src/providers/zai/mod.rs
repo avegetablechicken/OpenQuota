@@ -23,7 +23,8 @@ use self::{
 };
 
 use super::{
-    zcode_usage::{ZCodeLocalUsage, ZCodeProvider},
+    local_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
+    zcode_usage::ZCodeProvider,
     ProviderError, UsageProvider,
 };
 
@@ -33,7 +34,7 @@ pub(crate) fn definition() -> ProviderDefinition {
         display_name: "Z.ai".into(),
         short_name: "Z".into(),
         fallback_enabled: false,
-        local_usage_source_note: Some("From your ZCode history (estimated)".into()),
+        local_usage_source_note: Some(DEFAULT_SOURCE_NOTE.into()),
         links: vec![
             ProviderLink::new(
                 "Dashboard",
@@ -149,7 +150,7 @@ impl From<ZaiError> for ProviderError {
 pub struct ZaiProvider {
     auth: ZaiAuthStore,
     client: Arc<ZaiClient>,
-    local_usage: Option<ZCodeLocalUsage>,
+    local_usage: Option<RoutedLocalUsage>,
 }
 
 impl ZaiProvider {
@@ -157,7 +158,7 @@ impl ZaiProvider {
         Ok(Self {
             auth: ZaiAuthStore::new(),
             client: Arc::new(ZaiClient::new().map_err(ProviderError::from)?),
-            local_usage: Some(ZCodeLocalUsage::new(storage, pricing)),
+            local_usage: Some(RoutedLocalUsage::new(storage, pricing)),
         })
     }
 

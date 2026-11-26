@@ -24,7 +24,8 @@ use self::{
 };
 
 use super::{
-    zcode_usage::{ZCodeLocalUsage, ZCodeProvider},
+    local_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
+    zcode_usage::ZCodeProvider,
     ProviderError, UsageProvider,
 };
 
@@ -34,7 +35,7 @@ pub(crate) fn definition() -> ProviderDefinition {
         display_name: "Kimi".into(),
         short_name: "K".into(),
         fallback_enabled: false,
-        local_usage_source_note: Some("From your ZCode history (estimated)".into()),
+        local_usage_source_note: Some(DEFAULT_SOURCE_NOTE.into()),
         links: vec![
             ProviderLink::new("Dashboard", "https://www.kimi.com/code/console"),
             ProviderLink::new("API Keys", "https://www.kimi.com/code/console"),
@@ -122,7 +123,7 @@ impl From<KimiError> for ProviderError {
 pub struct KimiProvider {
     auth: KimiAuthStore,
     client: Arc<KimiClient>,
-    local_usage: Option<ZCodeLocalUsage>,
+    local_usage: Option<RoutedLocalUsage>,
 }
 
 impl KimiProvider {
@@ -130,7 +131,7 @@ impl KimiProvider {
         Ok(Self {
             auth: KimiAuthStore::new(),
             client: Arc::new(KimiClient::new().map_err(ProviderError::from)?),
-            local_usage: Some(ZCodeLocalUsage::new(storage, pricing)),
+            local_usage: Some(RoutedLocalUsage::new(storage, pricing)),
         })
     }
 
@@ -362,7 +363,7 @@ mod tests {
         assert_eq!(definition.display_name, "Kimi");
         assert_eq!(
             definition.local_usage_source_note.as_deref(),
-            Some("From your ZCode history (estimated)")
+            Some(super::DEFAULT_SOURCE_NOTE)
         );
         assert_eq!(
             definition

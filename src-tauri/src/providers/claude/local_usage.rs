@@ -17,9 +17,13 @@ use crate::{
 
 use super::ClaudeError;
 use crate::providers::{
+    codex,
     daily_usage::DailyUsageAccumulator,
+    grok,
     log_usage::{load_or_parse_log, parse_log_timestamp},
-    model_scope::is_model_obviously_foreign_to_card,
+    model_scope::{
+        card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
+    },
     opencode, pi_usage,
     zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
@@ -51,16 +55,10 @@ impl ClaudeTokenEvent {
     }
 }
 
-pub fn scan_local_usage(
+fn load_local_events(
     storage: &Storage,
-    now: DateTime<Utc>,
-    pricing: &ModelPricing,
-) -> Result<UsageHistory, ClaudeError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
+    since_date: NaiveDate,
+) -> Result<Vec<ClaudeTokenEvent>, ClaudeError> {
     let mut events = Vec::new();
     let paths = discover_files();
     let mut seen_paths = HashSet::with_capacity(paths.len());
@@ -86,8 +84,47 @@ pub fn scan_local_usage(
     storage
         .prune_log_events("claude", &seen_paths)
         .map_err(|_| ClaudeError::LocalUsage)?;
+    Ok(deduplicate(events))
+}
+
+pub(crate) fn scan_routed_usage_into(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> Result<bool, ClaudeError> {
+    if card_id == "claude" {
+        return Ok(false);
+    }
+    let since_date = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(30))
+        .unwrap_or(NaiveDate::MIN);
+    let events = load_local_events(storage, since_date)?;
+    Ok(aggregate_routed_into(
+        events,
+        now,
+        pricing,
+        card_id,
+        accumulator,
+    ))
+}
+
+pub fn scan_local_usage(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+) -> Result<UsageHistory, ClaudeError> {
+    let since_date = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(30))
+        .unwrap_or(NaiveDate::MIN);
+    let events = load_local_events(storage, since_date)?;
     let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(deduplicate(events), now, pricing, &mut accumulator);
+    aggregate_into(events, now, pricing, &mut accumulator);
     let includes_pi = match pi_usage::scan_into(storage, now, pricing, "claude", &mut accumulator) {
         Ok(includes_pi) => includes_pi,
         Err(_) => {
@@ -96,6 +133,38 @@ pub fn scan_local_usage(
                 "pi/oh-my-pi usage history could not be folded into Claude"
             );
             pi_usage::PiUsageSources::default()
+        }
+    };
+    let includes_codex = match codex::local_usage::scan_routed_usage_into(
+        storage,
+        now,
+        pricing,
+        "claude",
+        &mut accumulator,
+    ) {
+        Ok(includes_codex) => includes_codex,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:codex",
+                "Codex CLI usage history could not be folded into Claude"
+            );
+            false
+        }
+    };
+    let includes_grok = match grok::local_usage::scan_routed_usage_into(
+        storage,
+        now,
+        pricing,
+        "claude",
+        &mut accumulator,
+    ) {
+        Ok(includes_grok) => includes_grok,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:grok",
+                "Grok CLI usage history could not be folded into Claude"
+            );
+            false
         }
     };
     let includes_opencode =
@@ -124,12 +193,26 @@ pub fn scan_local_usage(
             false
         }
     };
-    let source_note = pi_usage::usage_source_note(
-        "Claude usage history",
-        includes_pi,
-        includes_opencode,
-        includes_zcode,
-    );
+    let mut extras = Vec::new();
+    if includes_pi.pi {
+        extras.push("pi");
+    }
+    if includes_pi.oh_my_pi {
+        extras.push("oh-my-pi");
+    }
+    if includes_codex {
+        extras.push("Codex");
+    }
+    if includes_grok {
+        extras.push("Grok");
+    }
+    if includes_opencode {
+        extras.push("OpenCode");
+    }
+    if includes_zcode {
+        extras.push("ZCode");
+    }
+    let source_note = format_source_note("Claude usage history", &extras);
     Ok(accumulator.build(now, &source_note))
 }
 
@@ -484,23 +567,28 @@ fn aggregate_into(
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty());
+        if let Some(model) = model_name {
+            match native_log_disposition("claude", model) {
+                LocalModelDisposition::Home => {}
+                LocalModelDisposition::RoutedTo(_) => continue,
+                LocalModelDisposition::Other => {
+                    let cost = event.cost_usd.or_else(|| {
+                        pricing.estimated_cost_at("claude", model, event.timestamp, tokens, true)
+                    });
+                    accumulator.add_other(
+                        date,
+                        tokens.total_tokens(),
+                        cost,
+                        event.cost_usd.is_none(),
+                        model,
+                    );
+                    continue;
+                }
+            }
+        }
         let cost = event.cost_usd.or_else(|| {
             pricing.estimated_cost_at("claude", model_name?, event.timestamp, tokens, true)
         });
-        if event
-            .model
-            .as_deref()
-            .is_some_and(|model| is_model_obviously_foreign_to_card("claude", model))
-        {
-            accumulator.add_other(
-                date,
-                tokens.total_tokens(),
-                cost,
-                event.cost_usd.is_none(),
-                model_name.unwrap_or_default(),
-            );
-            continue;
-        }
         let model_label = model_name.unwrap_or("Unattributed");
         if let Some(exact) = event.cost_usd {
             accumulator.add_exact(date, tokens.total_tokens(), exact, model_label);
@@ -510,6 +598,60 @@ fn aggregate_into(
             accumulator.add_unpriced(date, tokens.total_tokens(), model_label);
         }
     }
+}
+
+fn aggregate_routed_into(
+    events: Vec<ClaudeTokenEvent>,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> bool {
+    let since = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(30))
+        .unwrap_or(NaiveDate::MIN);
+    let mut contributed = false;
+    for event in events {
+        let date = event.timestamp.with_timezone(&Local).date_naive();
+        if date < since || event.timestamp > now {
+            continue;
+        }
+        let Some(model) = event
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        if card_for_model(model) != Some(card_id) {
+            continue;
+        }
+        let tokens = TokenBreakdown {
+            input: event.input,
+            cache_write_5m: event.cache_write_5m,
+            cache_write_1h: event.cache_write_1h,
+            cache_read: event.cache_read,
+            output: event.output,
+            is_fast: event.is_fast,
+            ..TokenBreakdown::default()
+        };
+        if let Some(exact) = event.cost_usd {
+            accumulator.add_exact(date, tokens.total_tokens(), exact, model);
+            contributed = true;
+        } else if let Some(cost) =
+            pricing.estimated_cost_at(card_id, model, event.timestamp, tokens, true)
+        {
+            accumulator.add(date, tokens.total_tokens(), cost, model);
+            contributed = true;
+        } else if tokens.total_tokens() > 0 {
+            accumulator.add_unpriced(date, tokens.total_tokens(), model);
+            contributed = true;
+        }
+    }
+    contributed
 }
 
 fn integer(value: Option<&Value>) -> Option<u64> {
@@ -882,6 +1024,46 @@ mod tests {
         assert_eq!(other.tokens, 520);
         assert_eq!(other.priced_tokens, 0);
         assert!(other.estimated_cost_usd.is_none());
+    }
+
+    #[test]
+    fn owned_foreign_models_route_to_their_card_without_double_counting_in_others() {
+        let content = r#"{"timestamp":"2026-10-10T08:00:00Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":10}}}
+{"timestamp":"2026-10-10T09:00:00Z","message":{"model":"glm-5.3-flash","usage":{"input_tokens":500,"output_tokens":50}}}
+{"timestamp":"2026-10-10T10:00:00Z","message":{"model":"MiniMax-M2.7","usage":{"input_tokens":300,"output_tokens":30}}}
+{"timestamp":"2026-10-10T11:00:00Z","message":{"model":"qwen3.8:27b - mlx","usage":{"input_tokens":400,"output_tokens":40}}}"#;
+        let now = Utc.with_ymd_and_hms(2026, 10, 10, 12, 0, 0).unwrap();
+        let pricing = test_bundled_pricing();
+        let events = parse_jsonl(content);
+
+        let claude = aggregate(events.clone(), now, &pricing);
+        assert_eq!(claude.today.as_ref().unwrap().tokens, 110);
+        // Only Qwen (unowned) enters Claude's Others; GLM and MiniMax do not double-count.
+        assert_eq!(claude.other_usage.unwrap().today.unwrap().tokens, 440);
+
+        let mut zai = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        assert!(super::aggregate_routed_into(
+            events.clone(),
+            now,
+            &pricing,
+            "zai",
+            &mut zai
+        ));
+        let zai_today = zai.build(now, "test").today.unwrap();
+        assert_eq!(zai_today.tokens, 550);
+        assert!(zai_today.estimated_cost_usd.is_some());
+
+        let mut minimax = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        assert!(super::aggregate_routed_into(
+            events,
+            now,
+            &pricing,
+            "minimax",
+            &mut minimax
+        ));
+        let minimax_today = minimax.build(now, "test").today.unwrap();
+        assert_eq!(minimax_today.tokens, 330);
+        assert!(minimax_today.estimated_cost_usd.is_some());
     }
 
     #[test]

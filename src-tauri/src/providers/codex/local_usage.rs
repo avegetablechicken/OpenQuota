@@ -18,9 +18,13 @@ use crate::{
 
 use super::CodexError;
 use crate::providers::{
+    claude,
     daily_usage::DailyUsageAccumulator,
+    grok,
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
-    model_scope::model_belongs_to_card,
+    model_scope::{
+        card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
+    },
     opencode, pi_usage,
     zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
@@ -41,6 +45,34 @@ pub struct TokenEvent {
 }
 
 const LOG_CACHE_SCHEMA_VERSION: u8 = 5;
+
+pub(crate) fn scan_routed_usage_into(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> Result<bool, CodexError> {
+    if card_id == "codex" {
+        return Ok(false);
+    }
+    let home = home_directory();
+    let configured_home = crate::provider_environment::value("CODEX_HOME");
+    let homes = codex_homes(configured_home.as_deref().map(OsStr::new), &home);
+    let since_date = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(30))
+        .unwrap_or(NaiveDate::MIN);
+    let events = scan_codex_events(storage, &homes, since_date)?;
+    Ok(aggregate_routed_into(
+        events,
+        now,
+        pricing,
+        card_id,
+        accumulator,
+    ))
+}
 
 pub fn scan_local_usage(
     storage: &Storage,
@@ -69,6 +101,38 @@ pub fn scan_local_usage(
             pi_usage::PiUsageSources::default()
         }
     };
+    let includes_claude = match claude::local_usage::scan_routed_usage_into(
+        storage,
+        now,
+        pricing,
+        "codex",
+        &mut accumulator,
+    ) {
+        Ok(includes_claude) => includes_claude,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:claude",
+                "Claude Code usage history could not be folded into Codex"
+            );
+            false
+        }
+    };
+    let includes_grok = match grok::local_usage::scan_routed_usage_into(
+        storage,
+        now,
+        pricing,
+        "codex",
+        &mut accumulator,
+    ) {
+        Ok(includes_grok) => includes_grok,
+        Err(_) => {
+            crate::app_warn!(
+                "plugin:grok",
+                "Grok CLI usage history could not be folded into Codex"
+            );
+            false
+        }
+    };
     let includes_opencode =
         match opencode::scan_routed_usage_into(now, pricing, "codex", &mut accumulator) {
             Ok(includes_opencode) => includes_opencode,
@@ -95,8 +159,26 @@ pub fn scan_local_usage(
             false
         }
     };
-    let source_note =
-        pi_usage::usage_source_note("Codex logs", includes_pi, includes_opencode, includes_zcode);
+    let mut extras = Vec::new();
+    if includes_pi.pi {
+        extras.push("pi");
+    }
+    if includes_pi.oh_my_pi {
+        extras.push("oh-my-pi");
+    }
+    if includes_claude {
+        extras.push("Claude Code");
+    }
+    if includes_grok {
+        extras.push("Grok");
+    }
+    if includes_opencode {
+        extras.push("OpenCode");
+    }
+    if includes_zcode {
+        extras.push("ZCode");
+    }
+    let source_note = format_source_note("Codex logs", &extras);
     Ok(accumulator.build(now, &source_note))
 }
 
@@ -562,15 +644,19 @@ fn aggregate_into(
         if date < since || event.timestamp > now {
             continue;
         }
-        if !model_belongs_to_card("codex", &event.model) {
-            accumulator.add_other(
-                date,
-                event.total,
-                estimate_cost(&event, pricing),
-                true,
-                &event.model,
-            );
-            continue;
+        match native_log_disposition("codex", &event.model) {
+            LocalModelDisposition::Home => {}
+            LocalModelDisposition::RoutedTo(_) => continue,
+            LocalModelDisposition::Other => {
+                accumulator.add_other(
+                    date,
+                    event.total,
+                    estimate_cost(&event, pricing),
+                    true,
+                    &event.model,
+                );
+                continue;
+            }
         }
         if let Some(cost) = estimate_cost(&event, pricing) {
             accumulator.add(date, event.total, cost, event.model.trim());
@@ -578,6 +664,59 @@ fn aggregate_into(
             accumulator.add_unpriced(date, event.total, &event.model);
         }
     }
+}
+
+fn aggregate_routed_into(
+    events: Vec<TokenEvent>,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    card_id: &str,
+    accumulator: &mut DailyUsageAccumulator,
+) -> bool {
+    let today = now.with_timezone(&Local).date_naive();
+    let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
+    let mut seen = HashSet::new();
+    let mut contributed = false;
+
+    for event in events {
+        let key = (
+            event.timestamp,
+            event.model.clone(),
+            event.input,
+            event.cached,
+            event.output,
+            event.reasoning,
+            event.total,
+            event.chatgpt_plan,
+            event.tier,
+            event.cache_write,
+            event.cache_write_12h,
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        let date = event.timestamp.with_timezone(&Local).date_naive();
+        if date < since || event.timestamp > now {
+            continue;
+        }
+        let model = event.model.trim();
+        if card_for_model(model) != Some(card_id) {
+            continue;
+        }
+        let tokens = TokenBreakdown {
+            is_fast: event.tier == ServiceTier::Fast,
+            ..event.pricing_tokens()
+        };
+        if let Some(cost) = pricing.estimated_cost_at(card_id, model, event.timestamp, tokens, true)
+        {
+            accumulator.add(date, event.total, cost, model);
+            contributed = true;
+        } else if event.total > 0 {
+            accumulator.add_unpriced(date, event.total, model);
+            contributed = true;
+        }
+    }
+    contributed
 }
 
 fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
@@ -781,6 +920,41 @@ mod tests {
         assert_eq!(other.tokens, 520);
         assert_eq!(other.priced_tokens, 520);
         assert!(other.estimated_cost_usd.is_some());
+    }
+
+    #[test]
+    fn owned_foreign_models_in_codex_logs_route_to_their_card_without_entering_others() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 10, 12, 0, 0).unwrap();
+        let content = r#"{"timestamp":"2026-10-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-10-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"claude-sonnet-4-6","info":{"last_token_usage":{"input_tokens":200,"output_tokens":20,"total_tokens":220}}}}
+{"timestamp":"2026-10-10T09:30:00Z","type":"event_msg","payload":{"type":"token_count","model":"kimi-k3","info":{"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}
+{"timestamp":"2026-10-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"deepseek-v4-flash","info":{"last_token_usage":{"input_tokens":500,"output_tokens":20,"total_tokens":520}}}}"#;
+        let pricing = test_bundled_pricing();
+        let events = parse_jsonl(content);
+
+        let codex = aggregate(events.clone(), now, &pricing);
+        assert_eq!(codex.today.as_ref().unwrap().tokens, 110);
+        assert_eq!(codex.other_usage.unwrap().today.unwrap().tokens, 520);
+
+        let mut claude = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        assert!(super::aggregate_routed_into(
+            events.clone(),
+            now,
+            &pricing,
+            "claude",
+            &mut claude
+        ));
+        let claude_today = claude.build(now, "test").today.unwrap();
+        assert_eq!(claude_today.tokens, 220);
+        assert!(claude_today.estimated_cost_usd.is_some());
+
+        let mut kimi = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        assert!(super::aggregate_routed_into(
+            events, now, &pricing, "kimi", &mut kimi
+        ));
+        let kimi_today = kimi.build(now, "test").today.unwrap();
+        assert_eq!(kimi_today.tokens, 330);
+        assert!(kimi_today.estimated_cost_usd.is_some());
     }
 
     #[test]
