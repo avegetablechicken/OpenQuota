@@ -20,7 +20,7 @@ use super::{
     model_scope::model_belongs_to_card,
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 5;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 6;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum PiUsageSource {
@@ -228,7 +228,7 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
         .unwrap_or_default()
         .to_owned();
     let provider = message.get("provider")?.as_str()?;
-    let card_id = mapped_card(provider, &model, source)?;
+    let card_id = mapped_card(provider, &model)?;
     let usage = message.get("usage")?.as_object()?;
     let cache_write = unsigned_number(usage.get("cacheWrite")).unwrap_or_default();
     let cache_write_1h = unsigned_number(usage.get("cacheWrite1h")).unwrap_or_default();
@@ -256,12 +256,9 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
     })
 }
 
-fn mapped_card(provider: &str, model: &str, source: PiUsageSource) -> Option<&'static str> {
+fn mapped_card(provider: &str, model: &str) -> Option<&'static str> {
     if matches!(provider, "anthropic" | "claude-agent-sdk") || is_claude_model(model) {
         return Some("claude");
-    }
-    if source == PiUsageSource::OhMyPi {
-        return Some("codex");
     }
     match provider {
         "openai" | "openai-codex" => Some("codex"),
@@ -500,26 +497,21 @@ mod tests {
         assert_eq!(event.tokens.cache_write_5m, 18);
         assert_eq!(event.tokens.cache_write_1h, 12);
         assert_eq!(event.reported_total_tokens, 202);
+        assert_eq!(mapped_card("openai-codex", "gpt-5.5"), Some("codex"));
+        assert_eq!(mapped_card("custom", "gpt-5.6-sol"), Some("codex"));
+        assert_eq!(mapped_card("custom", "claude-sonnet-5"), Some("claude"));
         assert_eq!(
-            mapped_card("openai-codex", "gpt-5.5", PiUsageSource::Pi),
-            Some("codex")
-        );
-        assert_eq!(
-            mapped_card("custom", "gpt-5.6-sol", PiUsageSource::Pi),
-            Some("codex")
-        );
-        assert_eq!(
-            mapped_card("custom", "claude-sonnet-5", PiUsageSource::OhMyPi),
+            mapped_card("google-antigravity", "claude-sonnet-5"),
             Some("claude")
         );
         assert_eq!(
-            mapped_card("deepseek", "deepseek-v4", PiUsageSource::OhMyPi),
-            Some("codex")
+            mapped_card("google-antigravity", "gemini-3-pro"),
+            Some("antigravity")
         );
-        assert_eq!(
-            mapped_card("nvidia-nim", "deepseek-v4", PiUsageSource::Pi),
-            None
-        );
+        assert_eq!(mapped_card("deepseek", "deepseek-v4"), None);
+        assert_eq!(mapped_card("zai", "glm-5"), Some("zai"));
+        assert_eq!(mapped_card("zhipu", "glm-5"), Some("zai"));
+        assert_eq!(mapped_card("nvidia-nim", "deepseek-v4"), None);
     }
 
     #[test]
@@ -720,10 +712,7 @@ mod tests {
         let today = history.today.unwrap();
         assert_eq!(today.tokens, 404);
         assert_eq!(today.estimated_cost_usd, Some(1.0));
-        let other = history.other_usage.unwrap().today.unwrap();
-        assert_eq!(other.tokens, 202);
-        assert_eq!(other.priced_tokens, 202);
-        assert_eq!(other.estimated_cost_usd, Some(0.5));
+        assert!(history.other_usage.is_none());
     }
 
     #[test]
