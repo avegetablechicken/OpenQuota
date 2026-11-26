@@ -1,19 +1,43 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use crate::pricing::{ModelPricing, ServiceTier, TokenBreakdown};
+use crate::{
+    pricing::{ModelPricing, ServiceTier, TokenBreakdown},
+    providers::model_scope::{card_for_model, is_known_unowned_foreign_model},
+};
 
 pub(crate) const GO_PROVIDER_ID: &str = "opencode-go";
 pub(super) const EPOCH_MILLISECONDS_THRESHOLD: i64 = 100_000_000_000;
 const MAX_TOKEN_VALUE: f64 = 1_000_000_000_000_000.0;
 
-pub(super) fn usage_card(provider_id: &str) -> Option<&'static str> {
+fn provider_hint(provider_id: &str) -> Option<&'static str> {
     match provider_id {
-        GO_PROVIDER_ID | "opencode" => Some("opencode"),
-        "anthropic" => Some("claude"),
-        "openai" | "openai-codex" => Some("codex"),
+        "anthropic" | "claude" => Some("claude"),
+        "openai" | "openai-codex" | "codex" => Some("codex"),
+        "xai" | "x-ai" | "grok" => Some("grok"),
+        "zai" | "z-ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
+        "kimi" | "moonshot" | "moonshotai" => Some("kimi"),
+        "minimax" => Some("minimax"),
+        "google-antigravity" | "antigravity" => Some("antigravity"),
         _ => None,
     }
+}
+
+pub(super) fn usage_card(provider_id: &str, model: &str) -> Option<&'static str> {
+    let provider = provider_id.trim().to_ascii_lowercase();
+    if matches!(provider.as_str(), GO_PROVIDER_ID | "opencode") {
+        return Some("opencode");
+    }
+    if matches!(provider.as_str(), "google-antigravity" | "antigravity") {
+        return Some("antigravity");
+    }
+    if let Some(card) = card_for_model(model) {
+        return Some(card);
+    }
+    if is_known_unowned_foreign_model(model) {
+        return None;
+    }
+    provider_hint(&provider)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +55,7 @@ pub(crate) struct UsageRecord {
     pub(crate) cost: Option<f64>,
     pub(crate) cost_provenance: CostProvenance,
     pub(crate) incomplete_cost: bool,
+    pub(crate) is_other: bool,
 }
 
 #[derive(Debug)]
@@ -42,6 +67,7 @@ pub(super) struct ParsedMessage {
     model: String,
     tokens: Option<ParsedTokens>,
     cost: StoredCost,
+    is_other: bool,
 }
 
 impl ParsedMessage {
@@ -86,6 +112,7 @@ impl ParsedMessage {
             cost,
             cost_provenance,
             incomplete_cost,
+            is_other: self.is_other,
         }
     }
 }
@@ -149,9 +176,13 @@ pub(super) fn parse_message(
         return None;
     }
     let provider_id = provider_id(value)?;
-    if usage_card(&provider_id) != Some(card_id) {
-        return None;
-    }
+    let model = model_id(value).unwrap_or_else(|| "Unattributed".into());
+    let target = usage_card(&provider_id, &model);
+    let is_other = match target {
+        Some(target) if target == card_id => false,
+        None if card_id == "opencode" => true,
+        _ => return None,
+    };
     let timestamp = column_timestamp
         .and_then(timestamp_from_number)
         .or_else(|| {
@@ -160,7 +191,6 @@ pub(super) fn parse_message(
                 .and_then(timestamp_from_value)
         })
         .or_else(|| value.get("time_created").and_then(timestamp_from_value))?;
-    let model = model_id(value).unwrap_or_else(|| "Unattributed".into());
     Some(ParsedMessage {
         session_id,
         message_id,
@@ -169,6 +199,7 @@ pub(super) fn parse_message(
         model,
         tokens: value.get("tokens").and_then(parse_tokens),
         cost: stored_cost(value, &["cost", "costUSD"]),
+        is_other,
     })
 }
 
@@ -270,7 +301,7 @@ fn estimate_cost(
     if tokens.total_tokens() == 0 || model == "Unattributed" {
         return None;
     }
-    let provider = usage_card(provider_id)?;
+    let provider = usage_card(provider_id, model).unwrap_or(provider_id);
     let cost = if let Some(rates) = pricing.historical_rates(
         provider,
         model,

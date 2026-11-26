@@ -473,8 +473,69 @@ fn exact_zero_cost_is_usage_but_unknown_cost_stays_visible_as_incomplete() {
     );
     drop(unknown);
     let unknown_usage = scan(vec![unknown_path]).usage;
-    assert!(unknown_usage.today.is_none());
+    let today = unknown_usage.today.unwrap();
+    assert_eq!(today.tokens, 60);
+    assert_eq!(today.estimated_cost_usd, None);
+    assert!(!today.estimate_complete);
     assert_eq!(unknown_usage.unknown_models, ["unknown-model"]);
+}
+
+#[test]
+fn model_names_route_opencode_sessions_across_all_model_family_cards_and_others() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("opencode.db");
+    let connection = create_database(&path, false);
+    for (message, provider, model, cost, tokens) in [
+        ("hosted", "opencode-go", "claude-sonnet-4-6", 1.0, 100),
+        ("relay-claude", "my-relay", "claude-opus-4-7", 2.0, 200),
+        ("relay-codex", "my-relay", "openai/gpt-5.4", 3.0, 300),
+        ("relay-grok", "xai", "grok-4", 4.0, 400),
+        ("relay-kimi", "custom-cn", "kimi-k2.5", 5.0, 500),
+        ("relay-minimax", "anthropic", "MiniMax-M2.7", 6.0, 600),
+        ("relay-zai", "anthropic", "glm-5.3-flash", 7.0, 700),
+        (
+            "antigravity",
+            "google-antigravity",
+            "gemini-3.6-flash",
+            8.0,
+            800,
+        ),
+        ("other-deepseek", "openai", "deepseek-v4-flash", 9.0, 900),
+        ("other-qwen", "ollama", "ollama/qwen3", 0.0, 1_000),
+    ] {
+        insert_message(
+            &connection,
+            "session",
+            message,
+            timestamp(),
+            &exact_message(provider, model, cost, tokens, 0),
+        );
+    }
+    drop(connection);
+
+    let opencode = scan(vec![path.clone()]).usage;
+    assert_eq!(opencode.today.as_ref().unwrap().tokens, 100);
+    assert_eq!(
+        opencode.today.as_ref().unwrap().estimated_cost_usd,
+        Some(1.0)
+    );
+    let other = opencode.other_usage.unwrap().today.unwrap();
+    assert_eq!(other.tokens, 1_900);
+    assert_eq!(other.estimated_cost_usd, Some(9.0));
+
+    for (card, expected_tokens, expected_cost) in [
+        ("claude", 200, 2.0),
+        ("codex", 300, 3.0),
+        ("grok", 400, 4.0),
+        ("kimi", 500, 5.0),
+        ("minimax", 600, 6.0),
+        ("zai", 700, 7.0),
+        ("antigravity", 800, 8.0),
+    ] {
+        let today = scan_card(&path, card).today.unwrap();
+        assert_eq!(today.tokens, expected_tokens, "{card}");
+        assert_eq!(today.estimated_cost_usd, Some(expected_cost), "{card}");
+    }
 }
 
 #[test]

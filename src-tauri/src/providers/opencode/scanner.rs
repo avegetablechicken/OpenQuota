@@ -229,6 +229,16 @@ fn aggregate_into(
         if date < since {
             continue;
         }
+        if record.is_other {
+            accumulator.add_other(
+                date,
+                record.tokens,
+                record.cost,
+                record.cost_provenance == CostProvenance::Estimated,
+                &record.model,
+            );
+            continue;
+        }
         if let Some(cost) = record.cost {
             match record.cost_provenance {
                 CostProvenance::Exact => {
@@ -238,9 +248,14 @@ fn aggregate_into(
                     accumulator.add(date, record.tokens, cost, &record.model)
                 }
             }
+            if record.incomplete_cost {
+                accumulator.add_unknown_model(date, &record.model);
+            }
             contributed = true;
-        }
-        if record.incomplete_cost || (record.cost.is_none() && record.tokens > 0) {
+        } else if record.tokens > 0 {
+            accumulator.add_unpriced(date, record.tokens, &record.model);
+            contributed = true;
+        } else if record.incomplete_cost {
             accumulator.add_unknown_model(date, &record.model);
             contributed = true;
         }
@@ -268,6 +283,7 @@ mod unit_tests {
                 CostProvenance::Estimated
             },
             incomplete_cost: cost.is_none(),
+            is_other: false,
         }
     }
 
