@@ -18,6 +18,7 @@
   import {
     isSub2ApiSubscription,
     showSub2ApiMetric,
+    sub2ApiMetricSupported,
     sub2ApiUpstreamAccountName,
     sub2ApiUpstreamOptions,
     sub2ApiPinAllowed,
@@ -449,8 +450,7 @@
     const entries: NativeMenuEntry[] = [
       { text: 'Hide', action: () => patchMetric(providerId, metricId, { enabled: false }) },
     ];
-    const snapshot = viewState.providers[providerId]?.snapshot;
-    const source = isSub2ApiSubscription(snapshot) ? 'subscription' : $sub2ApiUpstreams[providerId];
+    const source = connectionSource(providerId);
     if (
       metricDefinition(metricId)?.pinnable &&
       (metric.pinned || sub2ApiPinAllowed(metricId, source))
@@ -458,7 +458,11 @@
       entries.push({
         text: metric.pinned ? 'Unstar' : 'Star for menu bar',
         // At most two stars per provider.
-        enabled: metric.pinned || provider.metrics.filter((item) => item.pinned).length < 2,
+        enabled:
+          metric.pinned ||
+          provider.metrics.filter(
+            (item) => item.pinned && sub2ApiMetricSupported(providerId, item.id, source),
+          ).length < 2,
         action: () => patchMetric(providerId, metricId, { pinned: !metric.pinned }),
       });
     }

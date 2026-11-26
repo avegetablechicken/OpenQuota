@@ -1,6 +1,7 @@
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, expect, it, vi } from 'vitest';
 import { settingsState } from '../test/appFixtures';
+import { chooseMenuItem, openMenu } from '../test/nativeMenu';
 import Dashboard from './Dashboard.svelte';
 import { ProviderCatalogIndex } from './metrics';
 import { buildProviderShareRows } from './shareCard';
@@ -145,6 +146,29 @@ it('uses the current admin upstream to hide retained quotas of a different upstr
   expect(screen.queryByRole('group', { name: 'daily options' })).not.toBeInTheDocument();
   expect(screen.getByRole('group', { name: 'sonnet options' })).toBeInTheDocument();
   expect(screen.getByRole('group', { name: 'session options' })).toBeInTheDocument();
+});
+
+it('does not let unsupported retained pins consume the subscription star limit', async () => {
+  const { onCustomizationChange } = dashboard();
+  await fireEvent.contextMenu(screen.getByRole('group', { name: 'weekly options' }));
+  await chooseMenuItem('Star for menu bar');
+  const updated = onCustomizationChange.mock.calls[0][0];
+  expect(
+    updated.providers[0].metrics.find((m: { id: string }) => m.id === 'sub2api.weekly'),
+  ).toMatchObject({ pinned: true });
+  expect(
+    updated.providers[0].metrics.find((m: { id: string }) => m.id === 'sub2api.session'),
+  ).toMatchObject({ pinned: true });
+});
+
+it('still enforces the limit for two supported admin pins and allows removing a star', async () => {
+  dashboard('claude', ['session', 'sonnet']);
+  await fireEvent.contextMenu(screen.getByRole('group', { name: 'weekly options' }));
+  expect(
+    openMenu()?.entries.find((item) => item !== 'separator' && item.text === 'Star for menu bar'),
+  ).toMatchObject({ enabled: false });
+  await fireEvent.contextMenu(screen.getByRole('group', { name: 'session options' }));
+  await chooseMenuItem('Unstar');
 });
 
 it.each(['subscription', 'claude'] as const)('shares only supported %s metrics', (source) => {
