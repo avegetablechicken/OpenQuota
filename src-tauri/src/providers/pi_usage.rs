@@ -272,11 +272,16 @@ fn aggregate_into(
         }
         let model = event.model.trim();
         let billing_provider = card_id;
-        let display_model = if model.is_empty() {
-            "Unattributed"
-        } else {
-            model
-        };
+        if model.is_empty() {
+            if let Some(cost) = event.carried_cost.filter(|cost| *cost > 0.0) {
+                accumulator.add_exact(date, event.reported_total_tokens, cost, "Unattributed");
+                mark_source(&mut contributed, event.source);
+            } else if event.reported_total_tokens > 0 {
+                accumulator.add_unpriced(date, event.reported_total_tokens, "Unattributed");
+                mark_source(&mut contributed, event.source);
+            }
+            continue;
+        }
         if !model_belongs_to_card(card_id, model) {
             if card_for_model(model).is_some() {
                 continue;
@@ -294,28 +299,26 @@ fn aggregate_into(
                 event.reported_total_tokens,
                 carried_cost.or(estimated_cost),
                 carried_cost.is_none(),
-                display_model,
+                model,
             );
             mark_source(&mut contributed, event.source);
             continue;
         }
         if let Some(cost) = event.carried_cost.filter(|cost| *cost > 0.0) {
-            accumulator.add_exact(date, event.reported_total_tokens, cost, display_model);
+            accumulator.add_exact(date, event.reported_total_tokens, cost, model);
             mark_source(&mut contributed, event.source);
-        } else if !model.is_empty() {
-            if let Some(cost) = pricing.estimated_cost_at(
-                billing_provider,
-                model,
-                event.timestamp,
-                event.tokens.pricing_tokens(),
-                true,
-            ) {
-                accumulator.add(date, event.reported_total_tokens, cost, model);
-                mark_source(&mut contributed, event.source);
-            } else if event.reported_total_tokens > 0 {
-                accumulator.add_unpriced(date, event.reported_total_tokens, model);
-                mark_source(&mut contributed, event.source);
-            }
+        } else if let Some(cost) = pricing.estimated_cost_at(
+            billing_provider,
+            model,
+            event.timestamp,
+            event.tokens.pricing_tokens(),
+            true,
+        ) {
+            accumulator.add(date, event.reported_total_tokens, cost, model);
+            mark_source(&mut contributed, event.source);
+        } else if event.reported_total_tokens > 0 {
+            accumulator.add_unpriced(date, event.reported_total_tokens, model);
+            mark_source(&mut contributed, event.source);
         }
     }
     contributed
@@ -500,6 +503,31 @@ mod tests {
         );
         assert_eq!(mapped_card("google", "gemini-3-pro"), Some("antigravity"));
         assert_eq!(mapped_card("nvidia-nim", "deepseek-v4"), None);
+    }
+
+    #[test]
+    fn missing_model_records_as_unattributed_on_main_card_for_all_providers() {
+        for (provider, card) in [("anthropic", "claude"), ("openai", "codex")] {
+            let event = parsed_line(&line("missing", provider, "", "0")).unwrap();
+            assert_eq!(event.card_id, card);
+            let mut accumulator = DailyUsageAccumulator::default();
+            assert!(
+                aggregate_into(
+                    vec![event],
+                    card,
+                    chrono::NaiveDate::MIN,
+                    now(),
+                    &pricing(),
+                    &mut accumulator,
+                )
+                .pi
+            );
+            let history = accumulator.build(now(), "From pi");
+            let today = history.today.unwrap();
+            assert_eq!(today.tokens, 202);
+            assert_eq!(today.unknown_models, ["Unattributed"]);
+            assert!(history.other_usage.is_none());
+        }
     }
 
     #[test]
@@ -775,5 +803,4 @@ mod tests {
             );
         }
     }
-
 }

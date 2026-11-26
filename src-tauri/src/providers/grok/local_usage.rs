@@ -420,7 +420,19 @@ fn aggregate_into(
         if date < since || event.timestamp > now {
             continue;
         }
-        let Some(model) = event.model.as_deref() else {
+        let total = event
+            .prompt
+            .saturating_add(event.completion)
+            .saturating_add(event.reasoning);
+        let Some(model) = event
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
+            if total > 0 {
+                accumulator.add_unpriced(date, total, "Unattributed");
+            }
             continue;
         };
         let tokens = TokenBreakdown {
@@ -429,10 +441,6 @@ fn aggregate_into(
             output: event.completion.saturating_add(event.reasoning),
             ..TokenBreakdown::default()
         };
-        let total = event
-            .prompt
-            .saturating_add(event.completion)
-            .saturating_add(event.reasoning);
         match native_log_disposition("grok", model) {
             LocalModelDisposition::Home => {}
             LocalModelDisposition::RoutedTo(_) => continue,
@@ -555,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_models_retain_tokens_as_incomplete_and_unattributed_rows_drop() {
+    fn unknown_and_missing_models_retain_tokens_as_incomplete() {
         let content = r#"{"ts":"2026-06-18T08:00:00Z","pid":1,"msg":"model changed","ctx":{"model":"grok-unknown-model"}}
 {"ts":"2026-06-18T09:00:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000}}
 {"ts":"2026-06-18T10:00:00Z","pid":2,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000}}
@@ -563,8 +571,11 @@ mod tests {
 {"ts":"2026-06-18T12:00:00Z","pid":3,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":500000}}"#;
         let history = aggregate(parse_jsonl(content), now(), &test_bundled_pricing());
 
-        assert_eq!(history.today.as_ref().unwrap().tokens, 1_500_000);
-        assert_eq!(history.unknown_models, ["grok-unknown-model"]);
+        assert_eq!(history.today.as_ref().unwrap().tokens, 2_500_000);
+        assert_eq!(
+            history.unknown_models,
+            ["Unattributed", "grok-unknown-model"]
+        );
         assert!(!history.today.unwrap().estimate_complete);
     }
 

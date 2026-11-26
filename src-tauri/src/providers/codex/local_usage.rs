@@ -44,7 +44,7 @@ pub struct TokenEvent {
     pub cache_write_12h: u64,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 5;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 6;
 
 pub(crate) fn scan_routed_usage_into(
     storage: &Storage,
@@ -638,10 +638,7 @@ fn resolve_model(parsed: Option<String>, current_model: &mut Option<String>) -> 
     if let Some(parsed) = parsed.as_ref() {
         *current_model = Some(parsed.clone());
     }
-    parsed.or_else(|| current_model.clone()).unwrap_or_else(|| {
-        *current_model = Some("gpt-5".into());
-        "gpt-5".into()
-    })
+    parsed.or_else(|| current_model.clone()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -682,7 +679,14 @@ fn aggregate_into(
         if date < since || event.timestamp > now {
             continue;
         }
-        match native_log_disposition("codex", &event.model) {
+        let model = event.model.trim();
+        if model.is_empty() {
+            if event.total > 0 {
+                accumulator.add_unpriced(date, event.total, "Unattributed");
+            }
+            continue;
+        }
+        match native_log_disposition("codex", model) {
             LocalModelDisposition::Home => {}
             LocalModelDisposition::RoutedTo(_) => continue,
             LocalModelDisposition::Other => {
@@ -691,15 +695,15 @@ fn aggregate_into(
                     event.total,
                     estimate_cost(&event, pricing),
                     true,
-                    &event.model,
+                    model,
                 );
                 continue;
             }
         }
         if let Some(cost) = estimate_cost(&event, pricing) {
-            accumulator.add(date, event.total, cost, event.model.trim());
-        } else if event.total > 0 || event.model.eq_ignore_ascii_case("codex-auto-review") {
-            accumulator.add_unpriced(date, event.total, &event.model);
+            accumulator.add(date, event.total, cost, model);
+        } else if event.total > 0 || model.eq_ignore_ascii_case("codex-auto-review") {
+            accumulator.add_unpriced(date, event.total, model);
         }
     }
 }
@@ -738,7 +742,7 @@ fn aggregate_routed_into(
             continue;
         }
         let model = event.model.trim();
-        if card_for_model(model) != Some(card_id) {
+        if model.is_empty() || card_for_model(model) != Some(card_id) {
             continue;
         }
         let tokens = TokenBreakdown {
@@ -759,6 +763,9 @@ fn aggregate_routed_into(
 
 fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
     let display_model = event.model.trim();
+    if display_model.is_empty() {
+        return None;
+    }
     let normalized_model = display_model.to_ascii_lowercase();
     let model = normalized_model.as_str();
     if model == "codex-auto-review" {
@@ -923,6 +930,23 @@ mod tests {
         assert_eq!(events[0].model, "gpt-5.5");
         assert_eq!(events[0].total, 115);
         assert_eq!(events[0].cached, 20);
+    }
+
+    #[test]
+    fn missing_model_records_as_unattributed_without_fabricating_gpt5() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let content = r#"{"timestamp":"2026-07-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+        let events = parse_jsonl(content);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].model.is_empty());
+
+        let history = aggregate(events, now, &test_bundled_pricing());
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 110);
+        assert_eq!(today.estimated_cost_usd, None);
+        assert!(!today.estimate_complete);
+        assert_eq!(today.unknown_models, ["Unattributed"]);
+        assert!(history.other_usage.is_none());
     }
 
     #[test]

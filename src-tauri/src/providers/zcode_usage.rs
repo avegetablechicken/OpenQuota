@@ -170,9 +170,16 @@ impl ZCodeUsageScanner {
             if is_delegated_cli(&event.provider_id.trim().to_ascii_lowercase()) {
                 continue;
             }
-            let model_owner = card_for_model(&event.model).and_then(ZCodeProvider::from_card_id);
             let configured_owner =
                 provider_kind(&event.provider_id, configured.get(&event.provider_id));
+            if event.model.is_empty() {
+                if configured_owner == Some(target) {
+                    contributed = true;
+                    accumulator.add_unpriced(date, event.total, "Unattributed");
+                }
+                continue;
+            }
+            let model_owner = card_for_model(&event.model).and_then(ZCodeProvider::from_card_id);
             if let Some(owner) = model_owner {
                 if owner == target {
                     contributed = true;
@@ -280,7 +287,7 @@ fn read_events(path: &Path, now: DateTime<Utc>) -> Result<Vec<UsageEvent>, ZCode
         };
         let provider_id = provider_id.trim();
         let model = model.trim();
-        if provider_id.is_empty() || model.is_empty() {
+        if provider_id.is_empty() {
             continue;
         }
         let fallback_total = input.saturating_add(output);
@@ -664,6 +671,7 @@ mod tests {
             ("my-relay", "MiniMax-M2.7", 500),
             ("anthropic", "GLM-5.3-Flash", 600),
             ("my-relay", "gemini-3-pro", 650),
+            ("openai", "", 250),
             ("builtin:codex-cli", "gpt-5.4", 9_999),
             ("anthropic", "deepseek-flash", 700),
             ("bailian", "qwen3-coder", 800),
@@ -692,7 +700,11 @@ mod tests {
 
         assert_eq!(antigravity.today.as_ref().unwrap().tokens, 650);
         assert_eq!(claude.today.as_ref().unwrap().tokens, 100);
-        assert_eq!(codex.today.as_ref().unwrap().tokens, 200);
+        assert_eq!(codex.today.as_ref().unwrap().tokens, 450);
+        assert_eq!(
+            codex.today.as_ref().unwrap().unknown_models,
+            ["Unattributed"]
+        );
         assert_eq!(grok.today.as_ref().unwrap().tokens, 300);
         assert_eq!(kimi.today.as_ref().unwrap().tokens, 400);
         assert_eq!(minimax.today.as_ref().unwrap().tokens, 500);
