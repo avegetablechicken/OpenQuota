@@ -28,11 +28,11 @@ pub(super) fn usage_card(provider_id: &str, model: &str) -> Option<&'static str>
     if matches!(provider.as_str(), GO_PROVIDER_ID | "opencode") {
         return Some("opencode");
     }
-    if matches!(provider.as_str(), "google-antigravity" | "antigravity") {
-        return Some("antigravity");
-    }
     if let Some(card) = card_for_model(model) {
         return Some(card);
+    }
+    if matches!(provider.as_str(), "google-antigravity" | "antigravity") {
+        return Some("antigravity");
     }
     if is_known_unowned_foreign_model(model) {
         return None;

@@ -17,10 +17,10 @@ use crate::{
 use super::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
-    model_scope::model_belongs_to_card,
+    model_scope::{card_for_model, model_belongs_to_card},
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 6;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 7;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum PiUsageSource {
@@ -257,21 +257,19 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
 }
 
 fn mapped_card(provider: &str, model: &str) -> Option<&'static str> {
-    if matches!(provider, "anthropic" | "claude-agent-sdk") || is_claude_model(model) {
-        return Some("claude");
+    if let Some(card) = card_for_model(model) {
+        return Some(card);
     }
-    match provider {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "claude-agent-sdk" => Some("claude"),
         "openai" | "openai-codex" => Some("codex"),
-        "zai" | "zhipu" => Some("zai"),
-        "google-antigravity" => Some("antigravity"),
-        _ if model_belongs_to_card("codex", model) => Some("codex"),
+        "xai" | "x-ai" | "grok" => Some("grok"),
+        "kimi" | "moonshot" | "moonshotai" => Some("kimi"),
+        "minimax" => Some("minimax"),
+        "zai" | "z-ai" | "zhipu" | "zhipuai" | "bigmodel" => Some("zai"),
+        "google-antigravity" | "antigravity" => Some("antigravity"),
         _ => None,
     }
-}
-
-fn is_claude_model(model: &str) -> bool {
-    let model = model.trim().to_ascii_lowercase();
-    model.starts_with("claude") || model.contains("/claude")
 }
 
 fn deduplicate(events: Vec<PiUsageEvent>) -> Vec<PiUsageEvent> {
@@ -300,18 +298,16 @@ fn aggregate_into(
             continue;
         }
         let model = event.model.trim();
-        let billing_provider = match event.provider.as_str() {
-            "openai" | "openai-codex" => "codex",
-            "anthropic" | "claude-agent-sdk" => "claude",
-            "zhipu" => "zai",
-            other => other,
-        };
+        let billing_provider = card_id;
         let display_model = if model.is_empty() {
             "Unattributed"
         } else {
             model
         };
         if !model_belongs_to_card(card_id, model) {
+            if card_for_model(model).is_some() {
+                continue;
+            }
             let carried_cost = event.carried_cost.filter(|cost| *cost > 0.0);
             let estimated_cost = pricing.estimated_cost_at(
                 billing_provider,
@@ -344,7 +340,7 @@ fn aggregate_into(
                 accumulator.add(date, event.reported_total_tokens, cost, model);
                 mark_source(&mut contributed, event.source);
             } else if event.reported_total_tokens > 0 {
-                accumulator.add_unknown_model(date, model);
+                accumulator.add_unpriced(date, event.reported_total_tokens, model);
                 mark_source(&mut contributed, event.source);
             }
         }
@@ -510,6 +506,10 @@ mod tests {
         assert_eq!(mapped_card("cursor", "cursor-small"), None);
         assert_eq!(mapped_card("zai", "glm-5"), Some("zai"));
         assert_eq!(mapped_card("zhipu", "glm-5"), Some("zai"));
+        assert_eq!(mapped_card("anthropic", "glm-5"), Some("zai"));
+        assert_eq!(mapped_card("custom", "kimi-k3"), Some("kimi"));
+        assert_eq!(mapped_card("anthropic", "MiniMax-M2.7"), Some("minimax"));
+        assert_eq!(mapped_card("custom", "grok-4"), Some("grok"));
         assert_eq!(mapped_card("github-copilot", "gemini-3-pro"), None);
         assert_eq!(mapped_card("nvidia-nim", "deepseek-v4"), None);
     }
@@ -582,8 +582,9 @@ mod tests {
         );
         let history = accumulator.build(now(), "From pi");
         let period = history.today.unwrap();
-        assert_eq!(period.tokens, 404);
+        assert_eq!(period.tokens, 606);
         assert!(period.cost_estimated);
+        assert!(!period.estimate_complete);
         assert!((period.estimated_cost_usd.unwrap() - 0.502_43).abs() < 0.000_001);
         assert_eq!(period.unknown_models, ["claude-missing-model"]);
     }
@@ -713,6 +714,78 @@ mod tests {
         assert_eq!(today.tokens, 404);
         assert_eq!(today.estimated_cost_usd, Some(1.0));
         assert!(history.other_usage.is_none());
+    }
+
+    #[test]
+    fn pi_and_oh_my_pi_route_all_model_families_including_custom_relays() {
+        let directory = tempdir().unwrap();
+        let pi_sessions = directory.path().join("pi-sessions");
+        let oh_my_pi_sessions = directory.path().join("omp-sessions");
+        fs::create_dir_all(&pi_sessions).unwrap();
+        fs::create_dir_all(&oh_my_pi_sessions).unwrap();
+        fs::write(
+            pi_sessions.join("pi.jsonl"),
+            [
+                line("pi-zai", "anthropic", "glm-5.3-flash", "0.2"),
+                line("pi-kimi", "my-relay", "kimi-k3", "0.3"),
+                line("pi-grok", "xai", "grok-4", "0.4"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(
+            oh_my_pi_sessions.join("omp.jsonl"),
+            [
+                line("omp-minimax", "custom-cn", "MiniMax-M2.7", "0.5"),
+                line(
+                    "omp-antigravity",
+                    "google-antigravity",
+                    "gemini-3-pro",
+                    "0.6",
+                ),
+                line(
+                    "omp-ag-claude",
+                    "google-antigravity",
+                    "claude-sonnet-5",
+                    "0.7",
+                ),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let dirs = [
+            (PiUsageSource::Pi, pi_sessions),
+            (PiUsageSource::OhMyPi, oh_my_pi_sessions),
+        ];
+
+        for (card, expect_pi, expect_omp, expected_cost) in [
+            ("zai", true, false, 0.2),
+            ("kimi", true, false, 0.3),
+            ("grok", true, false, 0.4),
+            ("minimax", false, true, 0.5),
+            ("antigravity", false, true, 0.6),
+            ("claude", false, true, 0.7),
+        ] {
+            let mut accumulator = DailyUsageAccumulator::default();
+            let sources =
+                scan_directories_into(&storage, &dirs, now(), &pricing(), card, &mut accumulator)
+                    .unwrap();
+            assert_eq!(
+                sources,
+                PiUsageSources {
+                    pi: expect_pi,
+                    oh_my_pi: expect_omp,
+                },
+                "{card}"
+            );
+            let today = accumulator.build(now(), "test").today.unwrap();
+            assert_eq!(today.tokens, 202, "{card}");
+            assert!(
+                (today.estimated_cost_usd.unwrap() - expected_cost).abs() < 1e-9,
+                "{card}"
+            );
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::{
         daily_usage::DailyUsageAccumulator,
         grok,
         log_usage::scan_or_cached_usage,
-        opencode,
+        opencode, pi_usage,
         zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
         CacheIdentity,
     },
@@ -56,6 +56,29 @@ impl RoutedLocalUsage {
                 let mut sources = Vec::new();
                 let mut had_error = false;
 
+                match pi_usage::scan_into(
+                    &self.storage,
+                    now,
+                    &pricing,
+                    provider_id,
+                    &mut accumulator,
+                ) {
+                    Ok(pi_sources) => {
+                        if pi_sources.pi {
+                            sources.push("pi");
+                        }
+                        if pi_sources.oh_my_pi {
+                            sources.push("oh-my-pi");
+                        }
+                    }
+                    Err(_) => {
+                        had_error = true;
+                        crate::app_warn!(
+                            "plugin:pi",
+                            "pi/oh-my-pi usage history could not be folded into {provider_name}"
+                        );
+                    }
+                }
                 match claude::local_usage::scan_routed_usage_into(
                     &self.storage,
                     now,

@@ -18,7 +18,7 @@ use crate::{
         model_scope::{
             card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
         },
-        opencode,
+        opencode, pi_usage,
         zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
     },
     storage::Storage,
@@ -154,6 +154,20 @@ fn scan_path(
 
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(events, now, pricing, &mut accumulator);
+    let includes_pi = if fold_external {
+        match pi_usage::scan_into(storage, now, pricing, "grok", &mut accumulator) {
+            Ok(includes_pi) => includes_pi,
+            Err(_) => {
+                crate::app_warn!(
+                    "plugin:pi",
+                    "pi/oh-my-pi usage history could not be folded into Grok"
+                );
+                pi_usage::PiUsageSources::default()
+            }
+        }
+    } else {
+        pi_usage::PiUsageSources::default()
+    };
     let includes_claude = if fold_external {
         match claude::local_usage::scan_routed_usage_into(
             storage,
@@ -220,6 +234,12 @@ fn scan_path(
         }
     };
     let mut extras = Vec::new();
+    if includes_pi.pi {
+        extras.push("pi");
+    }
+    if includes_pi.oh_my_pi {
+        extras.push("oh-my-pi");
+    }
     if includes_claude {
         extras.push("Claude Code");
     }
