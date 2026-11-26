@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 use crate::{
-    models::{AppSettings, DailyUsage, ProviderSnapshot},
+    models::{AppSettings, DailyUsage, MetricLayout, ProviderSnapshot},
     providers::CacheIdentity,
 };
 
@@ -87,6 +87,10 @@ impl Storage {
                payload TEXT NOT NULL,
                PRIMARY KEY(provider_family, identity_key),
                UNIQUE(provider_family, provider_id)
+             );
+             CREATE TABLE IF NOT EXISTS metric_template_defaults (
+               provider_id TEXT PRIMARY KEY,
+               payload TEXT NOT NULL
              );",
         )?;
         if !Self::has_column(&connection, "log_file_cache", "modified_nanos")? {
@@ -365,6 +369,46 @@ impl Storage {
             "INSERT INTO app_settings(id, payload) VALUES (1, ?1)
              ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
             [payload],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// The metric defaults a provider's template last applied, used to spot untouched metrics.
+    pub fn load_metric_template_defaults(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<Vec<MetricLayout>>, StorageError> {
+        let connection = self.connection()?;
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT payload FROM metric_template_defaults WHERE provider_id = ?1",
+                [provider_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload.and_then(|json| serde_json::from_str(&json).ok()))
+    }
+
+    pub fn save_settings_with_metric_template_defaults(
+        &self,
+        settings: &AppSettings,
+        provider_id: &str,
+        defaults: &[MetricLayout],
+    ) -> Result<(), StorageError> {
+        let settings_payload = serde_json::to_string(settings)?;
+        let defaults_payload = serde_json::to_string(defaults)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO metric_template_defaults(provider_id, payload) VALUES (?1, ?2)
+             ON CONFLICT(provider_id) DO UPDATE SET payload = excluded.payload",
+            params![provider_id, defaults_payload],
+        )?;
+        transaction.execute(
+            "INSERT INTO app_settings(id, payload) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
+            [settings_payload],
         )?;
         transaction.commit()?;
         Ok(())

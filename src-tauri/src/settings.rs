@@ -594,7 +594,7 @@ impl SettingsService {
         provider_id: &str,
         detected: bool,
         enable: bool,
-        metric_template: Option<Vec<MetricLayout>>,
+        metric_template: Option<MetricTemplateChange>,
     ) -> Result<AppSettings, String> {
         let mut current = self
             .settings
@@ -612,26 +612,24 @@ impl SettingsService {
         if enable {
             provider.enabled = true;
         }
-        if let Some(metrics) = metric_template {
-            if preserve_layout {
-                // Only initialize new metrics. Mode changes must preserve existing choices,
-                // including the order and settings of metrics unavailable in the active mode.
-                for metric in metrics {
-                    if !provider
-                        .metrics
-                        .iter()
-                        .any(|current| current.id == metric.id)
-                    {
-                        provider.metrics.push(metric);
-                    }
-                }
+        let saved = if let Some(change) = metric_template {
+            let applied = if preserve_layout {
+                self.storage
+                    .load_metric_template_defaults(provider_id)
+                    .map_err(|_| "OpenQuota settings are temporarily unavailable.".to_owned())?
+                    .or(change.previous)
+                    .unwrap_or_default()
             } else {
-                provider.metrics = metrics;
-            }
-        }
-        self.storage
-            .save_settings(&next)
-            .map_err(|_| "OpenQuota settings could not be saved.".to_owned())?;
+                provider.metrics.clear();
+                Vec::new()
+            };
+            let defaults = apply_metric_template(&mut provider.metrics, &change.template, &applied);
+            self.storage
+                .save_settings_with_metric_template_defaults(&next, provider_id, &defaults)
+        } else {
+            self.storage.save_settings(&next)
+        };
+        saved.map_err(|_| "OpenQuota settings could not be saved.".to_owned())?;
         current.clone_from(&next);
         if enabled_provider_set(&next) != enabled_before {
             self.enablement_revision.fetch_add(1, Ordering::SeqCst);
@@ -948,6 +946,46 @@ fn default_provider(definition: &ProviderDefinition, detected: bool) -> Provider
     }
 }
 
+/// A provider's new default metric layout and the template it replaces.
+pub struct MetricTemplateChange {
+    pub template: Vec<MetricLayout>,
+    /// Stands in for the recorded defaults of layouts saved before they were tracked.
+    pub previous: Option<Vec<MetricLayout>>,
+}
+
+/// Moves an already customized layout onto a new template without losing user choices.
+///
+/// `applied` holds the default OpenQuota last wrote to each metric. Metrics still matching
+/// it take the new default, so a metric one track hides appears on a track that shows it.
+/// Anything the user changed keeps its settings, and the existing order is retained.
+///
+/// Returns the defaults to record. A customized metric keeps the default it was customized
+/// from, even when it happens to match the new one, so later track changes still keep it.
+fn apply_metric_template(
+    metrics: &mut Vec<MetricLayout>,
+    template: &[MetricLayout],
+    applied: &[MetricLayout],
+) -> Vec<MetricLayout> {
+    let mut recorded = Vec::with_capacity(template.len());
+    for default in template {
+        match metrics.iter_mut().find(|current| current.id == default.id) {
+            Some(current) if !applied.contains(current) => {
+                recorded.extend(
+                    applied
+                        .iter()
+                        .find(|previous| previous.id == default.id)
+                        .cloned(),
+                );
+                continue;
+            }
+            Some(current) => current.clone_from(default),
+            None => metrics.push(default.clone()),
+        }
+        recorded.push(default.clone());
+    }
+    recorded
+}
+
 fn normalize_metrics(
     metrics: &mut Vec<MetricLayout>,
     definitions: &[MetricDefinition],
@@ -1012,15 +1050,22 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        models::{MetricSection, ProviderDefinition, ProviderSnapshot, ThemePreference},
+        models::{
+            AppSettings, MetricLayout, MetricSection, ProviderDefinition, ProviderSnapshot,
+            ThemePreference,
+        },
         providers::{
-            antigravity, claude, codex, cursor, openrouter, CredentialProbeResults,
-            CredentialProbeStatus, ProviderError, ProviderRegistry, UsageProvider,
+            antigravity, claude, codex, cursor, openrouter,
+            sub2api::{metric_template, Sub2ApiMode, Sub2ApiProviders, Sub2ApiUpstream},
+            CredentialProbeResults, CredentialProbeStatus, ProviderError, ProviderRegistry,
+            UsageProvider,
         },
         storage::Storage,
     };
 
-    use super::{default_settings, normalize, SettingsService, MAX_PINS_PER_PROVIDER};
+    use super::{
+        default_settings, normalize, MetricTemplateChange, SettingsService, MAX_PINS_PER_PROVIDER,
+    };
 
     struct CatalogProvider(ProviderDefinition);
 
@@ -2162,7 +2207,10 @@ mod tests {
                 "openrouter",
                 true,
                 true,
-                Some(template.clone()),
+                Some(MetricTemplateChange {
+                    template: template.clone(),
+                    previous: None,
+                }),
             )
             .unwrap();
         let provider = saved
@@ -2215,7 +2263,10 @@ mod tests {
                     "sub2api",
                     true,
                     true,
-                    Some(template.clone()),
+                    Some(MetricTemplateChange {
+                        template: template.clone(),
+                        previous: None,
+                    }),
                 )
                 .unwrap();
             // Initial setup still gets the mode's default layout.
@@ -2242,6 +2293,7 @@ mod tests {
             settings.theme = ThemePreference::Dark;
             let expected = service.update(settings).unwrap();
 
+            let mut previous = (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex);
             for (mode, upstream) in [
                 (Sub2ApiMode::Admin, Sub2ApiUpstream::Codex),
                 (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex),
@@ -2254,9 +2306,13 @@ mod tests {
                         "sub2api",
                         true,
                         false,
-                        Some(metric_template("sub2api", upstream, mode)),
+                        Some(MetricTemplateChange {
+                            template: metric_template("sub2api", upstream, mode),
+                            previous: Some(metric_template("sub2api", previous.1, previous.0)),
+                        }),
                     )
                     .unwrap();
+                previous = (mode, upstream);
                 assert_eq!(saved, expected);
                 // Include a settings save to catch normalization changing retained preferences.
                 let saved = service.update(saved).unwrap();
@@ -2264,6 +2320,135 @@ mod tests {
                 assert_eq!(storage.load_settings().unwrap().unwrap(), expected);
             }
         }
+    }
+
+    fn sub2api_settings_service(directory: &std::path::Path) -> SettingsService {
+        let storage = Arc::new(Storage::open(&directory.join("openquota.db")).unwrap());
+        let providers = Sub2ApiProviders::new(directory.join("sub2api"), storage.clone());
+        let mut definition = providers.provider("sub2api").unwrap().definition();
+        definition.fallback_enabled = true;
+        let registry =
+            Arc::new(ProviderRegistry::new(vec![Arc::new(CatalogProvider(definition))]).unwrap());
+        SettingsService::new_for_test(storage, registry, &HashSet::new()).unwrap()
+    }
+
+    fn reconcile_sub2api_track(
+        service: &SettingsService,
+        (mode, upstream): (Sub2ApiMode, Sub2ApiUpstream),
+        previous: Option<(Sub2ApiMode, Sub2ApiUpstream)>,
+    ) -> AppSettings {
+        service
+            .reconcile_provider_credential_state_with_metrics(
+                "sub2api",
+                true,
+                true,
+                Some(MetricTemplateChange {
+                    template: metric_template("sub2api", upstream, mode),
+                    previous: previous
+                        .map(|(mode, upstream)| metric_template("sub2api", upstream, mode)),
+                }),
+            )
+            .unwrap()
+    }
+
+    fn sub2api_metric(settings: &AppSettings, suffix: &str) -> MetricLayout {
+        settings.providers[0]
+            .metrics
+            .iter()
+            .find(|metric| metric.id == format!("sub2api.{suffix}"))
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn sub2api_track_changes_move_untouched_defaults_to_the_new_template() {
+        let codex_admin = (Sub2ApiMode::Admin, Sub2ApiUpstream::Codex);
+
+        // An untouched Codex admin layout shows Daily and Monthly once it moves to a subscription.
+        let directory = tempdir().unwrap();
+        let service = sub2api_settings_service(directory.path());
+        reconcile_sub2api_track(&service, codex_admin, None);
+        let saved = reconcile_sub2api_track(
+            &service,
+            (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex),
+            Some(codex_admin),
+        );
+        let daily = sub2api_metric(&saved, "daily");
+        assert!(daily.enabled && daily.pinned);
+        assert_eq!(daily.section, MetricSection::AlwaysVisible);
+        assert!(sub2api_metric(&saved, "monthly").enabled);
+        assert!(sub2api_metric(&saved, "weekly").pinned);
+        assert!(!sub2api_metric(&saved, "session").enabled);
+        assert!(!sub2api_metric(&saved, "spark").enabled);
+
+        // Grok shows its monthly billing window after a switch from Codex.
+        let directory = tempdir().unwrap();
+        let service = sub2api_settings_service(directory.path());
+        reconcile_sub2api_track(&service, codex_admin, None);
+        let saved = reconcile_sub2api_track(
+            &service,
+            (Sub2ApiMode::Admin, Sub2ApiUpstream::Grok),
+            Some(codex_admin),
+        );
+        assert!(sub2api_metric(&saved, "monthly").enabled);
+        assert!(sub2api_metric(&saved, "weekly").enabled);
+        assert!(!sub2api_metric(&saved, "weekly").pinned);
+        assert!(!sub2api_metric(&saved, "session").enabled);
+
+        // Layouts saved before defaults were recorded fall back to the previous track's template.
+        let directory = tempdir().unwrap();
+        let service = sub2api_settings_service(directory.path());
+        let mut settings = service
+            .reconcile_provider_credential_state("sub2api", true, true)
+            .unwrap();
+        settings.providers[0].metrics =
+            metric_template("sub2api", Sub2ApiUpstream::Codex, Sub2ApiMode::Admin);
+        service.update(settings).unwrap();
+        let saved = reconcile_sub2api_track(
+            &service,
+            (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex),
+            Some(codex_admin),
+        );
+        assert!(sub2api_metric(&saved, "daily").enabled);
+        assert!(sub2api_metric(&saved, "monthly").enabled);
+    }
+
+    #[test]
+    fn sub2api_track_changes_keep_customized_metrics_and_order() {
+        let codex_admin = (Sub2ApiMode::Admin, Sub2ApiUpstream::Codex);
+        let directory = tempdir().unwrap();
+        let service = sub2api_settings_service(directory.path());
+        let mut settings = reconcile_sub2api_track(&service, codex_admin, None);
+        settings.providers[0].metrics.reverse();
+        let monthly = settings.providers[0]
+            .metrics
+            .iter_mut()
+            .find(|metric| metric.id == "sub2api.monthly")
+            .unwrap();
+        // Still hidden, but no longer the template's default.
+        monthly.section = MetricSection::AlwaysVisible;
+        let order: Vec<String> = settings.providers[0]
+            .metrics
+            .iter()
+            .map(|metric| metric.id.clone())
+            .collect();
+        service.update(settings).unwrap();
+
+        let saved = reconcile_sub2api_track(
+            &service,
+            (Sub2ApiMode::Subscription, Sub2ApiUpstream::Codex),
+            Some(codex_admin),
+        );
+        let ids: Vec<&str> = saved.providers[0]
+            .metrics
+            .iter()
+            .map(|metric| metric.id.as_str())
+            .collect();
+        assert_eq!(ids, order);
+        let monthly = sub2api_metric(&saved, "monthly");
+        assert!(!monthly.enabled);
+        assert_eq!(monthly.section, MetricSection::AlwaysVisible);
+        assert!(sub2api_metric(&saved, "daily").enabled);
     }
 
     #[test]

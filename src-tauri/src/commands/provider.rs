@@ -6,9 +6,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     commands::settings::settings_view_state,
-    models::{
-        ApiKeyMutationOutcome, ApiKeyStatus, MetricLayout, ProviderApiKeyState, ProviderLink,
-    },
+    models::{ApiKeyMutationOutcome, ApiKeyStatus, ProviderApiKeyState, ProviderLink},
     notifications::finish_refresh,
     pacing::NotificationEvaluator,
     providers::{
@@ -19,7 +17,7 @@ use crate::{
         ProviderRegistry, UsageProvider,
     },
     service::ProviderService,
-    settings::SettingsService,
+    settings::{MetricTemplateChange, SettingsService},
     tray_presentation,
 };
 
@@ -150,7 +148,7 @@ fn reconcile_provider_credential_state(
     provider_id: &str,
     detected: bool,
     enable: bool,
-    metric_template: Option<Vec<MetricLayout>>,
+    metric_template: Option<MetricTemplateChange>,
 ) -> Result<(), String> {
     let updated = if metric_template.is_some() {
         settings.reconcile_provider_credential_state_with_metrics(
@@ -387,9 +385,12 @@ pub async fn save_sub2api_config(
             .map_err(|error| error.to_string())?;
 
     let command_guard = settings.lock_command_mutation().await;
-    let template = outcome
-        .apply_metric_template
-        .then(|| metric_template(&provider_id, outcome.state.upstream, outcome.state.mode));
+    let template = outcome.apply_metric_template.then(|| MetricTemplateChange {
+        template: metric_template(&provider_id, outcome.state.upstream, outcome.state.mode),
+        previous: outcome
+            .previous_track
+            .map(|(mode, upstream)| metric_template(&provider_id, upstream, mode)),
+    });
     // First setup enables the provider; editing an existing connection preserves its toggle.
     let enable = settings
         .get()

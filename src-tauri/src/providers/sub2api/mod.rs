@@ -561,6 +561,8 @@ impl StoredConnections {
 pub struct Sub2ApiConfigSaveOutcome {
     pub state: Sub2ApiConfigState,
     pub apply_metric_template: bool,
+    /// The track the connection used before this save, whose template the layout may still hold.
+    pub previous_track: Option<(Sub2ApiMode, Sub2ApiUpstream)>,
 }
 
 impl Drop for StoredConfig {
@@ -1061,6 +1063,9 @@ impl Sub2ApiProvider {
         input: Sub2ApiConfigInput,
     ) -> Result<Sub2ApiConfigSaveOutcome, ProviderError> {
         let previous = self.load_connections()?;
+        let previous_track = previous
+            .as_ref()
+            .map(|saved| (saved.active.mode, saved.active.upstream));
         let apply_metric_template = should_apply_metric_template(
             previous.as_ref().map(|saved| &saved.active),
             input.mode,
@@ -1115,6 +1120,7 @@ impl Sub2ApiProvider {
         Ok(Sub2ApiConfigSaveOutcome {
             state: connections.state(),
             apply_metric_template,
+            previous_track,
         })
     }
 
