@@ -5,9 +5,9 @@ import Sub2ApiConfigSection from './Sub2ApiConfigSection.svelte';
 import { providerIconPath } from './providerIconPaths';
 import { selectOption } from '../test/selectOption';
 import {
-  forgetSub2ApiUpstream,
-  rememberSub2ApiUpstream,
-  sub2ApiUpstreams,
+  forgetSub2ApiEndpoint,
+  rememberSub2ApiEndpoint,
+  sub2ApiEndpoints,
 } from './sub2ApiUpstreams';
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -86,18 +86,18 @@ describe('Sub2ApiConfigSection', () => {
 
   afterEach(() => {
     cleanup();
-    forgetSub2ApiUpstream('sub2api@2');
+    forgetSub2ApiEndpoint('sub2api@2');
   });
 
-  it('forgets a stale upstream when the configuration is not configured', async () => {
-    rememberSub2ApiUpstream('sub2api@2', 'codex', 'https://sub2api.example.com');
+  it('forgets a stale endpoint when the configuration is not configured', async () => {
+    rememberSub2ApiEndpoint('sub2api@2', 'https://sub2api.example.com');
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
 
     await screen.findByText('Not configured');
     const connections = screen.getByRole('list', { name: 'Connection configurations' });
     expect(within(connections).getAllByRole('listitem')).toHaveLength(1);
     expect(within(connections).getByText('Provider or custom Base URL')).toBeInTheDocument();
-    await waitFor(() => expect(get(sub2ApiUpstreams)['sub2api@2']).toBeUndefined());
+    await waitFor(() => expect(get(sub2ApiEndpoints)['sub2api@2']).toBeUndefined());
   });
 
   it('saves a named subscription using the provider key without collecting a secret', async () => {

@@ -1,11 +1,8 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ProviderIcon from './ProviderIcon.svelte';
-import {
-  forgetSub2ApiUpstream,
-  rememberSub2ApiUpstream,
-  sub2ApiSnapshotContext,
-} from './sub2ApiUpstreams';
+import { sub2ApiSnapshotContext } from './sub2ApiUpstreams';
+import { clearSub2ApiTrack, setSub2ApiTrack } from '../test/sub2ApiTracks';
 import UsageTrend from './UsageTrend.svelte';
 
 afterEach(() => {
@@ -115,10 +112,10 @@ describe('native visual contract', () => {
   );
 
   it('updates a Sub2API item icon from its remembered upstream', () => {
-    rememberSub2ApiUpstream('sub2api@2', 'claude');
+    setSub2ApiTrack('sub2api@2', 'claude');
     const { container } = render(ProviderIcon, { providerId: 'sub2api@2' });
     expect(container.querySelector('path[fill="#DE7356"]')).not.toBeNull();
-    forgetSub2ApiUpstream('sub2api@2');
+    clearSub2ApiTrack('sub2api@2');
   });
 
   it('uses the shared hover dwell and grace timing for Usage Trend details', async () => {

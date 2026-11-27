@@ -1,9 +1,10 @@
 import { writable } from 'svelte/store';
-import type { ProviderSnapshot, Sub2ApiSource, Sub2ApiUpstream } from './types';
+import type { MetricPolicy, ProviderSnapshot, Sub2ApiSource, Sub2ApiUpstream } from './types';
 
 export const sub2ApiSnapshotContext = Symbol('Sub2API snapshot');
 
-const storageKey = 'openquota.sub2api-upstreams';
+/** Tracks were kept in browser storage before the backend sent them; only the key is cleared. */
+const legacyTrackStorageKey = 'openquota.sub2api-upstreams';
 const endpointStorageKey = 'openquota.sub2api-endpoints';
 
 function storage() {
@@ -16,7 +17,6 @@ function storage() {
 }
 
 export const sub2ApiUpstreamOptions: Sub2ApiUpstream[] = ['codex', 'claude', 'antigravity', 'grok'];
-const sources: Sub2ApiSource[] = ['subscription', ...sub2ApiUpstreamOptions];
 const upstreamLabels: Record<Sub2ApiUpstream, string> = {
   codex: 'Codex',
   claude: 'Claude',
@@ -29,21 +29,23 @@ export function sub2ApiResolvesProviderNames(upstream: Sub2ApiUpstream) {
   return upstream === 'codex' || upstream === 'claude';
 }
 
-function loadUpstreams(): Record<string, Sub2ApiSource> {
-  try {
-    const parsed = JSON.parse(storage()?.getItem(storageKey) ?? '{}') as Record<string, unknown>;
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        (entry): entry is [string, Sub2ApiSource] =>
-          typeof entry[1] === 'string' && sources.includes(entry[1] as Sub2ApiSource),
-      ),
-    );
-  } catch {
-    return {};
-  }
+try {
+  storage()?.removeItem(legacyTrackStorageKey);
+} catch {
+  // A stale key is harmless.
 }
 
-export const sub2ApiUpstreams = writable(loadUpstreams());
+/** Each connection's Track, as the latest settings view state reports it. */
+export const sub2ApiUpstreams = writable<Record<string, Sub2ApiSource>>({});
+
+export function syncSub2ApiTracks(policies: Record<string, MetricPolicy>) {
+  const tracks = Object.fromEntries(
+    Object.entries(policies).flatMap(([providerId, policy]) =>
+      policy.track ? [[providerId, policy.track] as const] : [],
+    ),
+  );
+  sub2ApiUpstreams.set(tracks);
+}
 
 function loadEndpoints(): Record<string, string> {
   try {
@@ -78,14 +80,12 @@ export function isSub2ApiSubscription(snapshot: ProviderSnapshot | null | undefi
 export function showSub2ApiMetric(
   snapshot: ProviderSnapshot,
   metricId: string,
+  policy: MetricPolicy | undefined,
   subscription = isSub2ApiSubscription(snapshot),
-  upstream: Sub2ApiSource | undefined = sub2ApiUpstreamOptions.find(
-    (id) => id === snapshot.upstreamProviderId,
-  ),
 ) {
-  const source = subscription ? 'subscription' : upstream;
-  // Retain saved layout preferences, but omit metrics unavailable on this track/upstream.
-  if (source && !sub2ApiMetricSupported(snapshot.providerId, metricId, source)) return false;
+  // Retain saved layout preferences, but omit metrics unavailable on this Track.
+  // TEMPORARY: while the Track is unknown, the Dashboard and share card hide nothing.
+  if (policy?.track && !policy.visibleMetricIds.includes(metricId)) return false;
   if (metricId !== `${snapshot.providerId}.monthly` || !subscription) return true;
   return snapshot.quotas.some((window) => window.id === 'monthly' && (window.limitValue ?? 0) > 0);
 }
@@ -106,45 +106,6 @@ export function sub2ApiPublicName(upstream?: Sub2ApiSource) {
   return upstream ? `Sub2API · ${sub2ApiUpstreamLabel(upstream)}` : 'Account name';
 }
 
-export function sub2ApiPinAllowed(metricId: string, source?: Sub2ApiSource) {
-  return source !== 'subscription' || /\.(daily|weekly|monthly)$/.test(metricId);
-}
-
-export function sub2ApiMetricSupported(
-  providerId: string,
-  metricId: string,
-  upstream?: Sub2ApiSource,
-) {
-  if (sub2ApiDisplayName(providerId) === null) return true;
-  const prefix = `${providerId}.`;
-  if (!metricId.startsWith(prefix)) return true;
-  const suffix = metricId.slice(prefix.length);
-  if (upstream === 'subscription') {
-    return ['daily', 'weekly', 'monthly', 'today', 'yesterday', 'last30', 'trend'].includes(suffix);
-  }
-  if (!upstream) {
-    return !['daily', 'monthly', 'extra', 'claude', 'claudeWeekly'].includes(suffix);
-  }
-  const upstreamOnly: Record<Sub2ApiUpstream, string[]> = {
-    codex: ['session', 'spark', 'sparkWeekly', 'rateLimitResets'],
-    claude: ['session', 'sonnet', 'fable'],
-    antigravity: ['session', 'claude', 'claudeWeekly'],
-    grok: ['monthly'],
-  };
-  return (
-    ['weekly', 'trend', 'today', 'yesterday', 'last30'].includes(suffix) ||
-    upstreamOnly[upstream].includes(suffix)
-  );
-}
-
-function persist(upstreams: Record<string, Sub2ApiSource>) {
-  try {
-    storage()?.setItem(storageKey, JSON.stringify(upstreams));
-  } catch {
-    // The icon preference is nonessential when browser storage is unavailable.
-  }
-}
-
 function persistEndpoints(endpoints: Record<string, string>) {
   try {
     storage()?.setItem(endpointStorageKey, JSON.stringify(endpoints));
@@ -161,35 +122,19 @@ function endpointLabel(baseUrl: string) {
   }
 }
 
-export function rememberSub2ApiUpstream(
-  providerId: string,
-  upstream: Sub2ApiSource,
-  baseUrl?: string,
-) {
-  sub2ApiUpstreams.update((current) => {
-    const next = { ...current, [providerId]: upstream };
-    persist(next);
+/** Records the host of a connection's Base URL for its label; an empty URL removes it. */
+export function rememberSub2ApiEndpoint(providerId: string, baseUrl: string) {
+  sub2ApiEndpoints.update((current) => {
+    const next = { ...current };
+    const endpoint = endpointLabel(baseUrl);
+    if (endpoint) next[providerId] = endpoint;
+    else delete next[providerId];
+    persistEndpoints(next);
     return next;
   });
-  if (baseUrl !== undefined) {
-    sub2ApiEndpoints.update((current) => {
-      const next = { ...current };
-      const endpoint = endpointLabel(baseUrl);
-      if (endpoint) next[providerId] = endpoint;
-      else delete next[providerId];
-      persistEndpoints(next);
-      return next;
-    });
-  }
 }
 
-export function forgetSub2ApiUpstream(providerId: string) {
-  sub2ApiUpstreams.update((current) => {
-    const next = { ...current };
-    delete next[providerId];
-    persist(next);
-    return next;
-  });
+export function forgetSub2ApiEndpoint(providerId: string) {
   sub2ApiEndpoints.update((current) => {
     const next = { ...current };
     delete next[providerId];

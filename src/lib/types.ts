@@ -320,11 +320,22 @@ export interface UpdateFailure {
   retryable: boolean;
 }
 
+/** What a Card shows and can Star, as the backend resolved it from the Card's Track. */
+export interface MetricPolicy {
+  /** The connection's Track; null for plain providers and Tracks not yet read. */
+  track: Sub2ApiSource | null;
+  visibleMetricIds: string[];
+  /** Metrics that can be given a new Star. A Star already given on a visible metric can be removed. */
+  starrableMetricIds: string[];
+  maxStars: number;
+}
+
 export interface SettingsViewState {
   settings: AppSettings;
   settingsRevision: number;
   accountRevision: number;
   renamableProviderIds: string[];
+  metricPolicies: Record<string, MetricPolicy>;
   notificationPermission: 'granted' | 'denied' | 'prompt' | 'unavailable';
   integrationError: string | null;
   trayAvailable: boolean;

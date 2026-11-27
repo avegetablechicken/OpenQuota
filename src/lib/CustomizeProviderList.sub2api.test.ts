@@ -2,8 +2,8 @@ import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomizeProviderList from './CustomizeProviderList.svelte';
 import { ProviderCatalogIndex } from './metrics';
-import { forgetSub2ApiUpstream } from './sub2ApiUpstreams';
-import type { AppSettings, ProviderCatalog } from './types';
+import { forgetSub2ApiEndpoint, syncSub2ApiTracks } from './sub2ApiUpstreams';
+import type { AppSettings, MetricPolicy, ProviderCatalog } from './types';
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
@@ -72,9 +72,16 @@ const settings: AppSettings = {
   detectionNoticeDismissed: true,
 };
 
+function policy(track: MetricPolicy['track']): MetricPolicy {
+  return { track, visibleMetricIds: [], starrableMetricIds: [], maxStars: 2 };
+}
+
+const claudeRelays = { 'sub2api@2': policy('claude'), 'sub2api@3': policy('claude') };
+
 describe('CustomizeProviderList Sub2API labels', () => {
   beforeEach(() => {
-    forgetSub2ApiUpstream('sub2api@2');
+    forgetSub2ApiEndpoint('sub2api@2');
+    syncSub2ApiTracks(claudeRelays);
     mocks.invoke.mockResolvedValue({
       configured: true,
       baseUrl: 'https://192.0.2.8:6060/api/v1',
@@ -85,8 +92,9 @@ describe('CustomizeProviderList Sub2API labels', () => {
 
   afterEach(() => {
     cleanup();
-    forgetSub2ApiUpstream('sub2api@2');
-    forgetSub2ApiUpstream('sub2api@3');
+    forgetSub2ApiEndpoint('sub2api@2');
+    forgetSub2ApiEndpoint('sub2api@3');
+    syncSub2ApiTracks({});
   });
 
   it.each([true, false])(
@@ -98,6 +106,7 @@ describe('CustomizeProviderList Sub2API labels', () => {
           providers: settings.providers.map((provider) => ({ ...provider, enabled })),
         },
         catalog: new ProviderCatalogIndex(catalog),
+        metricPolicies: claudeRelays,
         onOpen: vi.fn(),
         onChange: vi.fn(),
         onReorderStart: vi.fn(),
@@ -128,9 +137,12 @@ describe('CustomizeProviderList Sub2API labels', () => {
       email: '',
       upstream: 'codex',
     });
+    const unconfigured = { 'sub2api@2': policy(null) };
+    syncSub2ApiTracks(unconfigured);
     render(CustomizeProviderList, {
       settings,
       catalog: new ProviderCatalogIndex(catalog),
+      metricPolicies: unconfigured,
       onOpen: vi.fn(),
       onChange: vi.fn(),
       onReorderStart: vi.fn(),
@@ -177,6 +189,7 @@ describe('CustomizeProviderList Sub2API labels', () => {
     render(CustomizeProviderList, {
       settings: duplicateSettings,
       catalog: new ProviderCatalogIndex(duplicateCatalog),
+      metricPolicies: claudeRelays,
       onOpen: vi.fn(),
       onChange: vi.fn(),
       onReorderStart: vi.fn(),

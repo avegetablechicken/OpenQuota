@@ -18,6 +18,7 @@ function settingsView(
     settingsRevision,
     accountRevision,
     renamableProviderIds: [],
+    metricPolicies: {},
     notificationPermission: 'prompt',
     integrationError: null,
     trayAvailable: true,

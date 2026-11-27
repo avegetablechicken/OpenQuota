@@ -57,6 +57,7 @@
     sub2ApiUpstreamAccountName,
     sub2ApiUpstreams,
     sub2ApiSnapshotContext,
+    syncSub2ApiTracks,
   } from './lib/sub2ApiUpstreams';
   import RenameProviderSheet from './lib/RenameProviderSheet.svelte';
   import {
@@ -108,6 +109,9 @@
   const reducedMotion = $derived(
     systemReducedMotion || Boolean(settingsState?.settings.reduceAnimations),
   );
+  $effect(() => {
+    if (settingsState) syncSub2ApiTracks(settingsState.metricPolicies);
+  });
   const floatingWindow = $derived(
     !!settingsState &&
       (!settingsState.trayAvailable || settingsState.settings.windowMode === 'floating'),
@@ -471,6 +475,7 @@
           now,
           viewMode,
           isSub2ApiSubscription(parentSnapshot),
+          current.metricPolicies[providerId],
         );
       const rows = accounts
         ? accounts.flatMap((upstream) => [
@@ -1053,6 +1058,7 @@
                 {viewState}
                 {catalog}
                 renamableProviderIds={settingsState.renamableProviderIds}
+                metricPolicies={settingsState.metricPolicies}
                 settings={settingsState.settings}
                 {now}
                 onSettingsChange={saveSettings}
@@ -1096,6 +1102,7 @@
               <CustomizeProviderList
                 settings={settingsState.settings}
                 {catalog}
+                metricPolicies={settingsState.metricPolicies}
                 onOpen={(id) => void openProviderCustomization(id)}
                 onChange={saveCustomization}
                 onReorderStart={beginCustomizationGesture}
@@ -1109,6 +1116,7 @@
                 providerId={screen.slice(9)}
                 {catalog}
                 renamableProviderIds={settingsState.renamableProviderIds}
+                metricPolicy={settingsState.metricPolicies[screen.slice(9)]}
                 onChange={saveCustomization}
                 onNameChange={saveSettings}
                 onReorderStart={beginCustomizationGesture}

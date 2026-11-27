@@ -747,6 +747,7 @@ impl SettingsService {
             settings_revision,
             account_revision,
             renamable_provider_ids,
+            metric_policies: crate::metric_policy::views(&self.registry),
             notification_permission: notification_permission.into(),
             integration_error,
             tray_available,

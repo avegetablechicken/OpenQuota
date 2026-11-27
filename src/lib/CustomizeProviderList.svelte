@@ -2,16 +2,16 @@
   import { onMount } from 'svelte';
   import { flip } from 'svelte/animate';
   import { getSub2ApiConfigState } from './backend';
-  import type { AppSettings, ProviderLayout } from './types';
+  import type { AppSettings, MetricPolicy, ProviderLayout } from './types';
   import type { ProviderCatalogIndex } from './metrics';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
+  import { policyShows } from './metricPolicy';
   import {
-    rememberSub2ApiUpstream,
+    rememberSub2ApiEndpoint,
     sub2ApiEndpoints,
-    sub2ApiMetricSupported,
     sub2ApiUpstreamLabel,
     sub2ApiUpstreams,
   } from './sub2ApiUpstreams';
@@ -19,6 +19,7 @@
   interface Props {
     settings: AppSettings;
     catalog: ProviderCatalogIndex;
+    metricPolicies: Record<string, MetricPolicy>;
     onOpen: (providerId: string) => void;
     onChange: (settings: AppSettings) => void;
     onReorderStart: () => void;
@@ -29,6 +30,7 @@
   let {
     settings,
     catalog,
+    metricPolicies,
     onOpen,
     onChange,
     onReorderStart,
@@ -74,10 +76,8 @@
     },
   ]);
   function availableMetricCount(provider: ProviderLayout) {
-    const upstream = $sub2ApiUpstreams[provider.id];
-    return provider.metrics.filter((metric) =>
-      sub2ApiMetricSupported(provider.id, metric.id, upstream),
-    ).length;
+    return provider.metrics.filter((metric) => policyShows(metricPolicies[provider.id], metric.id))
+      .length;
   }
   const addableProvider = $derived(
     settings.providers.find(
@@ -118,13 +118,7 @@
       }
       void getSub2ApiConfigState(provider.id)
         .then((state) => {
-          if (state.configured) {
-            rememberSub2ApiUpstream(
-              provider.id,
-              state.mode === 'subscription' ? state.mode : state.upstream,
-              state.baseUrl,
-            );
-          }
+          if (state.configured) rememberSub2ApiEndpoint(provider.id, state.baseUrl);
         })
         .catch(() => undefined);
     }

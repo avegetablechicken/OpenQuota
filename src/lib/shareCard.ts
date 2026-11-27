@@ -22,6 +22,7 @@ import { PROVIDER_USAGE_SCOPE_LABELS, usageHistoriesForMode } from './usageScope
 import type {
   AppSettings,
   DailyUsage,
+  MetricPolicy,
   ProviderLayout,
   ProviderSnapshot,
   QuotaWindow,
@@ -118,6 +119,7 @@ export function buildProviderShareRows(
   now: number,
   viewMode: UsageViewMode = 'localDevice',
   tokensOnly?: boolean,
+  policy?: MetricPolicy,
 ) {
   const subscription = tokensOnly ?? isSub2ApiSubscription(snapshot);
   const alwaysVisible = layout.metrics.filter(
@@ -138,7 +140,7 @@ export function buildProviderShareRows(
 
   for (const metric of visible) {
     const definition = catalog.metric(metric.id);
-    if (!definition || !showSub2ApiMetric(snapshot, metric.id, subscription)) continue;
+    if (!definition || !showSub2ApiMetric(snapshot, metric.id, policy, subscription)) continue;
     const source = definition.source;
     if (source.kind === 'quota' || source.kind === 'quotaOrValue') {
       const quota = snapshot.quotas.find((item) => item.id === source.sourceId);

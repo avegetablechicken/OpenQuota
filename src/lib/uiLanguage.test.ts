@@ -65,7 +65,7 @@ describe('native UI language contract', () => {
     expect(customizeDetail).toContain('Drag metrics here');
     expect(customizeDetail).toContain('Starred for menu bar');
     expect(customizeDetail).toContain('Removed from menu bar');
-    expect(customizeDetail).toContain('Up to 2 stars per provider');
+    expect(customizeDetail).toContain('stars per provider');
     expect(customizeDetail).not.toContain('provider-toggle-row');
     expect(customizeDetail).not.toContain('section-divider');
     expect(customizeDetail).not.toContain('of 2 pinned');

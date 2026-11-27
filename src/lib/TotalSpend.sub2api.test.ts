@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import TotalSpend from './TotalSpend.svelte';
 import { chooseMenuItem, menuLabels } from '../test/nativeMenu';
 import { ProviderCatalogIndex } from './metrics';
-import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
+import { clearSub2ApiTrack, setSub2ApiTrack } from '../test/sub2ApiTracks';
 import type { AppSettings, ProviderCatalog, UsageHistory, UsageScope } from './types';
 
 const catalog: ProviderCatalog = {
@@ -96,13 +96,13 @@ function scopedUsage(tokens: number, scope: UsageScope = 'account') {
 describe('TotalSpend Sub2API labels', () => {
   afterEach(() => {
     cleanup();
-    forgetSub2ApiUpstream('sub2api');
-    forgetSub2ApiUpstream('sub2api@2');
+    clearSub2ApiTrack('sub2api');
+    clearSub2ApiTrack('sub2api@2');
   });
 
   it('uses upstream-aware names in the ring legend and inclusion note', () => {
-    rememberSub2ApiUpstream('sub2api', 'codex');
-    rememberSub2ApiUpstream('sub2api@2', 'claude');
+    setSub2ApiTrack('sub2api', 'codex');
+    setSub2ApiTrack('sub2api@2', 'claude');
 
     render(TotalSpend, {
       providers: [
@@ -166,8 +166,8 @@ describe('TotalSpend Sub2API labels', () => {
   });
 
   it('keeps independent Sub2API accounts visually distinct in Accounts and All', async () => {
-    rememberSub2ApiUpstream('sub2api', 'codex');
-    rememberSub2ApiUpstream('sub2api@2', 'claude');
+    setSub2ApiTrack('sub2api', 'codex');
+    setSub2ApiTrack('sub2api@2', 'claude');
     const props = {
       providers: [
         { id: 'sub2api', usageHistories: scopedUsage(100) },
@@ -199,7 +199,7 @@ describe('TotalSpend Sub2API labels', () => {
     expect(legendColors()[0]).toContain('--provider-sub2api-codex');
     expect(legendColors()[1]).toContain('--provider-sub2api-claude');
 
-    rememberSub2ApiUpstream('sub2api', 'claude');
+    setSub2ApiTrack('sub2api', 'claude');
     await waitFor(() => {
       expect(legendColors()[0]).toContain('--provider-sub2api-claude');
     });
@@ -213,7 +213,7 @@ describe('TotalSpend Sub2API labels', () => {
   });
 
   it('switches scopes without combining local and account usage', async () => {
-    rememberSub2ApiUpstream('sub2api', 'codex');
+    setSub2ApiTrack('sub2api', 'codex');
 
     const onViewModeChange = vi.fn();
     const props = {

@@ -2,8 +2,8 @@ import { cleanup, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import CustomizeProviderDetail from './CustomizeProviderDetail.svelte';
 import { ProviderCatalogIndex } from './metrics';
-import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
-import type { AppSettings, MetricDefinition, ProviderCatalog } from './types';
+import { syncSub2ApiTracks } from './sub2ApiUpstreams';
+import type { AppSettings, MetricDefinition, MetricPolicy, ProviderCatalog } from './types';
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
@@ -99,8 +99,20 @@ const settings: AppSettings = {
   detectionNoticeDismissed: true,
 };
 
+const visible = {
+  codex: ['session', 'spark', 'sparkWeekly', 'rateLimitResets'],
+  claude: ['session', 'sonnet', 'fable'],
+};
+
 function renderDetail(upstream: 'codex' | 'claude', renamableProviderIds: string[] = []) {
-  rememberSub2ApiUpstream('sub2api@2', upstream);
+  const ids = visible[upstream].map((suffix) => `sub2api@2.${suffix}`);
+  const metricPolicy: MetricPolicy = {
+    track: upstream,
+    visibleMetricIds: ids,
+    starrableMetricIds: ids,
+    maxStars: 2,
+  };
+  syncSub2ApiTracks({ 'sub2api@2': metricPolicy });
   mocks.invoke.mockResolvedValue({
     configured: true,
     baseUrl: 'https://sub2api.example.com',
@@ -112,6 +124,7 @@ function renderDetail(upstream: 'codex' | 'claude', renamableProviderIds: string
     providerId: 'sub2api@2',
     catalog: new ProviderCatalogIndex(catalog),
     renamableProviderIds,
+    metricPolicy,
     onChange: vi.fn(),
     onNameChange: vi.fn(),
     onReorderStart: vi.fn(),
@@ -123,7 +136,7 @@ function renderDetail(upstream: 'codex' | 'claude', renamableProviderIds: string
 describe('CustomizeProviderDetail Sub2API metric availability', () => {
   afterEach(() => {
     cleanup();
-    forgetSub2ApiUpstream('sub2api@2');
+    syncSub2ApiTracks({});
   });
 
   it('hides Codex-only metrics for a Claude upstream', () => {

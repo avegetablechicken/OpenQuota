@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { providerCatalog, providerCatalogIndex } from '../test/appFixtures';
+import { plainMetricPolicies, providerCatalog, providerCatalogIndex } from '../test/appFixtures';
 import CustomizeProviderDetail from './CustomizeProviderDetail.svelte';
 import CustomizeProviderList from './CustomizeProviderList.svelte';
 import { ProviderCatalogIndex } from './metrics';
@@ -107,6 +107,7 @@ describe('pointer reorder integrations', () => {
     render(CustomizeProviderDetail, {
       settings,
       providerId: 'claude',
+      metricPolicy: plainMetricPolicies()['claude'],
       catalog: providerCatalogIndex,
       renamableProviderIds: ['claude'],
       onChange,
@@ -131,6 +132,7 @@ describe('pointer reorder integrations', () => {
     render(CustomizeProviderDetail, {
       settings: { ...settings, providerNames: { claude: 'Work' } },
       providerId: 'claude',
+      metricPolicy: plainMetricPolicies()['claude'],
       catalog: providerCatalogIndex,
       renamableProviderIds: ['claude'],
       onChange: vi.fn(),
@@ -159,6 +161,7 @@ describe('pointer reorder integrations', () => {
     const { rerender } = render(CustomizeProviderDetail, {
       settings: independent,
       providerId: 'codex',
+      metricPolicy: plainMetricPolicies()['codex'],
       catalog: providerCatalogIndex,
       renamableProviderIds: [],
       onChange,
@@ -191,6 +194,7 @@ describe('pointer reorder integrations', () => {
     render(CustomizeProviderDetail, {
       settings,
       providerId: 'codex',
+      metricPolicy: plainMetricPolicies()['codex'],
       catalog: providerCatalogIndex,
       renamableProviderIds: [],
       onChange,
@@ -217,6 +221,7 @@ describe('pointer reorder integrations', () => {
     render(CustomizeProviderList, {
       settings,
       catalog: providerCatalogIndex,
+      metricPolicies: plainMetricPolicies(),
       onOpen: vi.fn(),
       onChange,
       onReorderStart,
@@ -244,6 +249,7 @@ describe('pointer reorder integrations', () => {
     render(CustomizeProviderList, {
       settings,
       catalog: providerCatalogIndex,
+      metricPolicies: plainMetricPolicies(),
       onOpen: vi.fn(),
       onChange,
       onReorderStart,
@@ -312,6 +318,7 @@ describe('pointer reorder integrations', () => {
     render(CustomizeProviderList, {
       settings: sub2apiSettings,
       catalog: new ProviderCatalogIndex(sub2apiCatalog),
+      metricPolicies: plainMetricPolicies(sub2apiCatalog),
       onOpen,
       onChange,
       onReorderStart: vi.fn(),
@@ -379,6 +386,7 @@ describe('pointer reorder integrations', () => {
     render(CustomizeProviderList, {
       settings: configured,
       catalog: new ProviderCatalogIndex(sub2apiCatalog),
+      metricPolicies: plainMetricPolicies(sub2apiCatalog),
       onOpen,
       onChange,
       onReorderStart: vi.fn(),
@@ -401,6 +409,7 @@ describe('pointer reorder integrations', () => {
     render(CustomizeProviderDetail, {
       settings,
       providerId: 'codex',
+      metricPolicy: plainMetricPolicies()['codex'],
       catalog: providerCatalogIndex,
       renamableProviderIds: [],
       onChange,

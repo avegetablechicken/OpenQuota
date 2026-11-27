@@ -966,6 +966,19 @@ impl AppSettings {
     }
 }
 
+/// What a Card shows and can Star, as the frontend renders it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricPolicyView {
+    /// The connection's Track; `None` for plain providers and Tracks not yet read.
+    pub track: Option<String>,
+    pub visible_metric_ids: Vec<String>,
+    /// Metrics that can be given a new Star. A Star already given on a visible metric can
+    /// always be removed.
+    pub starrable_metric_ids: Vec<String>,
+    pub max_stars: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsViewState {
@@ -973,6 +986,8 @@ pub struct SettingsViewState {
     pub settings_revision: u64,
     pub account_revision: u64,
     pub renamable_provider_ids: Vec<String>,
+    /// Each provider's metric policy, by provider id.
+    pub metric_policies: BTreeMap<String, MetricPolicyView>,
     pub notification_permission: String,
     pub integration_error: Option<String>,
     pub tray_available: bool,

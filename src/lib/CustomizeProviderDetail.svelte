@@ -2,7 +2,13 @@
   import { onDestroy } from 'svelte';
   import { flip } from 'svelte/animate';
   import type { ProviderCatalogIndex } from './metrics';
-  import type { AppSettings, MetricLayout, MetricSection, ProviderLayout } from './types';
+  import type {
+    AppSettings,
+    MetricLayout,
+    MetricPolicy,
+    MetricSection,
+    ProviderLayout,
+  } from './types';
   import Icon from './Icon.svelte';
   import ProviderApiKeySection from './ProviderApiKeySection.svelte';
   import ProviderProxySection from './ProviderProxySection.svelte';
@@ -11,13 +17,15 @@
   import { reorderFlip } from './motion';
   import { pointerReorder } from './pointerReorder';
   import { canRenameProvider } from './providerNames';
-  import { sub2ApiPinAllowed, sub2ApiMetricSupported, sub2ApiUpstreams } from './sub2ApiUpstreams';
+  import { canAddStar, canToggleStar, policyShows } from './metricPolicy';
+  import { sub2ApiUpstreams } from './sub2ApiUpstreams';
 
   interface Props {
     settings: AppSettings;
     providerId: string;
     catalog: ProviderCatalogIndex;
     renamableProviderIds: string[];
+    metricPolicy: MetricPolicy | undefined;
     onChange: (settings: AppSettings) => void;
     onNameChange: (settings: AppSettings) => void;
     onReorderStart: () => void;
@@ -31,6 +39,7 @@
     providerId,
     catalog,
     renamableProviderIds,
+    metricPolicy,
     onChange,
     onNameChange,
     onReorderStart,
@@ -51,8 +60,7 @@
     if (messageTimer) clearTimeout(messageTimer);
   });
   const provider = $derived(settings.providers.find((item) => item.id === providerId));
-  const metricSupported = (metricId: string) =>
-    sub2ApiMetricSupported(providerId, metricId, $sub2ApiUpstreams[providerId]);
+  const metricSupported = (metricId: string) => policyShows(metricPolicy, metricId);
 
   function updateProvider(next: ProviderLayout) {
     onChange({
@@ -68,19 +76,12 @@
     });
   }
   function canTogglePin(metric: MetricLayout) {
-    return (
-      metricDefinition(metric.id)?.pinnable &&
-      metricSupported(metric.id) &&
-      (metric.pinned || sub2ApiPinAllowed(metric.id, $sub2ApiUpstreams[providerId]))
-    );
+    return canToggleStar(metricPolicy, metric);
   }
   function togglePin(metric: MetricLayout, button: HTMLButtonElement) {
     if (!provider || !canTogglePin(metric)) return;
-    if (
-      !metric.pinned &&
-      provider.metrics.filter((item) => item.pinned && metricSupported(item.id)).length >= 2
-    ) {
-      showMessage('Up to 2 stars per provider', 'denied');
+    if (!metric.pinned && !canAddStar(metricPolicy, provider.metrics)) {
+      showMessage(`Up to ${metricPolicy?.maxStars} stars per provider`, 'denied');
       if (!reducedMotion) {
         button.animate?.(
           [

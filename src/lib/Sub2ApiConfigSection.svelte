@@ -13,8 +13,8 @@
   import SelectMenu from './SelectMenu.svelte';
   import { saveShortcut } from './saveShortcut';
   import {
-    forgetSub2ApiUpstream,
-    rememberSub2ApiUpstream,
+    forgetSub2ApiEndpoint,
+    rememberSub2ApiEndpoint,
     sub2ApiPublicName,
     sub2ApiResolvesProviderNames,
     sub2ApiUpstreamLabel,
@@ -215,14 +215,9 @@
     providerResolution += 1;
   }
 
-  function syncRememberedUpstream(next: Sub2ApiConfigState) {
-    if (next.configured)
-      rememberSub2ApiUpstream(
-        providerId,
-        next.mode === 'subscription' ? next.mode : next.upstream,
-        next.baseUrl,
-      );
-    else forgetSub2ApiUpstream(providerId);
+  function syncRememberedEndpoint(next: Sub2ApiConfigState) {
+    if (next.configured) rememberSub2ApiEndpoint(providerId, next.baseUrl);
+    else forgetSub2ApiEndpoint(providerId);
   }
 
   function toggleEditor() {
@@ -344,18 +339,18 @@
     saving = true;
     error = null;
     connectionState = optimisticState;
-    syncRememberedUpstream(optimisticState);
+    syncRememberedEndpoint(optimisticState);
     resetEditor(optimisticState);
     open = false;
     await tick();
     toggleButton?.focus();
     try {
       connectionState = await saveSub2ApiConfig(providerId, submitted);
-      syncRememberedUpstream(connectionState);
+      syncRememberedEndpoint(connectionState);
       resetEditor(connectionState);
     } catch (cause) {
       connectionState = previousState;
-      syncRememberedUpstream(previousState);
+      syncRememberedEndpoint(previousState);
       resetEditor(previousState);
       baseUrl = submitted.baseUrl;
       providerName = submitted.codexProvider;
@@ -381,7 +376,7 @@
     error = null;
     try {
       connectionState = await clearSub2ApiConfig(providerId);
-      syncRememberedUpstream(connectionState);
+      syncRememberedEndpoint(connectionState);
       resetEditor(connectionState);
       await tick();
       clearButton?.focus();
@@ -398,7 +393,7 @@
     error = null;
     try {
       connectionState = await deleteSub2ApiConfig(providerId);
-      forgetSub2ApiUpstream(providerId);
+      forgetSub2ApiEndpoint(providerId);
       resetEditor(connectionState);
       confirmingItemRemoval = false;
       open = false;
@@ -456,7 +451,7 @@
       .then((next) => {
         if (connectionState !== initialState) return;
         connectionState = next;
-        syncRememberedUpstream(next);
+        syncRememberedEndpoint(next);
         // Add can open before the initial read completes. Keep the in-progress
         // drafts when the backend confirms there was no saved connection.
         if (next.configured || !open) resetEditor(next);

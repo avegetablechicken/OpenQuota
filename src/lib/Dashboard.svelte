@@ -22,14 +22,11 @@
   import type { SpendProjection } from './totalSpend';
   import type { ProviderCatalogIndex } from './metrics';
   import { canRenameProvider } from './providerNames';
+  import { canAddStar, canToggleStar } from './metricPolicy';
   import {
     isSub2ApiSubscription,
     showSub2ApiMetric,
-    sub2ApiMetricSupported,
     sub2ApiUpstreamAccountName,
-    sub2ApiUpstreamOptions,
-    sub2ApiPinAllowed,
-    sub2ApiUpstreams,
   } from './sub2ApiUpstreams';
   import { popupMenu, type NativeMenuEntry } from './nativeMenu';
   import {
@@ -40,6 +37,7 @@
   import type {
     AppSettings,
     MetricLayout,
+    MetricPolicy,
     ProviderLayout,
     ProviderSnapshot,
     UpdateProgress,
@@ -57,6 +55,7 @@
     now: number;
     catalog: ProviderCatalogIndex;
     renamableProviderIds: string[];
+    metricPolicies: Record<string, MetricPolicy>;
     onSettingsChange: (settings: AppSettings) => void;
     onCustomizationChange: (settings: AppSettings) => void;
     onReorderStart: () => void;
@@ -88,6 +87,7 @@
     now,
     catalog,
     renamableProviderIds,
+    metricPolicies,
     onSettingsChange,
     onCustomizationChange,
     onReorderStart,
@@ -201,14 +201,6 @@
   const providerMessage = (id: string, message: string) =>
     catalog.displayMessage(id, message, providerDisplayName(id));
   const providerSupportsSpend = (id: string) => catalog.supportsSpend(id);
-  function connectionSource(providerId: string) {
-    const snapshot = viewState.providers[providerId]?.snapshot;
-    if (isSub2ApiSubscription(snapshot)) return 'subscription';
-    return (
-      sub2ApiUpstreamOptions.find((upstream) => upstream === snapshot?.upstreamProviderId) ??
-      $sub2ApiUpstreams[providerId]
-    );
-  }
   function emptyProviderSnapshot(providerId: string): ProviderSnapshot {
     return {
       providerId,
@@ -274,8 +266,8 @@
             !showSub2ApiMetric(
               snapshot,
               metric.id,
+              metricPolicies[provider.id],
               isSub2ApiSubscription(state?.snapshot),
-              connectionSource(provider.id),
             )
           )
             return false;
@@ -457,19 +449,11 @@
     const entries: NativeMenuEntry[] = [
       { text: 'Hide', action: () => patchMetric(providerId, metricId, { enabled: false }) },
     ];
-    const source = connectionSource(providerId);
-    if (
-      metricDefinition(metricId)?.pinnable &&
-      (metric.pinned || sub2ApiPinAllowed(metricId, source))
-    ) {
+    const policy = metricPolicies[providerId];
+    if (canToggleStar(policy, metric)) {
       entries.push({
         text: metric.pinned ? 'Unstar' : 'Star for menu bar',
-        // At most two stars per provider.
-        enabled:
-          metric.pinned ||
-          provider.metrics.filter(
-            (item) => item.pinned && sub2ApiMetricSupported(providerId, item.id, source),
-          ).length < 2,
+        enabled: metric.pinned || canAddStar(policy, provider.metrics),
         action: () => patchMetric(providerId, metricId, { pinned: !metric.pinned }),
       });
     }

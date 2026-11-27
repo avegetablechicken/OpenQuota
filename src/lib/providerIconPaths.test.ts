@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import tokensCss from '../styles/tokens.css?raw';
 import { providerIconColor, providerSpendColorVariable } from './providerIconPaths';
-import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
+import { clearSub2ApiTrack, setSub2ApiTrack } from '../test/sub2ApiTracks';
 
 describe('Sub2API account colors', () => {
   it.each(['codex', 'claude', 'antigravity', 'grok'] as const)(
@@ -22,19 +22,19 @@ describe('Sub2API account colors', () => {
 
   it('keeps a remembered account color stable when other accounts change', () => {
     try {
-      rememberSub2ApiUpstream('sub2api@2', 'claude');
+      setSub2ApiTrack('sub2api@2', 'claude');
       const icon = providerIconColor('sub2api@2');
       const chart = providerSpendColorVariable('sub2api@2');
       expect(icon).toBe('#39D9E7');
       expect(chart).toBe('--provider-sub2api-claude-2');
-      rememberSub2ApiUpstream('sub2api', 'claude');
+      setSub2ApiTrack('sub2api', 'claude');
       expect(providerIconColor('sub2api@2')).toBe(icon);
-      forgetSub2ApiUpstream('sub2api');
+      clearSub2ApiTrack('sub2api');
       expect(providerSpendColorVariable('sub2api@2')).toBe(chart);
       expect(providerIconColor('sub2api@2')).toBe(icon);
     } finally {
-      forgetSub2ApiUpstream('sub2api');
-      forgetSub2ApiUpstream('sub2api@2');
+      clearSub2ApiTrack('sub2api');
+      clearSub2ApiTrack('sub2api@2');
     }
   });
 });

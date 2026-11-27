@@ -5,17 +5,21 @@ import { chooseMenuItem, openMenu } from '../test/nativeMenu';
 import Dashboard from './Dashboard.svelte';
 import { ProviderCatalogIndex } from './metrics';
 import { buildProviderShareRows } from './shareCard';
-import { forgetSub2ApiUpstream, rememberSub2ApiUpstream } from './sub2ApiUpstreams';
-import type { MetricDefinition, ProviderSnapshot, Sub2ApiSource } from './types';
+import type { MetricDefinition, MetricPolicy, ProviderSnapshot } from './types';
 
-afterEach(() => {
-  cleanup();
-  forgetSub2ApiUpstream('sub2api');
-});
+afterEach(() => cleanup());
 
-function dashboard(source: Sub2ApiSource = 'subscription', pins = ['session', 'spark']) {
-  // A cached label may still describe the previous track; the live snapshot owns its data.
-  rememberSub2ApiUpstream('sub2api', 'codex', 'https://example.com');
+function policy(track: 'subscription' | 'claude', visible: string[]): MetricPolicy {
+  const ids = visible.map((suffix) => `sub2api.${suffix}`);
+  return { track, visibleMetricIds: ids, starrableMetricIds: ids, maxStars: 2 };
+}
+
+const policies = {
+  subscription: policy('subscription', ['weekly', 'daily']),
+  claude: policy('claude', ['session', 'weekly', 'sonnet']),
+};
+
+function dashboard(source: keyof typeof policies = 'subscription', pins = ['session', 'spark']) {
   const definitions: MetricDefinition[] = ['session', 'spark', 'weekly', 'daily', 'sonnet'].map(
     (id) => ({
       id: `sub2api.${id}`,
@@ -92,6 +96,7 @@ function dashboard(source: Sub2ApiSource = 'subscription', pins = ['session', 's
     catalog,
     now,
     renamableProviderIds: [],
+    metricPolicies: { sub2api: policies[source] },
     reducedMotion: true,
     viewState: {
       providers: {
@@ -140,7 +145,7 @@ it('hides retained admin metrics in subscriptions without changing saved prefere
   expect(onCustomizationChange).not.toHaveBeenCalled();
 });
 
-it('uses the current admin upstream to hide retained quotas of a different upstream', () => {
+it('uses the current admin track to hide retained quotas of a different upstream', () => {
   dashboard('claude');
   expect(screen.queryByRole('group', { name: 'spark options' })).not.toBeInTheDocument();
   expect(screen.queryByRole('group', { name: 'daily options' })).not.toBeInTheDocument();
@@ -181,6 +186,7 @@ it.each(['subscription', 'claude'] as const)('shares only supported %s metrics',
     now,
     'all',
     source === 'subscription',
+    policies[source],
   );
   const labels = rows.map((row) => row.label);
   expect(labels).not.toContain('spark');

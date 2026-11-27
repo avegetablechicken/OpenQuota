@@ -1,6 +1,7 @@
 import { ProviderCatalogIndex } from '../lib/metrics';
 import type {
   MetricDefinition,
+  MetricPolicy,
   ProviderCatalog,
   ProviderViewState,
   SettingsViewState,
@@ -348,10 +349,30 @@ export const antigravityState: ProviderViewState = {
   },
 };
 
+/** The policies the backend sends for plain providers: every metric shows, pinnable ones Star. */
+export function plainMetricPolicies(
+  catalog: ProviderCatalog = providerCatalog,
+): Record<string, MetricPolicy> {
+  return Object.fromEntries(
+    catalog.providers.map((provider) => [
+      provider.id,
+      {
+        track: null,
+        visibleMetricIds: provider.metrics.map((metric) => metric.id),
+        starrableMetricIds: provider.metrics
+          .filter((metric) => metric.pinnable)
+          .map((metric) => metric.id),
+        maxStars: 2,
+      },
+    ]),
+  );
+}
+
 export const settingsState: SettingsViewState = {
   settingsRevision: 0,
   accountRevision: 0,
   renamableProviderIds: ['claude', 'codex'],
+  metricPolicies: plainMetricPolicies(),
   notificationPermission: 'prompt',
   integrationError: null,
   trayAvailable: true,

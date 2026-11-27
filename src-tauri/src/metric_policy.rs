@@ -3,15 +3,44 @@
 //! Plain providers show every metric. A Sub2API connection's Track decides what its Card shows:
 //! each Track reports only some of the connection's metrics.
 
+use std::collections::BTreeMap;
+
 #[cfg(any(target_os = "macos", test))]
 use crate::models::MetricLayout;
+use crate::models::MetricPolicyView;
 use crate::providers::{sub2api, ProviderRegistry};
 
 /// The most Stars a Card can have. Only metrics the Card shows count toward it.
 pub const MAX_STARS: usize = 2;
 
+/// Every provider's policy, for the settings view state.
+pub fn views(registry: &ProviderRegistry) -> BTreeMap<String, MetricPolicyView> {
+    registry
+        .catalog()
+        .providers
+        .iter()
+        .map(|definition| {
+            let policy = MetricPolicy::for_provider(registry, &definition.id);
+            let ids = |keep: &dyn Fn(&str) -> bool| {
+                definition
+                    .metrics
+                    .iter()
+                    .filter(|metric| keep(&metric.id))
+                    .map(|metric| metric.id.clone())
+                    .collect()
+            };
+            let view = MetricPolicyView {
+                track: policy.track().map(str::to_owned),
+                visible_metric_ids: ids(&|id| policy.shows(id)),
+                starrable_metric_ids: ids(&|id| policy.starrable(id)),
+                max_stars: MAX_STARS,
+            };
+            (definition.id.clone(), view)
+        })
+        .collect()
+}
+
 pub struct MetricPolicy<'a> {
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     registry: &'a ProviderRegistry,
     provider_id: &'a str,
     kind: Kind,
@@ -81,7 +110,6 @@ impl<'a> MetricPolicy<'a> {
     }
 
     /// Whether this metric can be given a Star. Subscriptions Star only their percentage metrics.
-    #[cfg(any(target_os = "macos", test))]
     pub fn starrable(&self, metric_id: &str) -> bool {
         self.pinnable(metric_id) && self.shows(metric_id) && self.star_allowed(metric_id)
     }
@@ -110,14 +138,12 @@ impl<'a> MetricPolicy<'a> {
         self.stars(metrics) < MAX_STARS
     }
 
-    #[cfg(any(target_os = "macos", test))]
     fn pinnable(&self, metric_id: &str) -> bool {
         self.registry
             .metric(metric_id)
             .is_some_and(|definition| definition.pinnable)
     }
 
-    #[cfg(any(target_os = "macos", test))]
     fn star_allowed(&self, metric_id: &str) -> bool {
         self.track() != Some("subscription") || sub2api::subscription_percentage_metric(metric_id)
     }
@@ -127,7 +153,7 @@ impl<'a> MetricPolicy<'a> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{MetricPolicy, MAX_STARS};
+    use super::{views, MetricPolicy, MAX_STARS};
     use crate::models::{MetricLayout, MetricSection, ProviderDefinition, ProviderSnapshot};
     use crate::providers::{codex, sub2api, ProviderError, ProviderRegistry, UsageProvider};
 
@@ -297,5 +323,32 @@ mod tests {
         metrics[3].pinned = true;
         assert_eq!(policy.stars(&metrics), MAX_STARS);
         assert!(!policy.can_add_star(&metrics));
+    }
+
+    #[test]
+    fn the_view_lists_each_providers_visible_and_starrable_metrics() {
+        let registry = registry_on(Some("subscription"));
+        let views = views(&registry);
+        let connection = &views[CONNECTION];
+        assert_eq!(connection.track.as_deref(), Some("subscription"));
+        assert_eq!(connection.max_stars, MAX_STARS);
+        let id = |suffix: &str| metric(suffix, false).id;
+        assert!(connection.visible_metric_ids.contains(&id("today")));
+        assert!(!connection.visible_metric_ids.contains(&id("session")));
+        assert!(connection.starrable_metric_ids.contains(&id("weekly")));
+        assert!(!connection.starrable_metric_ids.contains(&id("today")));
+
+        let plain = &views["codex"];
+        assert_eq!(plain.track, None);
+        let definition = codex::definition();
+        assert_eq!(plain.visible_metric_ids.len(), definition.metrics.len());
+        assert_eq!(
+            plain.starrable_metric_ids.len(),
+            definition
+                .metrics
+                .iter()
+                .filter(|metric| metric.pinnable)
+                .count()
+        );
     }
 }
