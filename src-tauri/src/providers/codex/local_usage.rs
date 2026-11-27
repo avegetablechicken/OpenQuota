@@ -21,7 +21,7 @@ use crate::providers::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, PriceSource, UsageObservation},
     home_clients::{self, Card, FoldContext},
-    log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
+    log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,51 +97,39 @@ pub fn scan_local_usage(
     )
 }
 
-static LOADED_EVENTS: LoadedEventsMemo<TokenEvent> = LoadedEventsMemo::new();
+struct CodexLogs;
 
+impl LogFormat for CodexLogs {
+    type Event = TokenEvent;
+    type Context = ();
+    const PROVIDER_ID: &'static str = "codex";
+    const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
+
+    fn parse(content: &str, _context: &()) -> Vec<TokenEvent> {
+        parse_jsonl(content)
+    }
+
+    fn timestamp(event: &TokenEvent) -> DateTime<Utc> {
+        event.timestamp
+    }
+}
+
+static LOGS: LocalLogs<CodexLogs> = LocalLogs::new();
+
+/// Codex events are deduplicated while aggregating, not here.
 fn scan_codex_events(
     storage: &Storage,
     homes: &[PathBuf],
     since_date: NaiveDate,
 ) -> Result<std::sync::Arc<Vec<TokenEvent>>, CodexError> {
-    let paths = discover_session_files(homes);
-    LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
-        load_session_files(storage, paths, since_date)
-    })
-}
-
-fn load_session_files(
-    storage: &Storage,
-    paths: Vec<PathBuf>,
-    since_date: NaiveDate,
-) -> Result<Vec<TokenEvent>, CodexError> {
-    let mut events = Vec::new();
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-
-    for path in paths {
-        seen_paths.insert(path.clone());
-        let Some(parsed) = load_or_parse_log(
-            storage,
-            "codex",
-            &path,
-            LOG_CACHE_SCHEMA_VERSION,
-            parse_jsonl,
-        )
+    let files = discover_session_files(homes)
+        .into_iter()
+        .map(|path| (path, ()));
+    LOGS.load(storage, since_date, files)
         .map_err(|error| match error {
             LogCacheError::Storage(_) => CodexError::Storage,
-            LogCacheError::Encode(_) => CodexError::LocalUsage,
-        })?
-        else {
-            continue;
-        };
-        events.extend(
-            parsed
-                .into_iter()
-                .filter(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date),
-        );
-    }
-    storage.prune_log_events("codex", &seen_paths)?;
-    Ok(events)
+            LogCacheError::Encode(_) | LogCacheError::Unreadable => CodexError::LocalUsage,
+        })
 }
 
 fn codex_homes(configured_home: Option<&OsStr>, home: &Path) -> Vec<PathBuf> {

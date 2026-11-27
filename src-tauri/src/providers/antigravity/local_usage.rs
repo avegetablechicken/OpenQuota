@@ -19,7 +19,7 @@ use crate::providers::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, UsageObservation},
     home_clients::{self, Card, FoldContext, HomeClient},
-    log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
+    log_usage::{parse_log_timestamp, LocalLogs, LogFormat},
 };
 
 pub(super) const USAGE_SOURCE_NOTE: &str = "From your Antigravity transcripts (estimated)";
@@ -64,49 +64,39 @@ fn default_roots() -> Vec<PathBuf> {
     )
 }
 
-static LOADED_EVENTS: LoadedEventsMemo<AntigravityTokenEvent> = LoadedEventsMemo::new();
+struct AntigravityLogs;
+
+impl LogFormat for AntigravityLogs {
+    type Event = AntigravityTokenEvent;
+    type Context = ();
+    const PROVIDER_ID: &'static str = "antigravity";
+    const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
+
+    fn parse(content: &str, _context: &()) -> Vec<AntigravityTokenEvent> {
+        parse_jsonl(content)
+    }
+
+    fn timestamp(event: &AntigravityTokenEvent) -> DateTime<Utc> {
+        event.timestamp
+    }
+
+    fn deduplicate(events: Vec<AntigravityTokenEvent>) -> Vec<AntigravityTokenEvent> {
+        deduplicate(events)
+    }
+}
+
+static LOGS: LocalLogs<AntigravityLogs> = LocalLogs::new();
 
 fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
     since_date: NaiveDate,
 ) -> Result<std::sync::Arc<Vec<AntigravityTokenEvent>>, AntigravityError> {
-    let paths = discover_transcript_files(roots);
-    LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
-        load_transcript_files(storage, paths, since_date)
-    })
-}
-
-fn load_transcript_files(
-    storage: &Storage,
-    paths: Vec<PathBuf>,
-    since_date: NaiveDate,
-) -> Result<Vec<AntigravityTokenEvent>, AntigravityError> {
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-    let mut events = Vec::new();
-    for path in paths {
-        seen_paths.insert(path.clone());
-        let Some(parsed) = load_or_parse_log(
-            storage,
-            "antigravity",
-            &path,
-            LOG_CACHE_SCHEMA_VERSION,
-            parse_jsonl,
-        )
-        .map_err(|_| AntigravityError::LocalUsage)?
-        else {
-            continue;
-        };
-        events.extend(
-            parsed
-                .into_iter()
-                .filter(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date),
-        );
-    }
-    storage
-        .prune_log_events("antigravity", &seen_paths)
-        .map_err(|_| AntigravityError::LocalUsage)?;
-    Ok(deduplicate(events))
+    let files = discover_transcript_files(roots)
+        .into_iter()
+        .map(|path| (path, ()));
+    LOGS.load(storage, since_date, files)
+        .map_err(|_| AntigravityError::LocalUsage)
 }
 
 fn deduplicate(events: Vec<AntigravityTokenEvent>) -> Vec<AntigravityTokenEvent> {

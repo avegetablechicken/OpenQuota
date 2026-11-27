@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -15,7 +15,7 @@ use crate::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, UsageObservation},
         home_clients::{self, Card, FoldContext, HomeClient},
-        log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
+        log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
     },
     storage::Storage,
 };
@@ -95,40 +95,41 @@ struct TokenEvent {
     reasoning: u64,
 }
 
-static LOADED_EVENTS: LoadedEventsMemo<TokenEvent> = LoadedEventsMemo::new();
+struct GrokLogs;
+
+impl LogFormat for GrokLogs {
+    type Event = TokenEvent;
+    type Context = ();
+    const PROVIDER_ID: &'static str = "grok";
+    const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
+    /// Grok writes one log, so an unreadable log leaves nothing to show.
+    const UNREADABLE_FAILS: bool = true;
+
+    fn parse(content: &str, _context: &()) -> Vec<TokenEvent> {
+        parse_jsonl(content)
+    }
+
+    fn timestamp(event: &TokenEvent) -> DateTime<Utc> {
+        event.timestamp
+    }
+}
+
+static LOGS: LocalLogs<GrokLogs> = LocalLogs::new();
 
 fn load_events(
     storage: &Storage,
     path: &Path,
 ) -> Result<std::sync::Arc<Vec<TokenEvent>>, GrokError> {
-    LOADED_EVENTS.load(storage, [path.to_path_buf()], NaiveDate::MIN, || {
-        load_log_file(storage, path)
-    })
-}
-
-fn load_log_file(storage: &Storage, path: &Path) -> Result<Vec<TokenEvent>, GrokError> {
-    let (events, seen_paths) = match fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => (
-            load_or_parse_log(storage, "grok", path, LOG_CACHE_SCHEMA_VERSION, parse_jsonl)
-                .map_err(|error| match error {
-                    LogCacheError::Storage(_) => GrokError::Storage,
-                    LogCacheError::Encode(_) => GrokError::LocalUsage,
-                })?
-                .ok_or(GrokError::LocalUsage)?,
-            HashSet::from([path.to_path_buf()]),
-        ),
-        Ok(_) => {
-            crate::app_warn!("plugin:grok", "local usage log path is not a file");
-            return Err(GrokError::LocalUsage);
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Vec::new(), HashSet::new()),
-        Err(_) => {
-            crate::app_warn!("plugin:grok", "local usage log metadata could not be read");
-            return Err(GrokError::LocalUsage);
-        }
+    // No log yet means no usage; anything else at the path must be a readable log.
+    let files = match fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        _ => Some((path.to_path_buf(), ())),
     };
-    storage.prune_log_events("grok", &seen_paths)?;
-    Ok(events)
+    LOGS.load(storage, NaiveDate::MIN, files)
+        .map_err(|error| match error {
+            LogCacheError::Storage(_) => GrokError::Storage,
+            LogCacheError::Encode(_) | LogCacheError::Unreadable => GrokError::LocalUsage,
+        })
 }
 
 fn scan_path(

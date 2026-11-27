@@ -20,7 +20,7 @@ use crate::providers::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, UsageObservation},
     home_clients::{self, Card, FoldContext},
-    log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
+    log_usage::{parse_log_timestamp, LocalLogs, LogFormat},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -50,48 +50,36 @@ impl ClaudeTokenEvent {
     }
 }
 
-static LOADED_EVENTS: LoadedEventsMemo<ClaudeTokenEvent> = LoadedEventsMemo::new();
+struct ClaudeLogs;
+
+impl LogFormat for ClaudeLogs {
+    type Event = ClaudeTokenEvent;
+    type Context = ();
+    const PROVIDER_ID: &'static str = "claude";
+    const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
+
+    fn parse(content: &str, _context: &()) -> Vec<ClaudeTokenEvent> {
+        parse_jsonl(content)
+    }
+
+    fn timestamp(event: &ClaudeTokenEvent) -> DateTime<Utc> {
+        event.timestamp
+    }
+
+    fn deduplicate(events: Vec<ClaudeTokenEvent>) -> Vec<ClaudeTokenEvent> {
+        deduplicate(events)
+    }
+}
+
+static LOGS: LocalLogs<ClaudeLogs> = LocalLogs::new();
 
 fn load_local_events(
     storage: &Storage,
     since_date: NaiveDate,
 ) -> Result<std::sync::Arc<Vec<ClaudeTokenEvent>>, ClaudeError> {
-    let paths = discover_files();
-    LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
-        load_files(storage, paths, since_date)
-    })
-}
-
-fn load_files(
-    storage: &Storage,
-    paths: Vec<PathBuf>,
-    since_date: NaiveDate,
-) -> Result<Vec<ClaudeTokenEvent>, ClaudeError> {
-    let mut events = Vec::new();
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-    for path in paths {
-        seen_paths.insert(path.clone());
-        let Some(parsed) = load_or_parse_log(
-            storage,
-            "claude",
-            &path,
-            LOG_CACHE_SCHEMA_VERSION,
-            parse_jsonl,
-        )
-        .map_err(|_| ClaudeError::LocalUsage)?
-        else {
-            continue;
-        };
-        events.extend(
-            parsed
-                .into_iter()
-                .filter(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date),
-        );
-    }
-    storage
-        .prune_log_events("claude", &seen_paths)
-        .map_err(|_| ClaudeError::LocalUsage)?;
-    Ok(deduplicate(events))
+    let files = discover_files().into_iter().map(|path| (path, ()));
+    LOGS.load(storage, since_date, files)
+        .map_err(|_| ClaudeError::LocalUsage)
 }
 
 pub(crate) fn scan_routed_usage_into(

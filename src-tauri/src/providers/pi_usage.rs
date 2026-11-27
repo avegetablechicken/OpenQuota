@@ -17,7 +17,7 @@ use crate::{
 use super::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, UsageObservation},
-    log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
+    log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
     model_scope::{card_for_model, normalize_provider_model},
 };
 
@@ -96,62 +96,44 @@ fn scan_directories_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<PiUsageSources, LogCacheError> {
-    let paths = directories
-        .iter()
-        .flat_map(|(source, directory)| {
-            discover_files(directory)
-                .into_iter()
-                .map(|path| (*source, path))
-        })
-        .collect::<Vec<_>>();
-    let files = paths
-        .iter()
-        .map(|(_, path)| path.clone())
-        .collect::<Vec<_>>();
-    // Events carry the client their file belongs to, which can change while the file does not.
-    let sources = paths
-        .iter()
-        .map(|(source, _)| match source {
-            PiUsageSource::Pi => 'p',
-            PiUsageSource::OhMyPi => 'o',
-        })
-        .collect::<String>();
-    let events = LOADED_EVENTS.load_in_context(storage, sources, files, NaiveDate::MIN, || {
-        load_session_files(storage, paths)
-    })?;
+    let files = directories.iter().flat_map(|(source, directory)| {
+        discover_files(directory)
+            .into_iter()
+            .map(|path| (path, *source))
+    });
+    let events = LOGS.load(storage, NaiveDate::MIN, files)?;
 
     Ok(aggregate_into(&events, card_id, now, pricing, accumulator))
 }
 
-static LOADED_EVENTS: LoadedEventsMemo<PiUsageEvent> = LoadedEventsMemo::new();
+struct PiLogs;
 
-fn load_session_files(
-    storage: &Storage,
-    paths: Vec<(PiUsageSource, PathBuf)>,
-) -> Result<Vec<PiUsageEvent>, LogCacheError> {
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-    let mut events = Vec::new();
-    for (source, path) in paths {
-        if !seen_paths.insert(path.clone()) {
-            continue;
-        }
-        let Some(parsed) =
-            load_or_parse_log(storage, "pi", &path, LOG_CACHE_SCHEMA_VERSION, |content| {
-                parse_jsonl(content, source)
-            })?
-        else {
-            continue;
-        };
-        // The stored events keep the client the file belonged to when it was parsed.
-        events.extend(
-            parsed
-                .into_iter()
-                .map(|event| PiUsageEvent { source, ..event }),
-        );
+impl LogFormat for PiLogs {
+    type Event = PiUsageEvent;
+    /// The client the file's directory belongs to, which can change while the file does not.
+    type Context = PiUsageSource;
+    const PROVIDER_ID: &'static str = "pi";
+    const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
+
+    fn parse(content: &str, source: &PiUsageSource) -> Vec<PiUsageEvent> {
+        parse_jsonl(content, *source)
     }
-    storage.prune_log_events("pi", &seen_paths)?;
-    Ok(deduplicate(events))
+
+    fn timestamp(event: &PiUsageEvent) -> DateTime<Utc> {
+        event.timestamp
+    }
+
+    /// The cached events keep the client the file belonged to when it was parsed.
+    fn attach(event: &mut PiUsageEvent, source: &PiUsageSource) {
+        event.source = *source;
+    }
+
+    fn deduplicate(events: Vec<PiUsageEvent>) -> Vec<PiUsageEvent> {
+        deduplicate(events)
+    }
 }
+
+static LOGS: LocalLogs<PiLogs> = LocalLogs::new();
 
 fn sessions_directories(
     session_override: Option<&str>,

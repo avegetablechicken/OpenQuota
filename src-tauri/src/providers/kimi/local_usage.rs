@@ -15,7 +15,7 @@ use crate::{
     providers::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, UsageObservation},
-        log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
+        log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
     },
     storage::Storage,
 };
@@ -110,56 +110,47 @@ fn scan_roots_into(
     Ok(aggregate_into(&events, now, pricing, card_id, accumulator))
 }
 
-static LOADED_EVENTS: LoadedEventsMemo<KimiTokenEvent> = LoadedEventsMemo::new();
+struct KimiLogs;
+
+impl LogFormat for KimiLogs {
+    type Event = KimiTokenEvent;
+    /// The default model in the file's Kimi root config, for events that name none.
+    type Context = Option<String>;
+    const PROVIDER_ID: &'static str = "kimi";
+    const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
+
+    fn parse(content: &str, fallback_model: &Option<String>) -> Vec<KimiTokenEvent> {
+        parse_jsonl(content, fallback_model.as_deref())
+    }
+
+    fn timestamp(event: &KimiTokenEvent) -> DateTime<Utc> {
+        event.timestamp
+    }
+
+    fn deduplicate(events: Vec<KimiTokenEvent>) -> Vec<KimiTokenEvent> {
+        deduplicate(events)
+    }
+}
+
+static LOGS: LocalLogs<KimiLogs> = LocalLogs::new();
 
 fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
     since_date: NaiveDate,
 ) -> Result<std::sync::Arc<Vec<KimiTokenEvent>>, LogCacheError> {
-    let discovered = discover_wire_files(roots);
-    let paths = discovered
-        .iter()
-        .map(|(_, path)| path.clone())
-        .collect::<Vec<_>>();
-    LOADED_EVENTS.load(storage, paths, since_date, || {
-        load_wire_files(storage, discovered, since_date)
-    })
-}
-
-fn load_wire_files(
-    storage: &Storage,
-    discovered: Vec<(PathBuf, PathBuf)>,
-    since_date: NaiveDate,
-) -> Result<Vec<KimiTokenEvent>, LogCacheError> {
-    let mut seen_paths = HashSet::with_capacity(discovered.len());
     let mut default_models = HashMap::<PathBuf, Option<String>>::new();
-    let mut events = Vec::new();
-
-    for (root, path) in discovered {
-        seen_paths.insert(path.clone());
-        let fallback_model = default_models
-            .entry(root.clone())
-            .or_insert_with(|| read_default_model(&root.join("config.toml")))
-            .clone();
-        let Some(parsed) = load_or_parse_log(
-            storage,
-            "kimi",
-            &path,
-            LOG_CACHE_SCHEMA_VERSION,
-            |content| parse_jsonl(content, fallback_model.as_deref()),
-        )?
-        else {
-            continue;
-        };
-        events.extend(
-            parsed
-                .into_iter()
-                .filter(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date),
-        );
-    }
-    storage.prune_log_events("kimi", &seen_paths)?;
-    Ok(deduplicate(events))
+    let files = discover_wire_files(roots)
+        .into_iter()
+        .map(|(root, path)| {
+            let fallback_model = default_models
+                .entry(root)
+                .or_insert_with_key(|root| read_default_model(&root.join("config.toml")))
+                .clone();
+            (path, fallback_model)
+        })
+        .collect::<Vec<_>>();
+    LOGS.load(storage, since_date, files)
 }
 
 fn deduplicate(events: Vec<KimiTokenEvent>) -> Vec<KimiTokenEvent> {

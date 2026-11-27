@@ -14,7 +14,7 @@ use crate::{
     providers::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, UsageObservation},
-        log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
+        log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
     },
     storage::Storage,
 };
@@ -129,47 +129,38 @@ fn scan_tmp_directories_into(
     Ok(aggregate_into(&events, now, pricing, card_id, accumulator))
 }
 
-static LOADED_EVENTS: LoadedEventsMemo<GeminiCliTokenEvent> = LoadedEventsMemo::new();
+struct GeminiCliLogs;
+
+impl LogFormat for GeminiCliLogs {
+    type Event = GeminiCliTokenEvent;
+    type Context = ();
+    const PROVIDER_ID: &'static str = "gemini-cli";
+    const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
+
+    fn parse(content: &str, _context: &()) -> Vec<GeminiCliTokenEvent> {
+        parse_chat_file(content)
+    }
+
+    fn timestamp(event: &GeminiCliTokenEvent) -> DateTime<Utc> {
+        event.timestamp
+    }
+
+    fn deduplicate(events: Vec<GeminiCliTokenEvent>) -> Vec<GeminiCliTokenEvent> {
+        deduplicate(events)
+    }
+}
+
+static LOGS: LocalLogs<GeminiCliLogs> = LocalLogs::new();
 
 fn load_local_events(
     storage: &Storage,
     tmp_dirs: &[PathBuf],
     since_date: NaiveDate,
 ) -> Result<std::sync::Arc<Vec<GeminiCliTokenEvent>>, LogCacheError> {
-    let paths = discover_chat_files(tmp_dirs);
-    LOADED_EVENTS.load(storage, paths.clone(), since_date, || {
-        load_chat_files(storage, paths, since_date)
-    })
-}
-
-fn load_chat_files(
-    storage: &Storage,
-    paths: Vec<PathBuf>,
-    since_date: NaiveDate,
-) -> Result<Vec<GeminiCliTokenEvent>, LogCacheError> {
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-    let mut events = Vec::new();
-
-    for path in paths {
-        seen_paths.insert(path.clone());
-        let Some(parsed) = load_or_parse_log(
-            storage,
-            "gemini-cli",
-            &path,
-            LOG_CACHE_SCHEMA_VERSION,
-            parse_chat_file,
-        )?
-        else {
-            continue;
-        };
-        events.extend(
-            parsed
-                .into_iter()
-                .filter(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date),
-        );
-    }
-    storage.prune_log_events("gemini-cli", &seen_paths)?;
-    Ok(deduplicate(events))
+    let files = discover_chat_files(tmp_dirs)
+        .into_iter()
+        .map(|path| (path, ()));
+    LOGS.load(storage, since_date, files)
 }
 
 fn discover_chat_files(tmp_dirs: &[PathBuf]) -> Vec<PathBuf> {
