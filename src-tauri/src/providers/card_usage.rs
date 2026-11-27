@@ -107,14 +107,21 @@ impl<'a> UsageObservation<'a> {
     }
 }
 
+/// Number of days in the Scan window: the last 30 days including today.
+pub(super) const SCAN_WINDOW_DAYS: u64 = 30;
+
+/// First day of the Scan window that ends on `today`.
+fn scan_window_start(today: NaiveDate) -> NaiveDate {
+    today
+        .checked_sub_days(Days::new(SCAN_WINDOW_DAYS - 1))
+        .unwrap_or(NaiveDate::MIN)
+}
+
 /// TEMPORARY. Rules that still differ between scanners while they migrate onto this module
 /// without changing their output. Each field is removed by the ticket that unifies its rule
 /// (`.scratch/card-usage/issues/11`–`14`); the type goes with the last one.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TransitionalPolicy {
-    /// First counted day, as days before today. The unified Scan window is the last 30 days
-    /// including today (29); some loops still start a day earlier (30).
-    pub window_start_days_ago: u64,
     /// Drop observations with no tokens and no cost above zero.
     pub zero_token_guard: bool,
     /// How priced usage on the Card's own series is labelled.
@@ -167,7 +174,7 @@ pub(super) fn record<'a>(
 ) -> Landed {
     let mut landed = Landed::default();
     for observation in observations {
-        let Some(date) = date_in_window(&observation, now, policy.window_start_days_ago) else {
+        let Some(date) = date_in_window(&observation, now) else {
             continue;
         };
         if policy.local_runtime == LocalRuntimeMode::ModelSlugOrProvider
@@ -204,19 +211,20 @@ pub(super) fn record<'a>(
 /// Records observations whose Card and cost their Home client already settled. Only the Scan
 /// window applies; the observations land on the Card the caller is filling.
 ///
-/// `window_start_days_ago` is `None` for sources that keep their own dates, such as an account
-/// export: every observation is recorded, and building the history trims the dates.
+/// Without `apply_scan_window`, as for an account export that keeps its own dates, every
+/// observation is recorded and building the history trims the dates.
 pub(super) fn record_settled<'a>(
     observations: impl IntoIterator<Item = (UsageObservation<'a>, Settled<'a>)>,
     now: DateTime<Utc>,
-    window_start_days_ago: Option<u64>,
+    apply_scan_window: bool,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Landed {
     let mut landed = Landed::default();
     for (observation, settled) in observations {
-        let date = match window_start_days_ago {
-            Some(days) => date_in_window(&observation, now, days),
-            None => Some(observation.timestamp.with_timezone(&Local).date_naive()),
+        let date = if apply_scan_window {
+            date_in_window(&observation, now)
+        } else {
+            Some(observation.timestamp.with_timezone(&Local).date_naive())
         };
         let Some(date) = date else {
             continue;
@@ -230,17 +238,9 @@ pub(super) fn record_settled<'a>(
     landed
 }
 
-/// The observation's local date, when it falls inside the window and not in the future.
-fn date_in_window(
-    observation: &UsageObservation<'_>,
-    now: DateTime<Utc>,
-    window_start_days_ago: u64,
-) -> Option<NaiveDate> {
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(window_start_days_ago))
-        .unwrap_or(NaiveDate::MIN);
+/// The observation's local date, when it falls inside the Scan window and not in the future.
+fn date_in_window(observation: &UsageObservation<'_>, now: DateTime<Utc>) -> Option<NaiveDate> {
+    let since = scan_window_start(now.with_timezone(&Local).date_naive());
     let date = observation.timestamp.with_timezone(&Local).date_naive();
     (date >= since && observation.timestamp <= now).then_some(date)
 }
@@ -555,7 +555,10 @@ pub(super) mod test_support {
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
 
-    use super::{record, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation};
+    use super::{
+        record, record_settled, LabelMode, LocalRuntimeMode, Settled, TransitionalPolicy,
+        UsageObservation,
+    };
     use crate::{
         pricing::{test_bundled_pricing, ModelPricing, TokenBreakdown},
         providers::card_usage::DailyUsageAccumulator,
@@ -579,7 +582,6 @@ mod tests {
         (
             "claude",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -588,7 +590,6 @@ mod tests {
         (
             "codex",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -597,7 +598,6 @@ mod tests {
         (
             "grok",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -606,7 +606,6 @@ mod tests {
         (
             "antigravity",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -615,7 +614,6 @@ mod tests {
         (
             "kimi",
             TransitionalPolicy {
-                window_start_days_ago: 29,
                 zero_token_guard: true,
                 label: LabelMode::Family,
                 local_runtime: LocalRuntimeMode::ModelSlugOrProvider,
@@ -624,7 +622,6 @@ mod tests {
         (
             "antigravity",
             TransitionalPolicy {
-                window_start_days_ago: 29,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -633,7 +630,6 @@ mod tests {
         (
             "claude",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -642,7 +638,6 @@ mod tests {
         (
             "codex",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -651,7 +646,6 @@ mod tests {
         (
             "antigravity",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -660,7 +654,6 @@ mod tests {
         (
             "grok",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -669,7 +662,6 @@ mod tests {
         (
             "kimi",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -678,7 +670,6 @@ mod tests {
         (
             "minimax",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -687,7 +678,6 @@ mod tests {
         (
             "zai",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
@@ -696,7 +686,6 @@ mod tests {
         (
             "claude",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
@@ -705,7 +694,6 @@ mod tests {
         (
             "codex",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
@@ -714,7 +702,6 @@ mod tests {
         (
             "antigravity",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
@@ -723,7 +710,6 @@ mod tests {
         (
             "grok",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
@@ -732,7 +718,6 @@ mod tests {
         (
             "kimi",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
@@ -741,7 +726,6 @@ mod tests {
         (
             "minimax",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
@@ -750,7 +734,6 @@ mod tests {
         (
             "zai",
             TransitionalPolicy {
-                window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
@@ -758,11 +741,10 @@ mod tests {
         ),
     ];
 
-    /// The policy a home's scanner passes for its Routed usage: its native policy, with the
-    /// unified window and the zero-token guard, which every routed loop already has.
+    /// The policy a home's scanner passes for its Routed usage: its native policy with the
+    /// zero-token guard, which every routed loop already has.
     fn routed(native: TransitionalPolicy) -> TransitionalPolicy {
         TransitionalPolicy {
-            window_start_days_ago: 29,
             zero_token_guard: true,
             ..native
         }
@@ -904,12 +886,74 @@ mod tests {
         }
     }
 
+    /// A model each Card owns.
+    fn owned_model(card: &str) -> &'static str {
+        match card {
+            "claude" => "claude-sonnet-4-5",
+            "codex" => "gpt-5.5",
+            "antigravity" => "gemini-3-pro",
+            "grok" => "grok-4",
+            "kimi" => "kimi-k2",
+            "minimax" => "minimax-m2",
+            _ => "glm-4.6",
+        }
+    }
+
+    /// The Scan window is the last 30 days including today, for own-series, Routed and settled
+    /// usage alike. Usage only on today-30 therefore never names its client in a source note.
+    #[test]
+    fn the_scan_window_is_the_last_30_days_including_today() {
+        let pricing = test_bundled_pricing();
+        for (days_ago, inside) in [(0, true), (29, true), (30, false), (31, false)] {
+            let at = now() - Duration::days(days_ago);
+            for (home, policy) in HOMES {
+                for card in CARDS {
+                    let policy = if card == home { policy } else { routed(policy) };
+                    let observation = UsageObservation::new(
+                        at,
+                        Some(owned_model(card)),
+                        tokens(1_000, 100),
+                        None,
+                    );
+                    let mut accumulator = DailyUsageAccumulator::default();
+                    let landed = record(
+                        [observation],
+                        home,
+                        card,
+                        now(),
+                        &pricing,
+                        policy,
+                        &mut accumulator,
+                    );
+                    assert_eq!(
+                        landed.own_series, inside,
+                        "{home} -> {card}, {days_ago} days ago"
+                    );
+                }
+            }
+            let observation =
+                UsageObservation::new(at, Some("claude-sonnet-4-5"), tokens(1_000, 100), None);
+            let settled = Settled {
+                others: false,
+                cost: Some(0.1),
+                estimated: true,
+                priced_tokens: 1_100,
+                complete: true,
+                family: None,
+                unpriced_marker_only: false,
+            };
+            let mut accumulator = DailyUsageAccumulator::default();
+            let landed = record_settled([(observation, settled)], now(), true, &mut accumulator);
+            assert_eq!(landed.own_series, inside, "settled, {days_ago} days ago");
+        }
+    }
+
     #[test]
     fn observations_outside_the_window_or_in_the_future_land_nowhere() {
         let pricing = test_bundled_pricing();
         for (home, policy) in HOMES {
             for model in MODELS {
-                for timestamp in [now() - Duration::days(31), now() + Duration::hours(1)] {
+                for timestamp in [now() - Duration::days(30), now() + Duration::hours(1)] {
                     let observation =
                         UsageObservation::new(timestamp, model, tokens(1_000, 100), None);
                     assert_eq!(

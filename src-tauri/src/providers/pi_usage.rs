@@ -120,14 +120,7 @@ fn scan_directories_into(
         load_session_files(storage, paths)
     })?;
 
-    Ok(aggregate_into(
-        &events,
-        card_id,
-        30,
-        now,
-        pricing,
-        accumulator,
-    ))
+    Ok(aggregate_into(&events, card_id, now, pricing, accumulator))
 }
 
 static LOADED_EVENTS: LoadedEventsMemo<PiUsageEvent> = LoadedEventsMemo::new();
@@ -294,13 +287,11 @@ fn deduplicate(events: Vec<PiUsageEvent>) -> Vec<PiUsageEvent> {
 fn aggregate_into(
     events: &[PiUsageEvent],
     card_id: &str,
-    window_start_days_ago: u64,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
 ) -> PiUsageSources {
     let policy = TransitionalPolicy {
-        window_start_days_ago,
         zero_token_guard: false,
         label: LabelMode::RawModel,
         local_runtime: LocalRuntimeMode::ModelSlug,
@@ -523,17 +514,7 @@ mod tests {
             let event = parsed_line(&line("missing", provider, "", "0")).unwrap();
             assert_eq!(event.card_id, card);
             let mut accumulator = DailyUsageAccumulator::default();
-            assert!(
-                aggregate_into(
-                    &[event],
-                    card,
-                    u64::MAX,
-                    now(),
-                    &pricing(),
-                    &mut accumulator,
-                )
-                .pi
-            );
+            assert!(aggregate_into(&[event], card, now(), &pricing(), &mut accumulator,).pi);
             let history = accumulator.build(now(), "From pi");
             let today = history.today.unwrap();
             assert_eq!(today.tokens, 202);
@@ -571,17 +552,7 @@ mod tests {
         };
         let mut accumulator = DailyUsageAccumulator::default();
 
-        assert!(
-            aggregate_into(
-                &[event],
-                "codex",
-                u64::MAX,
-                now(),
-                &pricing(),
-                &mut accumulator,
-            )
-            .pi
-        );
+        assert!(aggregate_into(&[event], "codex", now(), &pricing(), &mut accumulator,).pi);
         let history = accumulator.build(now(), "From pi");
         assert!(history.today.is_none());
         let other = history.other_usage.unwrap().today.unwrap();
@@ -597,17 +568,7 @@ mod tests {
             parsed_line(&line("unknown", "anthropic", "claude-missing-model", "0")).unwrap(),
         ];
         let mut accumulator = DailyUsageAccumulator::default();
-        assert!(
-            aggregate_into(
-                &events,
-                "claude",
-                u64::MAX,
-                now(),
-                &pricing(),
-                &mut accumulator,
-            )
-            .pi
-        );
+        assert!(aggregate_into(&events, "claude", now(), &pricing(), &mut accumulator,).pi);
         let history = accumulator.build(now(), "From pi");
         let period = history.today.unwrap();
         assert_eq!(period.tokens, 606);
@@ -625,14 +586,7 @@ mod tests {
         let mut accumulator = DailyUsageAccumulator::default();
 
         assert_eq!(
-            aggregate_into(
-                &[event],
-                "claude",
-                u64::MAX,
-                now(),
-                &pricing(),
-                &mut accumulator,
-            ),
+            aggregate_into(&[event], "claude", now(), &pricing(), &mut accumulator,),
             PiUsageSources::default()
         );
         assert!(accumulator.build(now(), "From pi").today.is_none());
@@ -1109,7 +1063,7 @@ mod tests {
                 event(5, Pi, "anthropic", "deepseek-chat", 0, 0, None),
                 event(5, Pi, "anthropic", "", 0, 0, None),
                 event(5, Pi, "anthropic", "claude-sonnet-4-5", 0, 0, Some(0.2)),
-                // Window edges: pi counts 31 days.
+                // Window edges: today-29 counts, today-30 does not.
                 event(29, Pi, "anthropic", "claude-sonnet-4-5", 100, 10, None),
                 event(30, Pi, "anthropic", "claude-sonnet-4-5", 100, 10, None),
                 event(30, OhMyPi, "anthropic", "deepseek-chat", 100, 10, None),
@@ -1123,7 +1077,6 @@ mod tests {
 
         #[test]
         fn output_is_pinned_per_card() {
-            let since = 30;
             let actual = [
                 "claude",
                 "codex",
@@ -1138,7 +1091,6 @@ mod tests {
                 let sources = aggregate_into(
                     &events(),
                     card_id,
-                    since,
                     now(),
                     &test_bundled_pricing(),
                     &mut accumulator,
@@ -1155,7 +1107,6 @@ mod tests {
 
         #[test]
         fn sources_count_others_and_unattributed_usage() {
-            let since = 30;
             let cases = [
                 event(
                     0,
@@ -1188,7 +1139,6 @@ mod tests {
                     let sources = aggregate_into(
                         std::slice::from_ref(&event),
                         "codex",
-                        since,
                         now(),
                         &test_bundled_pricing(),
                         &mut accumulator,
@@ -1204,7 +1154,7 @@ mod tests {
         }
 
         const PER_CARD: &str = r#"
-== claude pi=true oh_my_pi=true
+== claude pi=true oh_my_pi=false
 {
   "today": {
     "tokens": 22200,

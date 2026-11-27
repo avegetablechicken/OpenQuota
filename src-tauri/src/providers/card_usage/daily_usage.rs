@@ -284,9 +284,7 @@ impl DailyUsageAccumulator {
     pub fn build(self, now: DateTime<Utc>, source_note: &str) -> UsageHistory {
         let today = now.with_timezone(&Local).date_naive();
         let yesterday = today.checked_sub_days(Days::new(1));
-        let since = today
-            .checked_sub_days(Days::new(29))
-            .unwrap_or(NaiveDate::MIN);
+        let since = super::scan_window_start(today);
         let other_usage = self.other_usage(today, since);
         let daily = self
             .days

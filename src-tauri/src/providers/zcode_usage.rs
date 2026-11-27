@@ -149,7 +149,6 @@ impl ZCodeUsageScanner {
         let events = read_events(&self.database_path, now)?;
         let target_card = target.as_str();
         let policy = TransitionalPolicy {
-            window_start_days_ago: 30,
             zero_token_guard: true,
             label: LabelMode::FamilyWithVariant,
             local_runtime: LocalRuntimeMode::ProviderKeepsHome,

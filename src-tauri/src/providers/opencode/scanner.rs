@@ -245,7 +245,7 @@ fn aggregate_into(
         };
         (observation, settled)
     });
-    card_usage::record_settled(observations, now, Some(30), accumulator).own_series
+    card_usage::record_settled(observations, now, true, accumulator).own_series
 }
 
 #[cfg(test)]
@@ -433,7 +433,7 @@ mod unit_tests {
                 record(4, "local-llama", 0, None, false, true, 0, true),
                 // Zero tokens with a cost.
                 record(5, "claude-sonnet-4-5", 0, Some(0.2), true, false, 0, false),
-                // Window edges: opencode counts 31 days.
+                // Window edges: today-29 counts, today-30 does not.
                 record(
                     29,
                     "claude-sonnet-4-5",

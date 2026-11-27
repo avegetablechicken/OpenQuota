@@ -434,7 +434,6 @@ fn aggregate_into(
         now,
         pricing,
         TransitionalPolicy {
-            window_start_days_ago: 29,
             zero_token_guard: true,
             label: LabelMode::FamilyWithVariant,
             local_runtime: LocalRuntimeMode::ModelSlug,

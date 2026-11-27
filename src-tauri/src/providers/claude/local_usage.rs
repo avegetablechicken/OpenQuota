@@ -613,7 +613,6 @@ fn aggregate_into(
         now,
         pricing,
         TransitionalPolicy {
-            window_start_days_ago: 30,
             zero_token_guard: false,
             label: LabelMode::RawModel,
             local_runtime: LocalRuntimeMode::ModelSlug,
@@ -636,7 +635,6 @@ fn aggregate_routed_into(
         now,
         pricing,
         TransitionalPolicy {
-            window_start_days_ago: 29,
             zero_token_guard: true,
             label: LabelMode::RawModel,
             local_runtime: LocalRuntimeMode::ModelSlug,
@@ -1151,7 +1149,7 @@ mod tests {
                 // Zero tokens: no native guard, guarded when routed.
                 event(5, Some("claude-sonnet-4-5"), 0, 0, None),
                 event(5, Some("gpt-5.5"), 0, 0, None),
-                // Window edges: today-29 counts everywhere, today-30 only natively.
+                // Window edges: today-29 counts, today-30 does not.
                 event(29, Some("claude-sonnet-4-5"), 100, 10, None),
                 event(29, Some("gpt-5.5"), 100, 10, None),
                 event(30, Some("claude-sonnet-4-5"), 100, 10, None),
@@ -1193,8 +1191,9 @@ mod tests {
             assert_pinned("routed", &actual, ROUTED);
         }
 
+        /// The Scan window is the last 30 days including today, so today-30 lands nowhere.
         #[test]
-        fn only_today_minus_30_shapes_native_others_but_not_routed() {
+        fn today_minus_30_lands_nowhere() {
             let native = aggregate(
                 &[event(30, Some("deepseek-chat"), 100, 10, None)],
                 now(),
@@ -1203,7 +1202,7 @@ mod tests {
             assert_pinned(
                 "native today-30",
                 &relative_json(&native, now()),
-                NATIVE_TODAY_MINUS_30,
+                TODAY_MINUS_30,
             );
             let (contributed, _) = routed("codex", &[event(30, Some("gpt-5.5"), 100, 10, None)]);
             assert!(!contributed);
@@ -1479,18 +1478,13 @@ mod tests {
   "unknownModels": []
 }
 "#;
-        const NATIVE_TODAY_MINUS_30: &str = r#"
+        const TODAY_MINUS_30: &str = r#"
 {
   "today": null,
   "yesterday": null,
   "last30Days": null,
   "daily": [],
-  "unknownModels": [],
-  "otherUsage": {
-    "today": null,
-    "yesterday": null,
-    "last30Days": null
-  }
+  "unknownModels": []
 }
 "#;
     }

@@ -571,7 +571,6 @@ fn aggregate_into(
         now,
         pricing,
         TransitionalPolicy {
-            window_start_days_ago: 29,
             zero_token_guard: true,
             label: LabelMode::Family,
             local_runtime: LocalRuntimeMode::ModelSlugOrProvider,
@@ -1217,7 +1216,7 @@ mod tests {
                 event(5, kimi, Some("gpt-5.5"), 0, 0),
                 event(5, ollama, Some("llama3"), 0, 0),
                 event(5, kimi, None, 0, 0),
-                // Window edges: kimi already uses 30 days including today everywhere.
+                // Window edges: today-29 counts, today-30 does not.
                 event(29, kimi, Some("kimi-k2"), 100, 10),
                 event(29, kimi, Some("gpt-5.5"), 100, 10),
                 event(30, kimi, Some("kimi-k2"), 100, 10),

@@ -524,7 +524,7 @@ pub fn usage_history(
         (observation, settled)
     });
     let mut accumulator = DailyUsageAccumulator::default();
-    card_usage::record_settled(observations, now, None, &mut accumulator);
+    card_usage::record_settled(observations, now, false, &mut accumulator);
     accumulator.build(now, "From your Cursor usage export")
 }
 
