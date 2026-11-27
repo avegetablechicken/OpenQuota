@@ -474,6 +474,18 @@ pub struct Sub2ApiConfigInput {
     pub upstream: Sub2ApiUpstream,
 }
 
+impl Sub2ApiConfigInput {
+    /// Whether the save enters its address rather than reading it from a named provider, as
+    /// `connection_target` decides.
+    fn custom_base_url_in_effect(&self) -> bool {
+        self.custom_base_url
+            || !self
+                .provider_source
+                .unwrap_or(self.upstream)
+                .resolves_provider_names()
+    }
+}
+
 impl Drop for Sub2ApiConfigInput {
     fn drop(&mut self) {
         self.password.zeroize();
@@ -497,6 +509,40 @@ pub struct Sub2ApiConfigState {
     pub custom_base_url: bool,
     pub email: String,
     pub upstream: Sub2ApiUpstream,
+    /// Present when the connection keeps a secret a new save can reuse instead of asking for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reusable_credential: Option<ReusableCredential>,
+}
+
+/// What a save must match to keep a saved connection's secret: its address, and for a
+/// subscription where the key was read. A field left out matches anything.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReusableCredential {
+    pub base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_base_url: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_source: Option<Sub2ApiUpstream>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_provider: Option<String>,
+}
+
+impl ReusableCredential {
+    /// Whether a save of `input` at `base_url` may keep the secret.
+    fn admits(&self, input: &Sub2ApiConfigInput, base_url: &str) -> bool {
+        self.base_url == base_url
+            && self
+                .custom_base_url
+                .is_none_or(|custom| custom == input.custom_base_url_in_effect())
+            && self
+                .provider_source
+                .is_none_or(|source| source == input.provider_source.unwrap_or(input.upstream))
+            && self
+                .codex_provider
+                .as_deref()
+                .is_none_or(|name| name == input.codex_provider.trim())
+    }
 }
 
 /// A saved, cleared or removed connection, and a warning when OpenQuota could not finish
@@ -681,8 +727,47 @@ impl StoredConfig {
         }
     }
 
+    /// Whether the address was entered rather than read from a named provider. Older Claude
+    /// connections without a provider name were saved as named ones.
+    fn custom_base_url_in_effect(&self) -> bool {
+        self.custom_base_url
+            || !self
+                .provider_source
+                .unwrap_or(self.upstream)
+                .resolves_provider_names()
+            || (self.upstream == Sub2ApiUpstream::Claude && self.codex_provider.is_empty())
+    }
+
+    /// What a later save must match to keep this connection's secret, if it has one.
+    fn reusable_credential(&self) -> Option<ReusableCredential> {
+        let base_url = self.base_url.clone();
+        match self.mode {
+            Sub2ApiMode::Admin => (!self.password.is_empty()).then_some(ReusableCredential {
+                base_url,
+                ..ReusableCredential::default()
+            }),
+            Sub2ApiMode::Subscription if self.api_key.is_empty() => None,
+            // An entered address keeps its key whichever upstream the connection is marked as.
+            Sub2ApiMode::Subscription if self.custom_base_url_in_effect() => {
+                Some(ReusableCredential {
+                    base_url,
+                    custom_base_url: Some(true),
+                    provider_source: None,
+                    codex_provider: Some(self.codex_provider.clone()),
+                })
+            }
+            Sub2ApiMode::Subscription => Some(ReusableCredential {
+                base_url,
+                custom_base_url: Some(false),
+                provider_source: Some(self.provider_source.unwrap_or(self.upstream)),
+                codex_provider: Some(self.codex_provider.clone()),
+            }),
+        }
+    }
+
     fn state(&self) -> Sub2ApiConfigState {
         Sub2ApiConfigState {
+            reusable_credential: self.reusable_credential(),
             provider_source: self.provider_source,
             use_provider_key: self.mode == Sub2ApiMode::Subscription
                 && !self.custom_base_url
@@ -691,12 +776,7 @@ impl StoredConfig {
             mode: self.mode,
             base_url: self.base_url.clone(),
             codex_provider: self.codex_provider.clone(),
-            custom_base_url: self.custom_base_url
-                || !self
-                    .provider_source
-                    .unwrap_or(self.upstream)
-                    .resolves_provider_names()
-                || (self.upstream == Sub2ApiUpstream::Claude && self.codex_provider.is_empty()),
+            custom_base_url: self.custom_base_url_in_effect(),
             email: self.email.clone(),
             upstream: self.upstream,
 
@@ -1732,13 +1812,13 @@ fn credential_for_save(
     base_url: &str,
     previous: Option<&StoredConfig>,
 ) -> Result<String, Sub2ApiError> {
+    // The scope is the one the connection state shows, so the editor promises only what a save
+    // keeps.
     let previous = previous.filter(|config| {
-        config.base_url == base_url
-            && config.mode == input.mode
-            && (input.mode == Sub2ApiMode::Admin
-                || config.provider_source.unwrap_or(config.upstream)
-                    == input.provider_source.unwrap_or(input.upstream)
-                || (config.custom_base_url && input.custom_base_url))
+        config.mode == input.mode
+            && config
+                .reusable_credential()
+                .is_some_and(|scope| scope.admits(input, base_url))
     });
     match input.mode {
         Sub2ApiMode::Admin => {
@@ -1759,12 +1839,7 @@ fn credential_for_save(
             if !entered.is_empty() {
                 return Ok(entered.to_owned());
             }
-            if let Some(saved) = previous.filter(|config| {
-                !input.use_provider_key
-                    && config.custom_base_url == input.custom_base_url
-                    && config.codex_provider == input.codex_provider.trim()
-                    && !config.api_key.is_empty()
-            }) {
+            if let Some(saved) = previous.filter(|_| !input.use_provider_key) {
                 return Ok(saved.api_key.clone());
             }
             if input.custom_base_url {
@@ -2928,6 +3003,69 @@ mod tests {
         config.codex_provider.clear();
         config.upstream = super::Sub2ApiUpstream::Codex;
         assert!(!config.state().custom_base_url);
+    }
+
+    #[test]
+    fn the_state_shows_what_a_save_must_match_to_keep_the_secret() {
+        let config =
+            |value: serde_json::Value| -> StoredConfig { serde_json::from_value(value).unwrap() };
+        let scope = |value: serde_json::Value| {
+            serde_json::to_value(config(value).state().reusable_credential).unwrap()
+        };
+        assert_eq!(
+            scope(serde_json::json!({
+                "mode":"admin", "base_url":"https://relay.example", "upstream":"claude",
+                "email":"admin@example.com", "password":"secret"
+            })),
+            serde_json::json!({"baseUrl":"https://relay.example"})
+        );
+        assert_eq!(
+            scope(serde_json::json!({
+                "mode":"subscription", "api_key":"saved", "codex_provider":"relay",
+                "base_url":"https://relay.example", "custom_base_url":false, "email":"", "password":""
+            })),
+            serde_json::json!({
+                "baseUrl":"https://relay.example", "customBaseUrl":false,
+                "providerSource":"codex", "codexProvider":"relay"
+            })
+        );
+        assert_eq!(
+            scope(serde_json::json!({
+                "mode":"subscription", "api_key":"saved", "upstream":"grok",
+                "base_url":"https://relay.example", "custom_base_url":true, "email":"", "password":""
+            })),
+            serde_json::json!({
+                "baseUrl":"https://relay.example", "customBaseUrl":true, "codexProvider":""
+            })
+        );
+        // A subscription that reads the provider's key has no secret of its own to keep.
+        assert_eq!(
+            scope(serde_json::json!({
+                "mode":"subscription", "codex_provider":"relay",
+                "base_url":"https://relay.example", "custom_base_url":false, "email":"", "password":""
+            })),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn an_older_claude_subscription_keeps_its_key_at_the_address_the_editor_shows() {
+        // Saved as a named connection without a name, so the editor shows an entered address.
+        let previous: StoredConfig = serde_json::from_value(serde_json::json!({
+            "mode":"subscription", "api_key":"saved", "upstream":"claude",
+            "base_url":"https://relay.example", "custom_base_url":false, "email":"", "password":""
+        }))
+        .unwrap();
+        assert!(previous.state().custom_base_url);
+        let input: Sub2ApiConfigInput = serde_json::from_value(serde_json::json!({
+            "mode":"subscription", "upstream":"claude", "baseUrl":"https://relay.example",
+            "customBaseUrl":true, "codexProvider":"", "email":"", "password":""
+        }))
+        .unwrap();
+        assert_eq!(
+            credential_for_save(&input, &input.base_url, Some(&previous)).unwrap(),
+            "saved"
+        );
     }
 
     #[test]

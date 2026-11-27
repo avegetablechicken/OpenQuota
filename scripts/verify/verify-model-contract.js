@@ -5,6 +5,7 @@ const rustSource = [
   'src-tauri/src/models.rs',
   'src-tauri/src/service.rs',
   'src-tauri/src/commands/bootstrap.rs',
+  'src-tauri/src/providers/sub2api/mod.rs',
 ]
   .map((file) => fs.readFileSync(new URL(file, root), 'utf8'))
   .join('\n');
@@ -36,6 +37,8 @@ const contracts = [
   'AppSettings',
   'SettingsViewState',
   'BootstrapState',
+  'Sub2ApiConfigState',
+  'ReusableCredential',
 ];
 
 function camelCase(value) {

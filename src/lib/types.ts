@@ -211,6 +211,16 @@ export interface Sub2ApiConfigState {
   email: string;
   upstream: Sub2ApiUpstream;
   providerSource?: Sub2ApiUpstream | null;
+  /** Present when a save can keep the saved secret instead of asking for it again. */
+  reusableCredential?: ReusableCredential;
+}
+
+/** What a save must match to keep a saved secret. A field left out matches anything. */
+export interface ReusableCredential {
+  baseUrl: string;
+  customBaseUrl?: boolean;
+  providerSource?: Sub2ApiUpstream;
+  codexProvider?: string;
 }
 
 /** A saved, cleared or removed connection; the warning says provider status could not follow. */
