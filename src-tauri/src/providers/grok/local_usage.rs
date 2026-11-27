@@ -13,10 +13,9 @@ use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
         antigravity,
+        card_usage::DailyUsageAccumulator,
         card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
-        claude, codex,
-        daily_usage::DailyUsageAccumulator,
-        gemini_cli_usage, kimi,
+        claude, codex, gemini_cli_usage, kimi,
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
         model_scope::format_source_note,
         opencode, pi_usage,
@@ -591,7 +590,7 @@ mod tests {
         assert_eq!(grok.today.as_ref().unwrap().tokens, 100_000);
         assert_eq!(grok.other_usage.unwrap().today.unwrap().tokens, 300_000);
 
-        let mut claude = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        let mut claude = crate::providers::card_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
             &events,
             now(),
@@ -655,7 +654,7 @@ mod tests {
             pricing::test_bundled_pricing,
             providers::{
                 card_usage::test_support::{assert_pinned, relative_json},
-                daily_usage::DailyUsageAccumulator,
+                card_usage::DailyUsageAccumulator,
             },
         };
 

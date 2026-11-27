@@ -16,10 +16,9 @@ use crate::{
 
 use super::AntigravityError;
 use crate::providers::{
+    card_usage::DailyUsageAccumulator,
     card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
-    claude, codex,
-    daily_usage::DailyUsageAccumulator,
-    gemini_cli_usage, grok, kimi,
+    claude, codex, gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
     model_scope::format_source_note,
     opencode, pi_usage,
@@ -653,7 +652,7 @@ mod tests {
         scan_routed_roots_into, USAGE_SOURCE_NOTE,
     };
     use crate::{
-        pricing::test_bundled_pricing, providers::daily_usage::DailyUsageAccumulator,
+        pricing::test_bundled_pricing, providers::card_usage::DailyUsageAccumulator,
         storage::Storage,
     };
 
@@ -903,7 +902,7 @@ mod tests {
             pricing::test_bundled_pricing,
             providers::{
                 card_usage::test_support::{assert_pinned, relative_json},
-                daily_usage::DailyUsageAccumulator,
+                card_usage::DailyUsageAccumulator,
             },
         };
 

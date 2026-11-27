@@ -129,18 +129,18 @@ impl ModelAccumulator {
 
 impl DailyUsageAccumulator {
     /// Adds usage whose dollar cost was derived from a pricing estimate.
-    pub fn add(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
+    pub(super) fn add(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
         self.add_internal(date, tokens, cost, model, None, true);
     }
 
     /// Adds usage whose dollar cost was recorded exactly by the source.
     #[allow(dead_code)]
-    pub fn add_exact(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
+    pub(super) fn add_exact(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
         self.add_internal(date, tokens, cost, model, None, false);
     }
 
     /// Adds variant usage whose dollar cost was derived from a pricing estimate.
-    pub fn add_variant(
+    pub(super) fn add_variant(
         &mut self,
         date: NaiveDate,
         tokens: u64,
@@ -154,7 +154,7 @@ impl DailyUsageAccumulator {
 
     /// Adds variant usage whose dollar cost was recorded exactly by the source.
     #[allow(dead_code)]
-    pub fn add_exact_variant(
+    pub(super) fn add_exact_variant(
         &mut self,
         date: NaiveDate,
         tokens: u64,
@@ -189,7 +189,7 @@ impl DailyUsageAccumulator {
 
     /// Adds usage whose cost covers only some of its tokens. The day keeps the partial dollars,
     /// but the model's cost is incomplete, as if its unpriced part were added separately.
-    pub fn add_partially_priced(
+    pub(super) fn add_partially_priced(
         &mut self,
         date: NaiveDate,
         tokens: u64,
@@ -210,7 +210,7 @@ impl DailyUsageAccumulator {
     }
 
     /// Keeps measured token history visible when the model has no usable pricing entry.
-    pub fn add_unpriced(&mut self, date: NaiveDate, tokens: u64, model: &str) {
+    pub(super) fn add_unpriced(&mut self, date: NaiveDate, tokens: u64, model: &str) {
         if tokens == 0 {
             self.add_unknown_model(date, model);
             return;
@@ -225,7 +225,7 @@ impl DailyUsageAccumulator {
         self.add_unknown_model(date, model);
     }
 
-    pub fn add_unknown_model(&mut self, date: NaiveDate, model: &str) {
+    pub(super) fn add_unknown_model(&mut self, date: NaiveDate, model: &str) {
         let model = model.trim();
         if !model.is_empty() {
             self.unknown_models_by_day
@@ -237,7 +237,7 @@ impl DailyUsageAccumulator {
 
     /// Adds usage from a model intentionally excluded from the provider's normal history.
     /// It remains available to the local-device spend chart as one aggregated Others slice.
-    pub fn add_other(
+    pub(super) fn add_other(
         &mut self,
         date: NaiveDate,
         tokens: u64,
@@ -249,7 +249,7 @@ impl DailyUsageAccumulator {
     }
 
     /// Adds Others usage whose cost covers only `priced_tokens` of its `tokens`.
-    pub fn add_partially_priced_other(
+    pub(super) fn add_partially_priced_other(
         &mut self,
         date: NaiveDate,
         tokens: u64,

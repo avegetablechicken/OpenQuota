@@ -4,7 +4,11 @@ use serde_json::Value;
 use crate::{
     models::{MetricValue, MetricValueKind, QuotaFormat, QuotaWindow, UsageHistory, ValueMetric},
     pricing::ModelPricing,
-    providers::{cursor::csv::CursorCsvRow, daily_usage::DailyUsageAccumulator},
+    providers::{
+        card_usage::DailyUsageAccumulator,
+        card_usage::{self, Settled, UsageObservation},
+        cursor::csv::CursorCsvRow,
+    },
 };
 
 use super::CursorError;
@@ -496,27 +500,31 @@ pub fn usage_history(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
 ) -> UsageHistory {
+    // The export is already priced; its rows are labelled by family, keeping the model as a
+    // variant, and unpriced rows only name their model as unknown.
+    let families = rows
+        .iter()
+        .map(|row| match row.model.trim() {
+            "" => "Unattributed".to_owned(),
+            model => pricing.display_family(model),
+        })
+        .collect::<Vec<_>>();
+    let observations = rows.iter().zip(&families).map(|(row, family)| {
+        let cost = row.reported_cost_usd.or(row.estimated_cost_usd);
+        let observation = UsageObservation::new(row.date, Some(&row.model), row.tokens, None);
+        let settled = Settled {
+            others: false,
+            cost,
+            estimated: row.reported_cost_usd.is_none(),
+            priced_tokens: row.tokens.total_tokens(),
+            complete: true,
+            family: Some(family),
+            unpriced_marker_only: true,
+        };
+        (observation, settled)
+    });
     let mut accumulator = DailyUsageAccumulator::default();
-    for row in rows {
-        let date = row.date.with_timezone(&chrono::Local).date_naive();
-        let tokens = row.tokens.total_tokens();
-        match row.reported_cost_usd.or(row.estimated_cost_usd) {
-            Some(cost) => {
-                let family = if row.model.trim().is_empty() {
-                    "Unattributed".to_owned()
-                } else {
-                    pricing.display_family(row.model.trim())
-                };
-                if row.reported_cost_usd.is_some() {
-                    accumulator.add_exact_variant(date, tokens, cost, &family, row.model.trim());
-                } else {
-                    accumulator.add_variant(date, tokens, cost, &family, row.model.trim());
-                }
-            }
-            None if tokens > 0 => accumulator.add_unknown_model(date, &row.model),
-            None => {}
-        }
-    }
+    card_usage::record_settled(observations, now, None, &mut accumulator);
     accumulator.build(now, "From your Cursor usage export")
 }
 
@@ -901,5 +909,247 @@ mod tests {
                 "claude-opus-4-8-thinking-high"
             ]
         );
+    }
+
+    /// Pins how Cursor's export rows reach its Card, so moving the accumulator calls into
+    /// `card_usage` cannot change what the Card shows.
+    mod characterization {
+        use chrono::{DateTime, Duration, TimeZone, Utc};
+
+        use super::super::usage_history;
+        use crate::{
+            pricing::{test_bundled_pricing, TokenBreakdown},
+            providers::{
+                card_usage::test_support::{assert_pinned, relative_json},
+                cursor::csv::CursorCsvRow,
+            },
+        };
+
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap()
+        }
+
+        fn row(
+            at: DateTime<Utc>,
+            model: &str,
+            input: u64,
+            output: u64,
+            reported: Option<f64>,
+            estimated: Option<f64>,
+        ) -> CursorCsvRow {
+            CursorCsvRow {
+                date: at,
+                model: model.into(),
+                tokens: TokenBreakdown {
+                    input,
+                    output,
+                    ..TokenBreakdown::default()
+                },
+                reported_cost_usd: reported,
+                estimated_cost_usd: estimated,
+            }
+        }
+
+        #[test]
+        fn export_rows_are_pinned() {
+            let days = |days: i64| now() - Duration::days(days);
+            let rows = [
+                // Reported and estimated costs, labelled by family with the row's model as a
+                // variant.
+                row(
+                    days(0),
+                    "claude-4.5-sonnet-thinking",
+                    1_000,
+                    100,
+                    Some(0.4),
+                    None,
+                ),
+                row(days(0), "claude-sonnet-4-5", 1_000, 100, Some(0.0), None),
+                row(days(0), "gpt-5.5", 2_000, 200, None, Some(0.3)),
+                row(
+                    days(1),
+                    "  gemini-3-pro-preview  ",
+                    800,
+                    80,
+                    None,
+                    Some(0.05),
+                ),
+                row(days(1), "auto", 500, 50, Some(0.02), None),
+                // No model: labelled Unattributed when priced, no marker when not.
+                row(days(1), "", 400, 40, Some(0.05), None),
+                row(days(1), "   ", 300, 30, None, None),
+                // Unpriced rows leave only an unknown-model marker; empty rows nothing.
+                row(days(2), "mystery-model", 700, 70, None, None),
+                row(days(2), "empty-model", 0, 0, None, None),
+                // No window or future filter of its own: building the history trims dates.
+                row(days(29), "gpt-5.5", 100, 10, None, Some(0.01)),
+                row(days(30), "gpt-5.5", 100, 10, None, Some(0.01)),
+                row(days(45), "mystery-model", 100, 10, None, None),
+                row(
+                    now() + Duration::minutes(30),
+                    "gpt-5.5",
+                    100,
+                    10,
+                    None,
+                    Some(0.01),
+                ),
+            ];
+            let history = usage_history(&rows, now(), &test_bundled_pricing());
+            assert_pinned("export", &relative_json(&history, now()), EXPORT);
+        }
+
+        const EXPORT: &str = r#"
+{
+  "today": {
+    "tokens": 4510,
+    "estimatedCostUsd": 0.71,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 2200,
+          "costUsd": 0.4,
+          "variants": [
+            {
+              "model": "claude-4.5-sonnet-thinking",
+              "totalTokens": 1100,
+              "costUsd": 0.4
+            },
+            {
+              "model": "claude-sonnet-4-5",
+              "totalTokens": 1100,
+              "costUsd": 0.0
+            }
+          ]
+        },
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 2310,
+          "costUsd": 0.31
+        }
+      ],
+      "sourceNote": "From your Cursor usage export"
+    },
+    "unknownModels": []
+  },
+  "yesterday": {
+    "tokens": 1870,
+    "estimatedCostUsd": 0.12000000000000001,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 880,
+          "costUsd": 0.05
+        },
+        {
+          "model": "auto",
+          "totalTokens": 550,
+          "costUsd": 0.02
+        },
+        {
+          "model": "Other",
+          "totalTokens": 440,
+          "costUsd": 0.05,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": 0.05
+            }
+          ]
+        }
+      ],
+      "sourceNote": "From your Cursor usage export"
+    },
+    "unknownModels": []
+  },
+  "last30Days": {
+    "tokens": 6490,
+    "estimatedCostUsd": 0.84,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 2200,
+          "costUsd": 0.4,
+          "variants": [
+            {
+              "model": "claude-4.5-sonnet-thinking",
+              "totalTokens": 1100,
+              "costUsd": 0.4
+            },
+            {
+              "model": "claude-sonnet-4-5",
+              "totalTokens": 1100,
+              "costUsd": 0.0
+            }
+          ]
+        },
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 2420,
+          "costUsd": 0.32
+        },
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 880,
+          "costUsd": 0.05
+        },
+        {
+          "model": "Other",
+          "totalTokens": 990,
+          "costUsd": 0.07,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": 0.05
+            },
+            {
+              "model": "auto",
+              "totalTokens": 550,
+              "costUsd": 0.02
+            }
+          ]
+        }
+      ],
+      "sourceNote": "From your Cursor usage export"
+    },
+    "unknownModels": [
+      "mystery-model"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 4510,
+      "estimatedCostUsd": 0.71,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-1",
+      "tokens": 1870,
+      "estimatedCostUsd": 0.12000000000000001,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.01,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "mystery-model"
+  ]
+}
+"#;
     }
 }

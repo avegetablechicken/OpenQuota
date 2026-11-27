@@ -6,8 +6,8 @@ use crate::{
     models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
+        card_usage::DailyUsageAccumulator,
         card_usage::{self, Settled, UsageObservation},
-        daily_usage::DailyUsageAccumulator,
     },
 };
 
@@ -240,10 +240,12 @@ fn aggregate_into(
             estimated: record.cost_provenance == CostProvenance::Estimated,
             priced_tokens: record.priced_tokens,
             complete: !record.incomplete_cost,
+            family: None,
+            unpriced_marker_only: false,
         };
         (observation, settled)
     });
-    card_usage::record_settled(observations, now, 30, accumulator).own_series
+    card_usage::record_settled(observations, now, Some(30), accumulator).own_series
 }
 
 #[cfg(test)]
@@ -328,7 +330,7 @@ mod unit_tests {
         use super::super::aggregate_into;
         use crate::providers::{
             card_usage::test_support::{assert_pinned, relative_json},
-            daily_usage::DailyUsageAccumulator,
+            card_usage::DailyUsageAccumulator,
             opencode::record::{CostProvenance, UsageRecord},
         };
 

@@ -19,12 +19,11 @@ use crate::{
 use super::CodexError;
 use crate::providers::{
     antigravity,
+    card_usage::DailyUsageAccumulator,
     card_usage::{
         self, LabelMode, LocalRuntimeMode, PriceSource, TransitionalPolicy, UsageObservation,
     },
-    claude,
-    daily_usage::DailyUsageAccumulator,
-    gemini_cli_usage, grok, kimi,
+    claude, gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     model_scope::format_source_note,
     opencode, pi_usage,
@@ -881,7 +880,7 @@ mod tests {
         assert_eq!(codex.today.as_ref().unwrap().tokens, 110);
         assert_eq!(codex.other_usage.unwrap().today.unwrap().tokens, 520);
 
-        let mut claude = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        let mut claude = crate::providers::card_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
             &events,
             now,
@@ -893,7 +892,7 @@ mod tests {
         assert_eq!(claude_today.tokens, 220);
         assert!(claude_today.estimated_cost_usd.is_some());
 
-        let mut kimi = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        let mut kimi = crate::providers::card_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
             &events, now, &pricing, "kimi", &mut kimi
         ));
@@ -1580,7 +1579,7 @@ mod tests {
             pricing::test_bundled_pricing,
             providers::{
                 card_usage::test_support::{assert_pinned, relative_json},
-                daily_usage::DailyUsageAccumulator,
+                card_usage::DailyUsageAccumulator,
             },
         };
 

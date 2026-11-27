@@ -6,9 +6,9 @@ use crate::{
     models::UsageHistory,
     pricing::PricingStore,
     providers::{
-        antigravity, claude, codex,
-        daily_usage::DailyUsageAccumulator,
-        gemini_cli_usage, grok, kimi,
+        antigravity,
+        card_usage::DailyUsageAccumulator,
+        claude, codex, gemini_cli_usage, grok, kimi,
         log_usage::scan_or_cached_usage,
         opencode, pi_usage,
         zcode_usage::{ZCodeProvider, ZCodeUsageScanner},

@@ -12,8 +12,8 @@ use walkdir::WalkDir;
 use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
+        card_usage::DailyUsageAccumulator,
         card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
-        daily_usage::DailyUsageAccumulator,
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     },
     storage::Storage,
@@ -497,7 +497,7 @@ mod tests {
 
     use super::{parse_chat_file, scan_tmp_directories_into, tmp_directories};
     use crate::{
-        pricing::test_bundled_pricing, providers::daily_usage::DailyUsageAccumulator,
+        pricing::test_bundled_pricing, providers::card_usage::DailyUsageAccumulator,
         storage::Storage,
     };
 
@@ -793,7 +793,7 @@ mod tests {
             pricing::test_bundled_pricing,
             providers::{
                 card_usage::test_support::{assert_pinned, relative_json},
-                daily_usage::DailyUsageAccumulator,
+                card_usage::DailyUsageAccumulator,
             },
         };
 

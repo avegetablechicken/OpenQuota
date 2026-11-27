@@ -18,10 +18,9 @@ use crate::{
 use super::ClaudeError;
 use crate::providers::{
     antigravity,
+    card_usage::DailyUsageAccumulator,
     card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
-    codex,
-    daily_usage::DailyUsageAccumulator,
-    gemini_cli_usage, grok, kimi,
+    codex, gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
     model_scope::format_source_note,
     opencode, pi_usage,
@@ -1052,7 +1051,7 @@ mod tests {
         // Only Qwen (unowned) enters Claude's Others; GLM and MiniMax do not double-count.
         assert_eq!(claude.other_usage.unwrap().today.unwrap().tokens, 440);
 
-        let mut zai = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        let mut zai = crate::providers::card_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
             &events, now, &pricing, "zai", &mut zai
         ));
@@ -1060,7 +1059,7 @@ mod tests {
         assert_eq!(zai_today.tokens, 550);
         assert!(zai_today.estimated_cost_usd.is_some());
 
-        let mut minimax = crate::providers::daily_usage::DailyUsageAccumulator::default();
+        let mut minimax = crate::providers::card_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
             &events,
             now,
@@ -1091,7 +1090,7 @@ mod tests {
             pricing::test_bundled_pricing,
             providers::{
                 card_usage::test_support::{assert_pinned, relative_json},
-                daily_usage::DailyUsageAccumulator,
+                card_usage::DailyUsageAccumulator,
             },
         };
 

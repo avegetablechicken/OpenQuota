@@ -10,15 +10,15 @@ use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
 use crate::pricing::{ModelPricing, ServiceTier, TokenBreakdown};
 
-use super::{
-    daily_usage::DailyUsageAccumulator,
-    model_scope::{
-        card_for_model, is_local_runtime_provider, model_belongs_to_card, native_log_disposition,
-        LocalModelDisposition,
-    },
+use super::model_scope::{
+    card_for_model, is_local_runtime_provider, model_belongs_to_card, native_log_disposition,
+    LocalModelDisposition,
 };
 
 pub(super) mod codex;
+mod daily_usage;
+
+pub(super) use daily_usage::DailyUsageAccumulator;
 
 /// One request's usage as read from a Home client's logs, before it is placed on any Card.
 #[derive(Debug, Clone, Copy)]
@@ -52,7 +52,7 @@ pub(super) struct UsageObservation<'a> {
 /// Where an observation lands and what it costs, when its Home client settled both itself
 /// because it prices and deduplicates whole messages first. See `record_settled`.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Settled {
+pub(super) struct Settled<'a> {
     pub others: bool,
     pub cost: Option<f64>,
     pub estimated: bool,
@@ -60,6 +60,11 @@ pub(super) struct Settled {
     pub priced_tokens: u64,
     /// Every part of the usage was priced.
     pub complete: bool,
+    /// TEMPORARY, until every Card labels by family (ticket 14): label priced usage by this
+    /// family, keeping the model as a variant.
+    pub family: Option<&'a str>,
+    /// Unpriced usage leaves only an unknown-model marker instead of counting its tokens.
+    pub unpriced_marker_only: bool,
 }
 
 /// How an observation is estimated when it is priced under its home Card. Routed usage is
@@ -198,15 +203,22 @@ pub(super) fn record<'a>(
 
 /// Records observations whose Card and cost their Home client already settled. Only the Scan
 /// window applies; the observations land on the Card the caller is filling.
+///
+/// `window_start_days_ago` is `None` for sources that keep their own dates, such as an account
+/// export: every observation is recorded, and building the history trims the dates.
 pub(super) fn record_settled<'a>(
-    observations: impl IntoIterator<Item = (UsageObservation<'a>, Settled)>,
+    observations: impl IntoIterator<Item = (UsageObservation<'a>, Settled<'a>)>,
     now: DateTime<Utc>,
-    window_start_days_ago: u64,
+    window_start_days_ago: Option<u64>,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Landed {
     let mut landed = Landed::default();
     for (observation, settled) in observations {
-        let Some(date) = date_in_window(&observation, now, window_start_days_ago) else {
+        let date = match window_start_days_ago {
+            Some(days) => date_in_window(&observation, now, days),
+            None => Some(observation.timestamp.with_timezone(&Local).date_naive()),
+        };
+        let Some(date) = date else {
             continue;
         };
         match add_settled(observation, settled, date, accumulator) {
@@ -251,7 +263,7 @@ enum Bucket {
 
 fn add_settled(
     observation: UsageObservation<'_>,
-    settled: Settled,
+    settled: Settled<'_>,
     date: NaiveDate,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Option<Bucket> {
@@ -273,8 +285,18 @@ fn add_settled(
         Some(cost) if !settled.complete => {
             accumulator.add_partially_priced(date, tokens, cost, model, settled.estimated);
         }
-        Some(cost) if settled.estimated => accumulator.add(date, tokens, cost, model),
-        Some(cost) => accumulator.add_exact(date, tokens, cost, model),
+        Some(cost) => match (settled.family, settled.estimated) {
+            (Some(family), true) => accumulator.add_variant(date, tokens, cost, family, model),
+            (Some(family), false) => {
+                accumulator.add_exact_variant(date, tokens, cost, family, model);
+            }
+            (None, true) => accumulator.add(date, tokens, cost, model),
+            (None, false) => accumulator.add_exact(date, tokens, cost, model),
+        },
+        None if tokens > 0 && settled.unpriced_marker_only => {
+            // A missing model leaves no marker to name.
+            accumulator.add_unknown_model(date, observation.model.unwrap_or_default());
+        }
         None if tokens > 0 => accumulator.add_unpriced(date, tokens, model),
         None if !settled.complete => accumulator.add_unknown_model(date, model),
         None => return None,
@@ -536,7 +558,7 @@ mod tests {
     use super::{record, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation};
     use crate::{
         pricing::{test_bundled_pricing, ModelPricing, TokenBreakdown},
-        providers::daily_usage::DailyUsageAccumulator,
+        providers::card_usage::DailyUsageAccumulator,
     };
 
     /// Every Card a Home client's usage can land on.

@@ -15,8 +15,8 @@ use crate::models::UsageHistory;
 use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     providers::{
+        card_usage::DailyUsageAccumulator,
         card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
-        daily_usage::DailyUsageAccumulator,
         model_scope::normalize_provider_model,
     },
 };
@@ -742,7 +742,7 @@ mod tests {
             pricing::test_bundled_pricing,
             providers::{
                 card_usage::test_support::{assert_pinned, relative_json},
-                daily_usage::DailyUsageAccumulator,
+                card_usage::DailyUsageAccumulator,
             },
         };
 

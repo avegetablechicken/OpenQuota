@@ -31,7 +31,7 @@ pub(crate) fn scan_routed_usage_into(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
-    accumulator: &mut super::daily_usage::DailyUsageAccumulator,
+    accumulator: &mut super::card_usage::DailyUsageAccumulator,
 ) -> Result<bool, OpenCodeError> {
     OpenCodeUsageScanner::new(OpenCodePaths::new()).scan_into(now, pricing, card_id, accumulator)
 }

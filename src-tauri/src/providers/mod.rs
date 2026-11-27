@@ -6,7 +6,6 @@ pub mod codex;
 pub mod copilot;
 pub mod credential_store;
 pub mod cursor;
-mod daily_usage;
 mod detection;
 pub mod devin;
 mod gemini_cli_usage;
