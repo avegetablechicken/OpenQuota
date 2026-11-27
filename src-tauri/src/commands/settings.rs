@@ -71,29 +71,13 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
                             .iter()
                             .any(|metric| metric.id == *metric_id)
                     }) {
-                        let registry = settings_service.registry();
-                        let connection_configured = registry
-                            .catalog()
-                            .connection_config_provider_ids
-                            .contains(&provider.id);
-                        let upstream_provider_id = connection_configured
-                            .then(|| registry.upstream_provider_id(&provider.id))
-                            .flatten();
-                        let pins = provider
-                            .metrics
-                            .iter()
-                            .filter(|metric| {
-                                metric.pinned
-                                    && (!connection_configured
-                                        || crate::providers::sub2api::metric_supported(
-                                            &provider.id,
-                                            &metric.id,
-                                            upstream_provider_id,
-                                        ))
-                            })
-                            .count();
+                        let can_add_star = crate::metric_policy::MetricPolicy::for_provider(
+                            settings_service.registry(),
+                            &provider.id,
+                        )
+                        .can_add_star(&provider.metrics);
                         // The menu disables extra stars, but a stale menu must not exceed the cap.
-                        if !*pinned || pins < crate::settings::MAX_PINS_PER_PROVIDER {
+                        if !*pinned || can_add_star {
                             if let Some(metric) = provider
                                 .metrics
                                 .iter_mut()

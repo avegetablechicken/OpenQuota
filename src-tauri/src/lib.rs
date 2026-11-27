@@ -13,6 +13,7 @@ mod logging;
 mod login_item;
 #[cfg(any(target_os = "macos", test))]
 mod menu_bar;
+mod metric_policy;
 mod models;
 mod notifications;
 mod pacing;

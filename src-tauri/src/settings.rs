@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     hashing::sha256_hex,
+    metric_policy::{MetricPolicy, MAX_STARS},
     models::{
         AppSettings, MetricDefinition, MetricLayout, MetricSection, ProviderCatalog,
         ProviderDefinition, ProviderLayout, SettingsViewState,
@@ -17,8 +18,6 @@ use crate::{
     providers::{CredentialProbeResults, CredentialProbeStatus, ProviderRegistry},
     storage::{ProviderAccountUpdate, Storage, StorageError},
 };
-
-pub const MAX_PINS_PER_PROVIDER: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct CredentialDetectionPlan {
@@ -667,25 +666,10 @@ impl SettingsService {
                 provider.metrics.clear();
                 Vec::new()
             };
-            let connection_configured = self
-                .registry
-                .catalog()
-                .connection_config_provider_ids
-                .iter()
-                .any(|id| id == provider_id);
-            let defaults = apply_metric_template(
-                &mut provider.metrics,
-                &change.template,
-                &applied,
-                |metric_id| {
-                    !connection_configured
-                        || crate::providers::sub2api::metric_supported(
-                            provider_id,
-                            metric_id,
-                            change.upstream_provider_id,
-                        )
-                },
-            );
+            let policy =
+                MetricPolicy::for_track(&self.registry, provider_id, change.upstream_provider_id);
+            let defaults =
+                apply_metric_template(&mut provider.metrics, &change.template, &applied, &policy);
             self.storage
                 .save_settings_with_metric_template_defaults(&next, provider_id, &defaults)
         } else {
@@ -870,25 +854,9 @@ pub fn normalize(
             settings.known_provider_ids.push(definition.id.clone());
         }
         provider.detected = detected.contains(&definition.id);
-        let connection_configured = catalog
-            .connection_config_provider_ids
-            .contains(&provider.id);
-        let upstream_provider_id = connection_configured
-            .then(|| registry.upstream_provider_id(&provider.id))
-            .flatten();
         let provider_id = provider.id.clone();
-        normalize_metrics(&mut provider.metrics, &definition.metrics, |metric_id| {
-            match (connection_configured, upstream_provider_id) {
-                (false, _) => true,
-                // Until the track is known, no pin counts toward the cap, so none is dropped.
-                (true, None) => false,
-                (true, Some(track)) => crate::providers::sub2api::metric_supported(
-                    &provider_id,
-                    metric_id,
-                    Some(track),
-                ),
-            }
-        });
+        let policy = MetricPolicy::for_provider(registry, &provider_id);
+        normalize_metrics(&mut provider.metrics, &definition.metrics, &policy);
         normalized.push(provider);
     }
     for definition in &catalog.providers {
@@ -1017,25 +985,11 @@ fn track_template_defaults(
     registry: &ProviderRegistry,
     provider_id: &str,
 ) -> Option<Vec<MetricLayout>> {
-    if !registry
-        .catalog()
-        .connection_config_provider_ids
-        .iter()
-        .any(|id| id == provider_id)
-    {
-        return None;
-    }
-    let track = registry.upstream_provider_id(provider_id)?;
-    let template = crate::providers::sub2api::metric_template_for_track(provider_id, track)?;
+    let policy = MetricPolicy::for_provider(registry, provider_id);
+    let template =
+        crate::providers::sub2api::metric_template_for_track(provider_id, policy.track()?)?;
     let mut metrics = Vec::new();
-    Some(apply_metric_template(
-        &mut metrics,
-        &template,
-        &[],
-        |metric_id| {
-            crate::providers::sub2api::metric_supported(provider_id, metric_id, Some(track))
-        },
-    ))
+    Some(apply_metric_template(&mut metrics, &template, &[], &policy))
 }
 
 fn default_provider(definition: &ProviderDefinition, detected: bool) -> ProviderLayout {
@@ -1073,7 +1027,7 @@ pub struct MetricTemplateChange {
 /// Anything the user changed keeps its settings, and the existing order is retained.
 ///
 /// Pins the user chose take priority: a new default's pin is dropped when it would push the
-/// supported pins past `MAX_PINS_PER_PROVIDER`.
+/// Stars past [`MAX_STARS`].
 ///
 /// Returns the defaults to record. A customized metric keeps the default it was customized
 /// from, even when it happens to match the new one, so later track changes still keep it.
@@ -1081,7 +1035,7 @@ fn apply_metric_template(
     metrics: &mut Vec<MetricLayout>,
     template: &[MetricLayout],
     applied: &[MetricLayout],
-    is_supported: impl Fn(&str) -> bool,
+    policy: &MetricPolicy,
 ) -> Vec<MetricLayout> {
     let mut recorded = Vec::with_capacity(template.len());
     let mut adopted = Vec::new();
@@ -1102,7 +1056,7 @@ fn apply_metric_template(
         adopted.push(default.id.clone());
         recorded.push(default.clone());
     }
-    let counts_toward_cap = |metric: &MetricLayout| metric.pinned && is_supported(&metric.id);
+    let counts_toward_cap = |metric: &MetricLayout| metric.pinned && policy.shows(&metric.id);
     let mut pins = metrics
         .iter()
         .filter(|metric| counts_toward_cap(metric) && !adopted.contains(&metric.id))
@@ -1111,7 +1065,7 @@ fn apply_metric_template(
         if !adopted.contains(&metric.id) || !counts_toward_cap(metric) {
             continue;
         }
-        if pins < MAX_PINS_PER_PROVIDER {
+        if pins < MAX_STARS {
             pins += 1;
             continue;
         }
@@ -1126,7 +1080,7 @@ fn apply_metric_template(
 fn normalize_metrics(
     metrics: &mut Vec<MetricLayout>,
     definitions: &[MetricDefinition],
-    is_supported: impl Fn(&str) -> bool,
+    policy: &MetricPolicy,
 ) {
     let mut normalized = Vec::with_capacity(definitions.len());
     for metric in metrics.iter() {
@@ -1156,8 +1110,9 @@ fn normalize_metrics(
             .iter()
             .find(|definition| definition.id == metric.id)
             .is_some_and(|definition| definition.pinnable);
-        if is_supported(&metric.id) {
-            metric.pinned &= pinnable && pin_count < MAX_PINS_PER_PROVIDER;
+        // Until the Track is known, no Star counts toward the limit, so none is dropped.
+        if policy.track_known() && policy.shows(&metric.id) {
+            metric.pinned &= pinnable && pin_count < MAX_STARS;
             if metric.pinned {
                 pin_count += 1;
             }
@@ -1202,9 +1157,7 @@ mod tests {
         storage::Storage,
     };
 
-    use super::{
-        default_settings, normalize, MetricTemplateChange, SettingsService, MAX_PINS_PER_PROVIDER,
-    };
+    use super::{default_settings, normalize, MetricTemplateChange, SettingsService};
 
     struct CatalogProvider(ProviderDefinition);
 
@@ -1903,7 +1856,7 @@ mod tests {
         let metrics = &settings.providers[0].metrics;
         assert_eq!(
             metrics.iter().filter(|metric| metric.pinned).count(),
-            MAX_PINS_PER_PROVIDER
+            crate::metric_policy::MAX_STARS
         );
         assert!(metrics
             .iter()
@@ -2718,7 +2671,7 @@ mod tests {
             .iter()
             .filter(|metric| metric.pinned)
             .count();
-        assert!(pins <= MAX_PINS_PER_PROVIDER);
+        assert!(pins <= crate::metric_policy::MAX_STARS);
     }
 
     #[test]

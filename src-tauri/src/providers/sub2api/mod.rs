@@ -48,6 +48,12 @@ const PROVIDER_SLOTS: usize = 8;
 const CREDENTIAL_SERVICE: &str = "io.github.deviffyy.openquota.sub2api";
 const METRIC_TEMPLATE_VERSION: u8 = 1;
 
+/// A connection's definition, for tests that need one without its credential store.
+#[cfg(test)]
+pub(crate) fn test_definition(provider_id: &str) -> ProviderDefinition {
+    definition_for(provider_id, "Sub2API")
+}
+
 fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
     let metric_id = |suffix: &str| format!("{provider_id}.{suffix}");
     ProviderDefinition {
@@ -200,7 +206,7 @@ fn definition_for(provider_id: &str, display_name: &str) -> ProviderDefinition {
     }
 }
 
-/// The upstream id a Sub2API track reports, as passed to [`metric_supported`].
+/// The upstream id a Sub2API track reports, as passed to [`track_shows_metric`].
 pub fn track_provider_id(mode: Sub2ApiMode, upstream: Sub2ApiUpstream) -> &'static str {
     match mode {
         Sub2ApiMode::Subscription => "subscription",
@@ -244,8 +250,10 @@ pub fn metric_template_for_track(provider_id: &str, track: &str) -> Option<Vec<M
     track_for_id(track).map(|(mode, upstream)| metric_template(provider_id, upstream, mode))
 }
 
-/// Whether a connection's metric can report data for its upstream, matching the Customize page.
-pub fn metric_supported(
+/// Whether a connection's metric can report data on `track`. `None` is a Track not yet read.
+///
+/// Only [`crate::metric_policy`] asks this; everything else asks the policy.
+pub(crate) fn track_shows_metric(
     provider_id: &str,
     metric_id: &str,
     upstream_provider_id: Option<&str>,
@@ -278,6 +286,14 @@ pub fn metric_supported(
         suffix,
         "weekly" | "trend" | "today" | "yesterday" | "last30"
     ) || upstream_only.contains(&suffix)
+}
+
+/// Whether a subscription reports this metric as a percentage of a limit: daily, weekly, monthly.
+pub(crate) fn subscription_percentage_metric(metric_id: &str) -> bool {
+    matches!(
+        metric_id.rsplit('.').next(),
+        Some("daily" | "weekly" | "monthly")
+    )
 }
 
 pub fn metric_template(
@@ -1988,72 +2004,72 @@ mod tests {
     }
 
     #[test]
-    fn metric_support_follows_the_configured_upstream() {
-        use super::metric_supported;
+    fn metric_support_follows_the_track() {
+        use super::track_shows_metric;
 
-        assert!(!metric_supported("sub2api@2", "sub2api@2.extra", None));
-        assert!(metric_supported("sub2api@2", "sub2api@2.spark", None));
-        assert!(metric_supported(
+        assert!(!track_shows_metric("sub2api@2", "sub2api@2.extra", None));
+        assert!(track_shows_metric("sub2api@2", "sub2api@2.spark", None));
+        assert!(track_shows_metric(
             "sub2api@2",
             "sub2api@2.spark",
             Some("codex")
         ));
-        assert!(!metric_supported(
+        assert!(!track_shows_metric(
             "sub2api@2",
             "sub2api@2.spark",
             Some("claude")
         ));
-        assert!(!metric_supported(
+        assert!(!track_shows_metric(
             "sub2api@2",
             "sub2api@2.rateLimitResets",
             Some("claude")
         ));
-        assert!(metric_supported(
+        assert!(track_shows_metric(
             "sub2api@2",
             "sub2api@2.fable",
             Some("claude")
         ));
-        assert!(!metric_supported(
+        assert!(!track_shows_metric(
             "sub2api@2",
             "sub2api@2.fable",
             Some("codex")
         ));
-        assert!(metric_supported(
+        assert!(track_shows_metric(
             "sub2api@2",
             "sub2api@2.session",
             Some("codex")
         ));
-        assert!(metric_supported("sub2api", "sub2api@2.extra", None));
-        assert!(!metric_supported("sub2api@2", "sub2api@2.claude", None));
+        assert!(track_shows_metric("sub2api", "sub2api@2.extra", None));
+        assert!(!track_shows_metric("sub2api@2", "sub2api@2.claude", None));
         for suffix in ["session", "weekly", "claude", "claudeWeekly", "last30"] {
-            assert!(metric_supported(
+            assert!(track_shows_metric(
                 "sub2api@2",
                 &format!("sub2api@2.{suffix}"),
                 Some("antigravity")
             ));
         }
         for suffix in ["sonnet", "spark", "monthly", "extra"] {
-            assert!(!metric_supported(
+            assert!(!track_shows_metric(
                 "sub2api@2",
                 &format!("sub2api@2.{suffix}"),
                 Some("antigravity")
             ));
         }
         for suffix in ["weekly", "monthly", "trend", "today"] {
-            assert!(metric_supported(
+            assert!(track_shows_metric(
                 "sub2api@2",
                 &format!("sub2api@2.{suffix}"),
                 Some("grok")
             ));
         }
         for suffix in ["session", "claude", "daily", "expires", "extra"] {
-            assert!(!metric_supported(
+            assert!(!track_shows_metric(
                 "sub2api@2",
                 &format!("sub2api@2.{suffix}"),
                 Some("grok")
             ));
         }
-        assert!(!metric_supported(
+        assert!(!track_shows_metric(
             "sub2api@2",
             "sub2api@2.claude",
             Some("claude")
@@ -2112,7 +2128,7 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    super::metric_supported(
+                    super::track_shows_metric(
                         "sub2api@2",
                         &format!("sub2api@2.{suffix}"),
                         Some(upstream.provider_id())
@@ -2187,7 +2203,7 @@ mod tests {
                 );
                 if metric.enabled {
                     assert!(
-                        super::metric_supported(
+                        super::track_shows_metric(
                             "sub2api@2",
                             &metric.id,
                             Some(upstream.provider_id())

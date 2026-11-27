@@ -280,48 +280,19 @@ fn menu_bar_providers(settings: &AppSettings, registry: &ProviderRegistry) -> Ve
         .filter(|provider| provider.enabled)
         .filter_map(|provider| {
             let definition = registry.definition(&provider.id)?;
-            let connection_configured = registry
-                .catalog()
-                .connection_config_provider_ids
-                .contains(&provider.id);
-            let upstream_provider_id = connection_configured
-                .then(|| registry.upstream_provider_id(&provider.id))
-                .flatten();
-            let pins = provider
-                .metrics
-                .iter()
-                .filter(|metric| {
-                    metric.pinned
-                        && (!connection_configured
-                            || crate::providers::sub2api::metric_supported(
-                                &provider.id,
-                                &metric.id,
-                                upstream_provider_id,
-                            ))
-                })
-                .count();
+            let policy = crate::metric_policy::MetricPolicy::for_provider(registry, &provider.id);
+            let can_add_star = policy.can_add_star(&provider.metrics);
             let options = provider
                 .metrics
                 .iter()
                 .filter_map(|metric| {
                     let metric_definition = registry.metric(&metric.id)?;
-                    let supported = !connection_configured
-                        || crate::providers::sub2api::metric_supported(
-                            &provider.id,
-                            &metric.id,
-                            upstream_provider_id,
-                        );
-                    let allowed = upstream_provider_id != Some("subscription")
-                        || subscription_percentage_metric(&metric.id);
-                    (metric_definition.pinnable && supported && (allowed || metric.pinned)).then(
-                        || MenuBarOption {
-                            metric_id: metric.id.clone(),
-                            label: metric_definition.label.clone(),
-                            pinned: metric.pinned,
-                            available: metric.pinned
-                                || pins < crate::settings::MAX_PINS_PER_PROVIDER,
-                        },
-                    )
+                    policy.can_toggle_star(metric).then(|| MenuBarOption {
+                        metric_id: metric.id.clone(),
+                        label: metric_definition.label.clone(),
+                        pinned: metric.pinned,
+                        available: metric.pinned || can_add_star,
+                    })
                 })
                 .collect::<Vec<_>>();
             (!options.is_empty()).then(|| MenuBarProvider {
@@ -375,7 +346,7 @@ fn bar_metrics(groups: &[TrayGroup]) -> Vec<(&TrayGroup, Vec<&TrayMetric>)> {
                 .metrics
                 .iter()
                 .filter(|metric| metric.gauge.is_some())
-                .take(crate::settings::MAX_PINS_PER_PROVIDER)
+                .take(crate::metric_policy::MAX_STARS)
                 .collect::<Vec<_>>();
             if metrics.is_empty() {
                 return None;
@@ -424,7 +395,7 @@ fn text_metrics(groups: &[TrayGroup]) -> Vec<(&TrayGroup, Vec<&TrayMetric>)> {
                 group
                     .metrics
                     .iter()
-                    .take(crate::settings::MAX_PINS_PER_PROVIDER)
+                    .take(crate::metric_policy::MAX_STARS)
                     .collect::<Vec<_>>(),
             )
         })
@@ -528,15 +499,11 @@ fn resolved_groups(
         .collect()
 }
 
-fn subscription_percentage_metric(id: &str) -> bool {
-    matches!(id.rsplit('.').next(), Some("daily" | "weekly" | "monthly"))
-}
-
 fn subscription_tray_metric(
     definition: &MetricDefinition,
     snapshot: &ProviderSnapshot,
 ) -> Option<TrayMetric> {
-    if !subscription_percentage_metric(&definition.id) {
+    if !crate::providers::sub2api::subscription_percentage_metric(&definition.id) {
         return None;
     }
     let id = definition.source.source_id()?;
