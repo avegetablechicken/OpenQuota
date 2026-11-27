@@ -331,7 +331,7 @@ mod tests {
     ];
 
     /// Home clients migrated onto this module, with the policy their native loop uses.
-    const HOMES: [(&str, TransitionalPolicy); 2] = [
+    const HOMES: [(&str, TransitionalPolicy); 3] = [
         (
             "claude",
             TransitionalPolicy {
@@ -344,6 +344,13 @@ mod tests {
             TransitionalPolicy {
                 window_start_days_ago: 30,
                 zero_token_guard: false,
+            },
+        ),
+        (
+            "grok",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
             },
         ),
     ];
