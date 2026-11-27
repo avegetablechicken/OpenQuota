@@ -2,17 +2,16 @@
 //!
 //! Every local-log scanner hands its parsed events to this module as `UsageObservation`s. The
 //! module owns the per-observation policy: the Scan window, the zero-token guard, Unattributed
-//! usage, the Disposition (the Card's own series, Routed usage on another Card, or Others), and
-//! which pricing path applies (Recorded cost or estimate). Adapters keep discovery, parsing and
+//! and Local runtime usage, the Disposition (the Card's own series, Routed usage on another Card,
+//! or Others), and which pricing path applies (Recorded cost or estimate). Adapters keep discovery, parsing and
 //! deduplication. Terms are defined in `GLOSSARY.md`.
 
 use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
-use crate::pricing::{ModelPricing, ServiceTier, TokenBreakdown};
+use crate::pricing::{is_local_runtime_model, ModelPricing, ServiceTier, TokenBreakdown};
 
 use super::model_scope::{
-    card_for_model, is_local_runtime_provider, model_belongs_to_card, native_log_disposition,
-    LocalModelDisposition,
+    card_for_model, is_local_runtime_provider, native_log_disposition, LocalModelDisposition,
 };
 
 pub(super) mod codex;
@@ -124,21 +123,6 @@ fn scan_window_start(today: NaiveDate) -> NaiveDate {
 pub(super) struct TransitionalPolicy {
     /// How priced usage on the Card's own series is labelled.
     pub label: LabelMode,
-    /// How Local runtime usage is recognised.
-    pub local_runtime: LocalRuntimeMode,
-}
-
-/// TEMPORARY, see `TransitionalPolicy`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LocalRuntimeMode {
-    /// Only by the model slug (`ollama/...`), which no Card owns, so it lands in Others.
-    ModelSlug,
-    /// Also by the provider hint: such usage lands, unpriced, in the home Card's Others whatever
-    /// the model, and never on another Card.
-    ModelSlugOrProvider,
-    /// Also by the provider hint: such usage never reaches another Card. A model its home Card
-    /// owns stays on that Card's own series, priced; anything else lands unpriced in Others.
-    ProviderKeepsHome,
 }
 
 /// TEMPORARY, see `TransitionalPolicy`.
@@ -158,7 +142,7 @@ pub(super) enum LabelMode {
 /// Unattributed usage) or its Others (models no Card owns); models owned by another Card are
 /// skipped. For any other `target_card`, only observations whose model that Card owns land, as
 /// Routed usage. Own-series and Routed usage are priced under the Card they land on, Others under
-/// the home Card.
+/// the home Card. Local runtime usage always lands, unpriced, in the home Card's Others.
 ///
 /// Returns where the observations landed on `target_card`.
 pub(super) fn record<'a>(
@@ -175,23 +159,6 @@ pub(super) fn record<'a>(
         let Some(date) = date_in_window(&observation, now) else {
             continue;
         };
-        if policy.local_runtime == LocalRuntimeMode::ModelSlugOrProvider
-            && observation
-                .provider_hint
-                .is_some_and(is_local_runtime_provider)
-        {
-            if target_card == home_card {
-                accumulator.add_other(
-                    date,
-                    observation.total_tokens,
-                    None,
-                    true,
-                    observation.model.unwrap_or("Unattributed"),
-                );
-                landed.others = true;
-            }
-            continue;
-        }
         if target_card == home_card {
             match record_home(observation, date, home_card, pricing, policy, accumulator) {
                 Some(Bucket::OwnSeries) => landed.own_series = true,
@@ -322,19 +289,17 @@ fn record_home(
         )
         .then_some(Bucket::OwnSeries)
     };
-    let Some(model) = observation.model else {
-        if observation.home_is_fallback {
-            return None;
-        }
-        return own_series(accumulator);
-    };
-    if served_by_local_runtime_keeping_home(policy, &observation) {
-        if !observation.home_is_fallback && model_belongs_to_card(home_card, model) {
-            return own_series(accumulator);
-        }
+    // Unattributed usage under a fallback home may belong to any Card, so it lands nowhere.
+    if observation.model.is_none() && observation.home_is_fallback {
+        return None;
+    }
+    if served_by_local_runtime(&observation) {
         add_others(observation, date, None, accumulator);
         return Some(Bucket::Others);
     }
+    let Some(model) = observation.model else {
+        return own_series(accumulator);
+    };
     match native_log_disposition(home_card, model) {
         LocalModelDisposition::Home
             if !observation.home_is_fallback || card_for_model(model) == Some(home_card) =>
@@ -379,12 +344,11 @@ fn priced_model<'a>(observation: &UsageObservation<'a>) -> Option<&'a str> {
     observation.rate_model.or(observation.model)
 }
 
-fn served_by_local_runtime_keeping_home(
-    policy: TransitionalPolicy,
-    observation: &UsageObservation<'_>,
-) -> bool {
-    policy.local_runtime == LocalRuntimeMode::ProviderKeepsHome
-        && observation
+/// Local runtime usage: its model slug or its provider hint says a Local runtime served it. It
+/// is free whoever owns the model, so it never reaches another Card.
+fn served_by_local_runtime(observation: &UsageObservation<'_>) -> bool {
+    observation.model.is_some_and(is_local_runtime_model)
+        || observation
             .provider_hint
             .is_some_and(is_local_runtime_provider)
 }
@@ -397,7 +361,7 @@ fn record_routed(
     policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
-    if served_by_local_runtime_keeping_home(policy, &observation) {
+    if served_by_local_runtime(&observation) {
         return false;
     }
     match observation.model {
@@ -554,12 +518,9 @@ pub(super) mod test_support {
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
 
-    use super::{
-        record, record_settled, LabelMode, LocalRuntimeMode, Settled, TransitionalPolicy,
-        UsageObservation,
-    };
+    use super::{record, record_settled, LabelMode, Settled, TransitionalPolicy, UsageObservation};
     use crate::{
-        pricing::{test_bundled_pricing, ModelPricing, TokenBreakdown},
+        pricing::{is_local_runtime_model, test_bundled_pricing, ModelPricing, TokenBreakdown},
         providers::card_usage::DailyUsageAccumulator,
     };
 
@@ -582,140 +543,120 @@ mod tests {
             "claude",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "codex",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "grok",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "antigravity",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "kimi",
             TransitionalPolicy {
                 label: LabelMode::Family,
-                local_runtime: LocalRuntimeMode::ModelSlugOrProvider,
             },
         ),
         (
             "antigravity",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "claude",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "codex",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "antigravity",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "grok",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "kimi",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "minimax",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "zai",
             TransitionalPolicy {
                 label: LabelMode::RawModel,
-                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
             "claude",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
         (
             "codex",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
         (
             "antigravity",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
         (
             "grok",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
         (
             "kimi",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
         (
             "minimax",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
         (
             "zai",
             TransitionalPolicy {
                 label: LabelMode::FamilyWithVariant,
-                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
     ];
@@ -803,23 +744,55 @@ mod tests {
         }
     }
 
+    /// Local runtime usage, recognised by its model slug or its provider hint, lands only in the
+    /// home Card's Others, unpriced, whoever owns the model and whatever cost was recorded.
     #[test]
-    fn local_runtime_providers_land_exactly_once_across_cards() {
+    fn local_runtime_usage_lands_unpriced_in_the_home_cards_others() {
         let pricing = test_bundled_pricing();
         for (home, policy) in HOMES {
-            if policy.local_runtime != LocalRuntimeMode::ModelSlugOrProvider {
-                continue;
-            }
-            for model in MODELS {
-                let observation = UsageObservation {
-                    provider_hint: Some("ollama"),
-                    ..UsageObservation::new(now(), model, tokens(1_000, 100), None)
-                };
-                assert_eq!(
-                    landings(&pricing, home, policy, observation),
-                    1,
-                    "{home} home, {model:?}"
-                );
+            let foreign = CARDS.iter().copied().find(|card| *card != home).unwrap();
+            let cases = [
+                ("slug only", Some("ollama/llama3"), None),
+                (
+                    "slug naming a cloud model",
+                    Some("ollama/claude-sonnet-4-5"),
+                    None,
+                ),
+                ("provider only", Some(owned_model(home)), Some("ollama")),
+                ("foreign model", Some(owned_model(foreign)), Some("Ollama")),
+                ("Unattributed", None, Some("ollama")),
+            ];
+            for (case, model, provider_hint) in cases {
+                for recorded_cost in [None, Some(0.25)] {
+                    let observation = UsageObservation {
+                        provider_hint,
+                        ..UsageObservation::new(now(), model, tokens(1_000, 100), recorded_cost)
+                    };
+                    for card in CARDS {
+                        let mut accumulator = DailyUsageAccumulator::default();
+                        record(
+                            [observation],
+                            home,
+                            card,
+                            now(),
+                            &pricing,
+                            policy,
+                            &mut accumulator,
+                        );
+                        let history = accumulator.build(now(), "test");
+                        let context = format!("{case}: {home} home on {card}, {recorded_cost:?}");
+                        assert!(history.daily.is_empty(), "{context}");
+                        let others = history.other_usage.and_then(|others| others.last_30_days);
+                        if card != home {
+                            assert!(others.is_none(), "{context}");
+                            continue;
+                        }
+                        let others = others.expect(&context);
+                        assert_eq!(others.tokens, 1_100, "{context}");
+                        assert_eq!(others.priced_tokens, 0, "{context}");
+                        assert_eq!(others.estimated_cost_usd, None, "{context}");
+                    }
+                }
             }
         }
     }
@@ -828,9 +801,6 @@ mod tests {
     fn usage_keeping_its_home_lands_once_unless_it_has_no_home_or_model() {
         let pricing = test_bundled_pricing();
         for (home, policy) in HOMES {
-            if policy.local_runtime != LocalRuntimeMode::ProviderKeepsHome {
-                continue;
-            }
             for home_is_fallback in [false, true] {
                 for provider_hint in [None, Some("ollama"), Some("openrouter")] {
                     for model in MODELS {
@@ -949,6 +919,7 @@ mod tests {
         }
     }
 
+    /// Local runtime usage is free whatever was recorded, so with no tokens it lands nowhere.
     #[test]
     fn zero_token_observations_with_a_recorded_cost_land_exactly_once() {
         let pricing = test_bundled_pricing();
@@ -956,7 +927,10 @@ mod tests {
             for model in MODELS {
                 let observation = UsageObservation::new(now(), model, tokens(0, 0), Some(0.25));
                 let model = observation.model;
-                let expected = usize::from(!(observation.home_is_fallback && model.is_none()));
+                let local_runtime = model.is_some_and(is_local_runtime_model);
+                let lands_nowhere =
+                    local_runtime || (observation.home_is_fallback && model.is_none());
+                let expected = usize::from(!lands_nowhere);
                 assert_eq!(
                     landings(&pricing, home, policy, observation),
                     expected,

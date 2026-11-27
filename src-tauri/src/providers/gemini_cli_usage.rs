@@ -13,7 +13,7 @@ use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
         card_usage::DailyUsageAccumulator,
-        card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
+        card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     },
     storage::Storage,
@@ -435,7 +435,6 @@ fn aggregate_into(
         pricing,
         TransitionalPolicy {
             label: LabelMode::FamilyWithVariant,
-            local_runtime: LocalRuntimeMode::ModelSlug,
         },
         accumulator,
     )

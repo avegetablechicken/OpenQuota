@@ -9,8 +9,8 @@ pub struct ModelPricing {
     memo: Mutex<HashMap<String, Option<ModelRates>>>,
 }
 
-/// Models served by a local runtime (`ollama/*`) are free, even when named after a cloud model.
-fn is_local_runtime_model(model: &str) -> bool {
+/// Models named for a Local runtime (`ollama/*`) are free, even when named after a cloud model.
+pub fn is_local_runtime_model(model: &str) -> bool {
     model
         .trim()
         .get(..7)

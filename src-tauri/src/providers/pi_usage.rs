@@ -16,9 +16,9 @@ use crate::{
 
 use super::{
     card_usage::DailyUsageAccumulator,
-    card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
+    card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
-    model_scope::{card_for_model, is_local_runtime_provider, normalize_provider_model},
+    model_scope::{card_for_model, normalize_provider_model},
 };
 
 const LOG_CACHE_SCHEMA_VERSION: u8 = 10;
@@ -252,9 +252,6 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
 }
 
 fn mapped_card(provider: &str, model: &str) -> Option<&'static str> {
-    if is_local_runtime_provider(provider) {
-        return None;
-    }
     let normalized_model = normalize_provider_model(provider, model);
     if let Some(card) = card_for_model(&normalized_model) {
         return Some(card);
@@ -293,7 +290,6 @@ fn aggregate_into(
 ) -> PiUsageSources {
     let policy = TransitionalPolicy {
         label: LabelMode::RawModel,
-        local_runtime: LocalRuntimeMode::ModelSlug,
     };
     let mut contributed = PiUsageSources::default();
     for event in events.iter().filter(|event| event.card_id == card_id) {
@@ -313,10 +309,12 @@ fn aggregate_into(
     contributed
 }
 
-/// pi counts its reported total, and a carried cost of zero means none was recorded.
+/// pi counts its reported total, and a carried cost of zero means none was recorded. The provider
+/// tells whether a Local runtime served the usage.
 fn observation(event: &PiUsageEvent) -> UsageObservation<'_> {
     UsageObservation {
         total_tokens: event.reported_total_tokens,
+        provider_hint: Some(&event.provider),
         ..UsageObservation::new(
             event.timestamp,
             Some(&event.model),
@@ -878,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_sessions_are_not_billed_to_cloud_cards_and_kimi_short_aliases_route_to_kimi() {
+    fn ollama_sessions_stay_unpriced_in_others_and_kimi_short_aliases_route_to_kimi() {
         let directory = tempdir().unwrap();
         let pi_sessions = directory.path().join("pi");
         fs::create_dir_all(&pi_sessions).unwrap();
@@ -926,8 +924,12 @@ mod tests {
             &mut zai_acc,
         )
         .unwrap();
-        assert!(!zai_sources.pi);
-        assert!(zai_acc.build(at, "test").today.is_none());
+        assert!(zai_sources.pi);
+        let zai_history = zai_acc.build(at, "test");
+        assert!(zai_history.today.is_none());
+        let zai_others = zai_history.other_usage.unwrap().today.unwrap();
+        assert_eq!(zai_others.tokens, 1500);
+        assert_eq!(zai_others.estimated_cost_usd, None);
 
         let mut kimi_acc = DailyUsageAccumulator::default();
         let kimi_sources = scan_directories_into(
@@ -1052,7 +1054,7 @@ mod tests {
                 event(4, Pi, "openai", "gpt-oss-120b", 500, 50, None),
                 event(4, Pi, "google-antigravity", "gpt-oss-120b", 500, 50, None),
                 event(4, Pi, "openai", "ollama/llama3", 50, 5, None),
-                // Local runtime providers are dropped at parse.
+                // Local runtime providers: unpriced Others on the model's Card, if one owns it.
                 event(4, Pi, "ollama", "llama3", 300, 30, None),
                 event(4, Pi, "ollama", "claude-sonnet-4-5", 300, 30, None),
                 // Unmapped providers are dropped at parse too.
@@ -1275,6 +1277,12 @@ mod tests {
     "yesterday": null,
     "last30Days": {
       "models": {
+        "claude-sonnet-4-5": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
         "deepseek-chat": {
           "tokens": 110,
           "pricedTokens": 110,
@@ -1282,11 +1290,11 @@ mod tests {
           "costEstimated": false
         }
       },
-      "tokens": 110,
+      "tokens": 440,
       "pricedTokens": 110,
       "estimatedCostUsd": 0.01,
       "costEstimated": false,
-      "estimateComplete": true
+      "estimateComplete": false
     }
   }
 }

@@ -8,7 +8,7 @@ mod supplement;
 
 pub use catalog::PricingCatalog;
 pub(crate) use history::ServiceTier;
-pub use model_pricing::ModelPricing;
+pub use model_pricing::{is_local_runtime_model, ModelPricing};
 pub use rates::{ModelRates, TokenBreakdown};
 pub use store::PricingStore;
 pub use supplement::PricingSupplement;

@@ -16,7 +16,7 @@ use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     providers::{
         card_usage::DailyUsageAccumulator,
-        card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
+        card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
         model_scope::normalize_provider_model,
     },
 };
@@ -150,7 +150,6 @@ impl ZCodeUsageScanner {
         let target_card = target.as_str();
         let policy = TransitionalPolicy {
             label: LabelMode::FamilyWithVariant,
-            local_runtime: LocalRuntimeMode::ProviderKeepsHome,
         };
         let mut contributed = false;
         for mut event in events {
@@ -1081,8 +1080,8 @@ mod tests {
   },
   "yesterday": null,
   "last30Days": {
-    "tokens": 5850,
-    "estimatedCostUsd": 0.0243,
+    "tokens": 5190,
+    "estimatedCostUsd": 0.022949999999999998,
     "costEstimated": true,
     "estimateComplete": false,
     "modelBreakdown": {
@@ -1099,17 +1098,17 @@ mod tests {
         },
         {
           "model": "claude-sonnet-4-5",
-          "totalTokens": 1540,
-          "costUsd": 0.0063
+          "totalTokens": 1210,
+          "costUsd": 0.0049499999999999995
         },
         {
           "model": "Other",
-          "totalTokens": 660,
+          "totalTokens": 330,
           "costUsd": null,
           "variants": [
             {
               "model": "Unattributed",
-              "totalTokens": 660,
+              "totalTokens": 330,
               "costUsd": null
             }
           ]
@@ -1141,12 +1140,6 @@ mod tests {
       "estimateComplete": true
     },
     {
-      "date": "today-5",
-      "tokens": 660,
-      "estimatedCostUsd": 0.00135,
-      "estimateComplete": false
-    },
-    {
       "date": "today-29",
       "tokens": 110,
       "estimatedCostUsd": 0.00045,
@@ -1161,6 +1154,18 @@ mod tests {
     "yesterday": null,
     "last30Days": {
       "models": {
+        "Unattributed": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "claude-sonnet-4-5": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
         "deepseek-chat": {
           "tokens": 110,
           "pricedTokens": 110,
@@ -1180,7 +1185,7 @@ mod tests {
           "costEstimated": false
         }
       },
-      "tokens": 770,
+      "tokens": 1430,
       "pricedTokens": 110,
       "estimatedCostUsd": 0.000032200000000000003,
       "costEstimated": true,

@@ -1,9 +1,11 @@
+use crate::pricing::is_local_runtime_model;
+
 fn normalized(model: &str) -> String {
     model.trim().to_ascii_lowercase()
 }
 
 fn model_slug(normalized_model: &str) -> Option<&str> {
-    if normalized_model.is_empty() || normalized_model.starts_with("ollama/") {
+    if normalized_model.is_empty() || is_local_runtime_model(normalized_model) {
         return None;
     }
     let slug = normalized_model

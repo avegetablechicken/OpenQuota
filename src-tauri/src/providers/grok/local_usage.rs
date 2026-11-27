@@ -14,7 +14,7 @@ use crate::{
     providers::{
         antigravity,
         card_usage::DailyUsageAccumulator,
-        card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
+        card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
         claude, codex, gemini_cli_usage, kimi,
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
         model_scope::format_source_note,
@@ -447,7 +447,6 @@ fn aggregate_into(
         pricing,
         TransitionalPolicy {
             label: LabelMode::RawModel,
-            local_runtime: LocalRuntimeMode::ModelSlug,
         },
         accumulator,
     );
@@ -468,7 +467,6 @@ fn aggregate_routed_into(
         pricing,
         TransitionalPolicy {
             label: LabelMode::RawModel,
-            local_runtime: LocalRuntimeMode::ModelSlug,
         },
         accumulator,
     )
