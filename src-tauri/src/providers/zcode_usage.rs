@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Days, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use zeroize::Zeroizing;
@@ -15,11 +15,9 @@ use crate::models::UsageHistory;
 use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     providers::{
+        card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
         daily_usage::DailyUsageAccumulator,
-        model_scope::{
-            card_for_model, is_local_runtime_provider, model_belongs_to_card,
-            normalize_provider_model,
-        },
+        model_scope::normalize_provider_model,
     },
 };
 
@@ -49,19 +47,6 @@ pub(crate) enum ZCodeProvider {
 }
 
 impl ZCodeProvider {
-    pub(crate) fn from_card_id(card_id: &str) -> Option<Self> {
-        match card_id {
-            "antigravity" => Some(Self::Antigravity),
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "grok" => Some(Self::Grok),
-            "kimi" => Some(Self::Kimi),
-            "minimax" => Some(Self::MiniMax),
-            "zai" => Some(Self::Zai),
-            _ => None,
-        }
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Self::Antigravity => "antigravity",
@@ -162,56 +147,54 @@ impl ZCodeUsageScanner {
     ) -> Result<bool, ZCodeUsageError> {
         let configured = configured_providers(&self.config_path);
         let events = read_events(&self.database_path, now)?;
-        let since = history_start(now);
+        let target_card = target.as_str();
+        let policy = TransitionalPolicy {
+            window_start_days_ago: 30,
+            zero_token_guard: true,
+            label: LabelMode::FamilyWithVariant,
+            local_runtime: LocalRuntimeMode::ProviderKeepsHome,
+        };
         let mut contributed = false;
-
-        for event in events {
-            let date = event.timestamp.with_timezone(&Local).date_naive();
-            if event.timestamp > now || date < since {
-                continue;
-            }
+        for mut event in events {
             if is_delegated_cli(&event.provider_id.trim().to_ascii_lowercase()) {
                 continue;
             }
-            let is_ollama = is_local_runtime_provider(&event.provider_id);
             let configured_owner =
                 provider_kind(&event.provider_id, configured.get(&event.provider_id));
-            if event.model.is_empty() {
-                if configured_owner == Some(target) {
-                    contributed = true;
-                    accumulator.add_unpriced(date, event.total, "Unattributed");
-                }
-                continue;
+            if !event.model.is_empty() {
+                event.model = if configured_owner == Some(ZCodeProvider::Kimi) {
+                    normalize_provider_model("kimi", &event.model)
+                } else {
+                    normalize_provider_model(&event.provider_id, &event.model)
+                };
             }
-            let mut event = event;
-            event.model = if configured_owner == Some(ZCodeProvider::Kimi) {
-                normalize_provider_model("kimi", &event.model)
-            } else {
-                normalize_provider_model(&event.provider_id, &event.model)
+            // Rows from a provider no Card is configured for keep their Others on Zai.
+            let home = configured_owner.unwrap_or(ZCodeProvider::Zai);
+            let rate_model = (!event.model.is_empty())
+                .then(|| resolve_rate_model(&event, pricing, target_card).0)
+                .flatten();
+            let observation = UsageObservation {
+                rate_model: rate_model.as_deref(),
+                home_is_fallback: configured_owner.is_none(),
+                provider_hint: Some(&event.provider_id),
+                total_tokens: event.total,
+                ..UsageObservation::new(
+                    event.timestamp,
+                    Some(&event.model),
+                    event_tokens(&event),
+                    None,
+                )
             };
-            let model_owner = if is_ollama {
-                None
-            } else {
-                card_for_model(&event.model).and_then(ZCodeProvider::from_card_id)
-            };
-            if let Some(owner) = model_owner {
-                if owner == target {
-                    contributed = true;
-                    add_event(accumulator, date, &event, pricing, target);
-                }
-                continue;
-            }
-            if configured_owner == Some(target)
-                && model_belongs_to_card(target.as_str(), &event.model)
-            {
-                contributed = true;
-                add_event(accumulator, date, &event, pricing, target);
-                continue;
-            }
-            let other_owner = configured_owner.unwrap_or(ZCodeProvider::Zai);
-            if other_owner == target {
-                add_other_event(accumulator, date, &event, pricing, target, is_ollama);
-            }
+            contributed |= card_usage::record(
+                [observation],
+                home.as_str(),
+                target_card,
+                now,
+                pricing,
+                policy,
+                accumulator,
+            )
+            .own_series;
         }
         Ok(contributed)
     }
@@ -357,49 +340,6 @@ fn event_tokens(event: &UsageEvent) -> TokenBreakdown {
     }
 }
 
-fn add_event(
-    accumulator: &mut DailyUsageAccumulator,
-    date: NaiveDate,
-    event: &UsageEvent,
-    pricing: &ModelPricing,
-    target: ZCodeProvider,
-) {
-    let provider = target.as_str();
-    let (variant_model, fallback) = resolve_rate_model(event, pricing, provider);
-    let rate_model = variant_model.as_deref().unwrap_or(fallback);
-    let tokens = event_tokens(event);
-    let display_family = pricing.display_family(rate_model);
-    if let Some(cost) =
-        pricing.estimated_cost_at(provider, rate_model, event.timestamp, tokens, true)
-    {
-        if display_family != rate_model {
-            accumulator.add_variant(date, event.total, cost, &display_family, rate_model);
-        } else {
-            accumulator.add(date, event.total, cost, &display_family);
-        }
-    } else {
-        accumulator.add_unpriced(date, event.total, rate_model);
-    }
-}
-
-fn add_other_event(
-    accumulator: &mut DailyUsageAccumulator,
-    date: NaiveDate,
-    event: &UsageEvent,
-    pricing: &ModelPricing,
-    target: ZCodeProvider,
-    is_local_runtime: bool,
-) {
-    let provider = target.as_str();
-    let (variant_model, fallback) = resolve_rate_model(event, pricing, provider);
-    let rate_model = variant_model.as_deref().unwrap_or(fallback);
-    let tokens = event_tokens(event);
-    let cost = (!is_local_runtime)
-        .then(|| pricing.estimated_cost_at(provider, rate_model, event.timestamp, tokens, true))
-        .flatten();
-    accumulator.add_other(date, event.total, cost, true, rate_model);
-}
-
 fn table_columns(
     connection: &Connection,
     table: &str,
@@ -519,13 +459,6 @@ fn is_delegated_cli(provider_id: &str) -> bool {
     ["codex-cli", "claude-cli", "gemini-cli", "agent-cli"]
         .iter()
         .any(|marker| provider_id.contains(marker))
-}
-
-fn history_start(now: DateTime<Utc>) -> NaiveDate {
-    now.with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN)
 }
 
 fn non_negative(value: i64) -> u64 {
@@ -795,5 +728,1111 @@ mod tests {
         let kimi = scanner.scan(now, &pricing, ZCodeProvider::Kimi).unwrap();
         assert_eq!(kimi.today.unwrap().tokens, 2500);
         assert!(kimi.other_usage.is_none());
+    }
+
+    /// Pins the output of zcode's per-row policy, so moving it into `card_usage` cannot change
+    /// what any Card shows.
+    mod characterization {
+        use chrono::{DateTime, Duration, TimeZone, Utc};
+        use rusqlite::params;
+        use tempfile::tempdir;
+
+        use super::{create_database, ZCodeProvider, ZCodeUsageScanner};
+        use crate::{
+            pricing::test_bundled_pricing,
+            providers::{
+                card_usage::test_support::{assert_pinned, relative_json},
+                daily_usage::DailyUsageAccumulator,
+            },
+        };
+
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap()
+        }
+
+        /// `(provider, model, variant, days_ago, [input, output, cache write, cache read, total])`
+        type Row = (
+            &'static str,
+            &'static str,
+            Option<&'static str>,
+            i64,
+            [i64; 5],
+        );
+
+        const ROWS: &[Row] = &[
+            // Zai's own provider: priced with and without a variant, unpriced, Others, no model.
+            (
+                "builtin:zai",
+                "glm-4.6",
+                Some("max"),
+                0,
+                [2_000, 200, 0, 0, 0],
+            ),
+            ("builtin:zai", "glm-4.6", None, 0, [2_000, 200, 300, 500, 0]),
+            (
+                "builtin:zai",
+                "glm-99-unreleased",
+                None,
+                1,
+                [700, 70, 0, 0, 0],
+            ),
+            ("builtin:zai", "deepseek-chat", None, 1, [900, 90, 0, 0, 0]),
+            ("builtin:zai", "", None, 1, [400, 40, 0, 0, 0]),
+            // A provider configured as claude: own models, a routed model, Others, no model.
+            (
+                "my-anthropic",
+                "claude-sonnet-4-5",
+                Some("thinking"),
+                0,
+                [1_500, 150, 0, 0, 0],
+            ),
+            (
+                "my-anthropic",
+                "claude-opus-4-6",
+                None,
+                0,
+                [1_500, 150, 0, 0, 2_000],
+            ),
+            ("my-anthropic", "gpt-5.5", None, 2, [1_000, 100, 0, 0, 0]),
+            ("my-anthropic", "deepseek-chat", None, 2, [100, 10, 0, 0, 0]),
+            ("my-anthropic", "", None, 2, [300, 30, 0, 0, 0]),
+            // Built-in providers for other Cards, including gpt-oss on antigravity.
+            ("builtin:kimi", "k2p5", None, 3, [600, 60, 0, 0, 0]),
+            (
+                "builtin:google",
+                "gemini-3-pro",
+                None,
+                3,
+                [800, 80, 0, 0, 0],
+            ),
+            (
+                "builtin:google",
+                "gpt-oss-120b",
+                None,
+                3,
+                [500, 50, 0, 0, 0],
+            ),
+            ("builtin:minimax", "minimax-m2", None, 3, [600, 60, 0, 0, 0]),
+            ("builtin:xai", "grok-4", None, 3, [600, 60, 0, 0, 0]),
+            // An unconfigured provider: owned models route, the rest go to Zai's Others.
+            (
+                "openrouter",
+                "claude-sonnet-4-5",
+                None,
+                4,
+                [1_000, 100, 0, 0, 0],
+            ),
+            ("openrouter", "deepseek-chat", None, 4, [500, 50, 0, 0, 0]),
+            ("openrouter", "", None, 4, [200, 20, 0, 0, 0]),
+            // Ollama, configured as claude in one scenario and unconfigured in the other.
+            ("ollama", "llama3", None, 5, [300, 30, 0, 0, 0]),
+            ("ollama", "claude-sonnet-4-5", None, 5, [300, 30, 0, 0, 0]),
+            ("ollama", "glm-4.6", None, 5, [300, 30, 0, 0, 0]),
+            ("ollama", "", None, 5, [300, 30, 0, 0, 0]),
+            // Delegated CLIs are skipped.
+            (
+                "builtin:codex-cli",
+                "gpt-5.5",
+                None,
+                5,
+                [1_000, 100, 0, 0, 0],
+            ),
+            // Window edges.
+            ("builtin:zai", "glm-4.6", None, 29, [100, 10, 0, 0, 0]),
+            (
+                "my-anthropic",
+                "claude-sonnet-4-5",
+                None,
+                29,
+                [100, 10, 0, 0, 0],
+            ),
+            ("builtin:zai", "glm-4.6", None, 30, [100, 10, 0, 0, 0]),
+            ("builtin:zai", "deepseek-chat", None, 30, [100, 10, 0, 0, 0]),
+            ("builtin:zai", "glm-4.6", None, 31, [100, 10, 0, 0, 0]),
+            ("builtin:zai", "glm-4.6", None, -1, [9_999, 9_999, 0, 0, 0]),
+        ];
+
+        fn scan_all_cards(config: &str) -> String {
+            let directory = tempdir().unwrap();
+            let database = directory.path().join("db.sqlite");
+            let config_path = directory.path().join("config.json");
+            fs_write(&config_path, config);
+            let connection = create_database(&database);
+            for (provider, model, variant, days_ago, usage) in ROWS {
+                let started_at = (now() - Duration::days(*days_ago)).timestamp_millis();
+                connection
+                    .execute(
+                        "INSERT INTO model_usage VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            provider, model, variant, started_at, usage[0], usage[1], usage[2],
+                            usage[3], usage[4]
+                        ],
+                    )
+                    .unwrap();
+            }
+            drop(connection);
+            let scanner = ZCodeUsageScanner::for_paths(database, config_path);
+            [
+                ZCodeProvider::Zai,
+                ZCodeProvider::Claude,
+                ZCodeProvider::Codex,
+                ZCodeProvider::Antigravity,
+                ZCodeProvider::Kimi,
+                ZCodeProvider::MiniMax,
+                ZCodeProvider::Grok,
+            ]
+            .map(|target| {
+                let mut accumulator = DailyUsageAccumulator::default();
+                let contributed = scanner
+                    .scan_into(now(), &test_bundled_pricing(), target, &mut accumulator)
+                    .unwrap();
+                let json = relative_json(&accumulator.build(now(), "test"), now());
+                format!("== {} contributed={contributed}\n{json}", target.as_str())
+            })
+            .join("\n")
+        }
+
+        fn fs_write(path: &std::path::Path, content: &str) {
+            std::fs::write(path, content).unwrap();
+        }
+
+        #[test]
+        fn output_is_pinned_with_ollama_configured_as_claude() {
+            let actual = scan_all_cards(
+                r#"{"provider":{"my-anthropic":{"name":"anthropic"},"ollama":{"name":"claude"}}}"#,
+            );
+            assert_pinned("configured", &actual, CONFIGURED);
+        }
+
+        #[test]
+        fn output_is_pinned_with_ollama_unconfigured() {
+            let actual = scan_all_cards(r#"{"provider":{"my-anthropic":{"name":"anthropic"}}}"#);
+            assert_pinned("unconfigured", &actual, UNCONFIGURED);
+        }
+
+        const CONFIGURED: &str = r#"
+== zai contributed=true
+{
+  "today": {
+    "tokens": 4400,
+    "estimatedCostUsd": 0.0023575000000000002,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 4400,
+          "costUsd": 0.0023575000000000002
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "yesterday": {
+    "tokens": 1210,
+    "estimatedCostUsd": null,
+    "costEstimated": false,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-99-unreleased",
+          "totalTokens": 770,
+          "costUsd": null
+        },
+        {
+          "model": "Other",
+          "totalTokens": 440,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "glm-99-unreleased"
+    ]
+  },
+  "last30Days": {
+    "tokens": 5720,
+    "estimatedCostUsd": 0.0024215,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 4510,
+          "costUsd": 0.0024215
+        },
+        {
+          "model": "glm-99-unreleased",
+          "totalTokens": 770,
+          "costUsd": null
+        },
+        {
+          "model": "Other",
+          "totalTokens": 440,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "glm-99-unreleased"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 4400,
+      "estimatedCostUsd": 0.0023575000000000002,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-1",
+      "tokens": 1210,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.000064,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed",
+    "glm-99-unreleased"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 990,
+          "pricedTokens": 990,
+          "estimatedCostUsd": 0.0002898,
+          "costEstimated": true
+        }
+      },
+      "tokens": 990,
+      "pricedTokens": 990,
+      "estimatedCostUsd": 0.0002898,
+      "costEstimated": true,
+      "estimateComplete": true
+    },
+    "last30Days": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 1540,
+          "pricedTokens": 1540,
+          "estimatedCostUsd": 0.0004508,
+          "costEstimated": true
+        }
+      },
+      "tokens": 1540,
+      "pricedTokens": 1540,
+      "estimatedCostUsd": 0.0004508,
+      "costEstimated": true,
+      "estimateComplete": true
+    }
+  }
+}
+== claude contributed=true
+{
+  "today": {
+    "tokens": 3650,
+    "estimatedCostUsd": 0.018,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 2000,
+          "costUsd": 0.01125
+        },
+        {
+          "model": "claude-sonnet-4-5-thinking",
+          "totalTokens": 1650,
+          "costUsd": 0.00675
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 5850,
+    "estimatedCostUsd": 0.0243,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 2000,
+          "costUsd": 0.01125
+        },
+        {
+          "model": "claude-sonnet-4-5-thinking",
+          "totalTokens": 1650,
+          "costUsd": 0.00675
+        },
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1540,
+          "costUsd": 0.0063
+        },
+        {
+          "model": "Other",
+          "totalTokens": 660,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 660,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 3650,
+      "estimatedCostUsd": 0.018,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-2",
+      "tokens": 330,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-4",
+      "tokens": 1100,
+      "estimatedCostUsd": 0.0045,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-5",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00135,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.00045,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 110,
+          "pricedTokens": 110,
+          "estimatedCostUsd": 0.000032200000000000003,
+          "costEstimated": true
+        },
+        "glm-4.6": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "llama3": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        }
+      },
+      "tokens": 770,
+      "pricedTokens": 110,
+      "estimatedCostUsd": 0.000032200000000000003,
+      "costEstimated": true,
+      "estimateComplete": false
+    }
+  }
+}
+== codex contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1100,
+    "estimatedCostUsd": 0.008,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 1100,
+          "costUsd": 0.008
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-2",
+      "tokens": 1100,
+      "estimatedCostUsd": 0.008,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== antigravity contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1430,
+    "estimatedCostUsd": 0.0026650000000000003,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 880,
+          "costUsd": 0.00256,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 880,
+              "costUsd": 0.00256
+            }
+          ]
+        },
+        {
+          "model": "Other",
+          "totalTokens": 550,
+          "costUsd": 0.000105,
+          "variants": [
+            {
+              "model": "gpt-oss-120b",
+              "totalTokens": 550,
+              "costUsd": 0.000105
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 1430,
+      "estimatedCostUsd": 0.0026650000000000003,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== kimi contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.00054,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "moonshot/kimi-k2.5",
+          "totalTokens": 660,
+          "costUsd": 0.00054,
+          "variants": [
+            {
+              "model": "kimi-k2p5",
+              "totalTokens": 660,
+              "costUsd": 0.00054
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00054,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== minimax contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.000252,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "minimax-m2",
+          "totalTokens": 660,
+          "costUsd": 0.000252
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.000252,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== grok contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.00015,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "grok-4",
+          "totalTokens": 660,
+          "costUsd": 0.00015
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00015,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+"#;
+        const UNCONFIGURED: &str = r#"
+== zai contributed=true
+{
+  "today": {
+    "tokens": 4400,
+    "estimatedCostUsd": 0.0023575000000000002,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 4400,
+          "costUsd": 0.0023575000000000002
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "yesterday": {
+    "tokens": 1210,
+    "estimatedCostUsd": null,
+    "costEstimated": false,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-99-unreleased",
+          "totalTokens": 770,
+          "costUsd": null
+        },
+        {
+          "model": "Other",
+          "totalTokens": 440,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "glm-99-unreleased"
+    ]
+  },
+  "last30Days": {
+    "tokens": 5720,
+    "estimatedCostUsd": 0.0024215,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 4510,
+          "costUsd": 0.0024215
+        },
+        {
+          "model": "glm-99-unreleased",
+          "totalTokens": 770,
+          "costUsd": null
+        },
+        {
+          "model": "Other",
+          "totalTokens": 440,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "glm-99-unreleased"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 4400,
+      "estimatedCostUsd": 0.0023575000000000002,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-1",
+      "tokens": 1210,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.000064,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed",
+    "glm-99-unreleased"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 990,
+          "pricedTokens": 990,
+          "estimatedCostUsd": 0.0002898,
+          "costEstimated": true
+        }
+      },
+      "tokens": 990,
+      "pricedTokens": 990,
+      "estimatedCostUsd": 0.0002898,
+      "costEstimated": true,
+      "estimateComplete": true
+    },
+    "last30Days": {
+      "models": {
+        "claude-sonnet-4-5": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "deepseek-chat": {
+          "tokens": 1540,
+          "pricedTokens": 1540,
+          "estimatedCostUsd": 0.0004508,
+          "costEstimated": true
+        },
+        "glm-4.6": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "llama3": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        }
+      },
+      "tokens": 2530,
+      "pricedTokens": 1540,
+      "estimatedCostUsd": 0.0004508,
+      "costEstimated": true,
+      "estimateComplete": false
+    }
+  }
+}
+== claude contributed=true
+{
+  "today": {
+    "tokens": 3650,
+    "estimatedCostUsd": 0.018,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 2000,
+          "costUsd": 0.01125
+        },
+        {
+          "model": "claude-sonnet-4-5-thinking",
+          "totalTokens": 1650,
+          "costUsd": 0.00675
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 5190,
+    "estimatedCostUsd": 0.022949999999999998,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 2000,
+          "costUsd": 0.01125
+        },
+        {
+          "model": "claude-sonnet-4-5-thinking",
+          "totalTokens": 1650,
+          "costUsd": 0.00675
+        },
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1210,
+          "costUsd": 0.0049499999999999995
+        },
+        {
+          "model": "Other",
+          "totalTokens": 330,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 330,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 3650,
+      "estimatedCostUsd": 0.018,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-2",
+      "tokens": 330,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-4",
+      "tokens": 1100,
+      "estimatedCostUsd": 0.0045,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.00045,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 110,
+          "pricedTokens": 110,
+          "estimatedCostUsd": 0.000032200000000000003,
+          "costEstimated": true
+        }
+      },
+      "tokens": 110,
+      "pricedTokens": 110,
+      "estimatedCostUsd": 0.000032200000000000003,
+      "costEstimated": true,
+      "estimateComplete": true
+    }
+  }
+}
+== codex contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1100,
+    "estimatedCostUsd": 0.008,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 1100,
+          "costUsd": 0.008
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-2",
+      "tokens": 1100,
+      "estimatedCostUsd": 0.008,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== antigravity contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1430,
+    "estimatedCostUsd": 0.0026650000000000003,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 880,
+          "costUsd": 0.00256,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 880,
+              "costUsd": 0.00256
+            }
+          ]
+        },
+        {
+          "model": "Other",
+          "totalTokens": 550,
+          "costUsd": 0.000105,
+          "variants": [
+            {
+              "model": "gpt-oss-120b",
+              "totalTokens": 550,
+              "costUsd": 0.000105
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 1430,
+      "estimatedCostUsd": 0.0026650000000000003,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== kimi contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.00054,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "moonshot/kimi-k2.5",
+          "totalTokens": 660,
+          "costUsd": 0.00054,
+          "variants": [
+            {
+              "model": "kimi-k2p5",
+              "totalTokens": 660,
+              "costUsd": 0.00054
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00054,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== minimax contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.000252,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "minimax-m2",
+          "totalTokens": 660,
+          "costUsd": 0.000252
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.000252,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== grok contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.00015,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "grok-4",
+          "totalTokens": 660,
+          "costUsd": 0.00015
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00015,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+"#;
     }
 }

@@ -13,7 +13,8 @@ use crate::pricing::{ModelPricing, ServiceTier, TokenBreakdown};
 use super::{
     daily_usage::DailyUsageAccumulator,
     model_scope::{
-        card_for_model, is_local_runtime_provider, native_log_disposition, LocalModelDisposition,
+        card_for_model, is_local_runtime_provider, model_belongs_to_card, native_log_disposition,
+        LocalModelDisposition,
     },
 };
 
@@ -23,8 +24,16 @@ pub(super) mod codex;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct UsageObservation<'a> {
     pub timestamp: DateTime<Utc>,
-    /// Trimmed model name; `None` when the log has no usable name (Unattributed usage).
+    /// Trimmed model name; `None` when the log has no usable name (Unattributed usage). It
+    /// decides the Disposition.
     pub model: Option<&'a str>,
+    /// Model to price and label the usage by, when it differs from `model` (a model-plus-variant
+    /// name that has its own rates).
+    pub rate_model: Option<&'a str>,
+    /// The home Card is only where this usage's Others go: the Home client did not say which Card
+    /// it is for. Usage without a model is then dropped, and only models the home Card owns by
+    /// name land on its own series.
+    pub home_is_fallback: bool,
     /// Token breakdown used for pricing.
     pub tokens: TokenBreakdown,
     /// Provider the Home client says served the request, when its logs name one.
@@ -63,6 +72,8 @@ impl<'a> UsageObservation<'a> {
         Self {
             timestamp,
             model: model.map(str::trim).filter(|name| !name.is_empty()),
+            rate_model: None,
+            home_is_fallback: false,
             tokens,
             provider_hint: None,
             total_tokens: tokens.total_tokens(),
@@ -102,6 +113,9 @@ pub(super) enum LocalRuntimeMode {
     /// Also by the provider hint: such usage lands, unpriced, in the home Card's Others whatever
     /// the model, and never on another Card.
     ModelSlugOrProvider,
+    /// Also by the provider hint: such usage never reaches another Card. A model its home Card
+    /// owns stays on that Card's own series, priced; anything else lands unpriced in Others.
+    ProviderKeepsHome,
 }
 
 /// TEMPORARY, see `TransitionalPolicy`.
@@ -199,8 +213,8 @@ fn record_home(
     policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Option<Bucket> {
-    let Some(model) = observation.model else {
-        return add_own_series(
+    let own_series = |accumulator: &mut DailyUsageAccumulator| {
+        add_own_series(
             observation,
             date,
             home_card,
@@ -209,34 +223,73 @@ fn record_home(
             policy,
             accumulator,
         )
-        .then_some(Bucket::OwnSeries);
+        .then_some(Bucket::OwnSeries)
     };
+    let Some(model) = observation.model else {
+        if observation.home_is_fallback {
+            return None;
+        }
+        return own_series(accumulator);
+    };
+    if served_by_local_runtime_keeping_home(policy, &observation) {
+        if !observation.home_is_fallback && model_belongs_to_card(home_card, model) {
+            return own_series(accumulator);
+        }
+        add_others(observation, date, None, accumulator);
+        return Some(Bucket::Others);
+    }
     match native_log_disposition(home_card, model) {
-        LocalModelDisposition::Home => add_own_series(
-            observation,
-            date,
-            home_card,
-            true,
-            pricing,
-            policy,
-            accumulator,
-        )
-        .then_some(Bucket::OwnSeries),
+        LocalModelDisposition::Home
+            if !observation.home_is_fallback || card_for_model(model) == Some(home_card) =>
+        {
+            own_series(accumulator)
+        }
         LocalModelDisposition::RoutedTo(_) => None,
-        LocalModelDisposition::Other => {
-            let cost = observation
-                .recorded_cost
-                .or_else(|| estimate(pricing, home_card, true, model, &observation));
-            accumulator.add_other(
-                date,
-                observation.total_tokens,
-                cost,
-                observation.recorded_cost.is_none(),
-                model,
-            );
+        LocalModelDisposition::Home | LocalModelDisposition::Other => {
+            let cost = observation.recorded_cost.or_else(|| {
+                estimate(
+                    pricing,
+                    home_card,
+                    true,
+                    priced_model(&observation)?,
+                    &observation,
+                )
+            });
+            add_others(observation, date, cost, accumulator);
             Some(Bucket::Others)
         }
     }
+}
+
+/// Adds to the home Card's Others, priced at `cost` when there is one.
+fn add_others(
+    observation: UsageObservation<'_>,
+    date: NaiveDate,
+    cost: Option<f64>,
+    accumulator: &mut DailyUsageAccumulator,
+) {
+    accumulator.add_other(
+        date,
+        observation.total_tokens,
+        cost,
+        observation.recorded_cost.is_none(),
+        priced_model(&observation).unwrap_or("Unattributed"),
+    );
+}
+
+/// The model usage is priced and labelled by.
+fn priced_model<'a>(observation: &UsageObservation<'a>) -> Option<&'a str> {
+    observation.rate_model.or(observation.model)
+}
+
+fn served_by_local_runtime_keeping_home(
+    policy: TransitionalPolicy,
+    observation: &UsageObservation<'_>,
+) -> bool {
+    policy.local_runtime == LocalRuntimeMode::ProviderKeepsHome
+        && observation
+            .provider_hint
+            .is_some_and(is_local_runtime_provider)
 }
 
 fn record_routed(
@@ -247,6 +300,9 @@ fn record_routed(
     policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
+    if served_by_local_runtime_keeping_home(policy, &observation) {
+        return false;
+    }
     match observation.model {
         Some(model) if card_for_model(model) == Some(target_card) => add_own_series(
             observation,
@@ -275,16 +331,15 @@ fn add_own_series(
     let tokens = observation.total_tokens;
     let estimated = match observation.recorded_cost {
         Some(_) => None,
-        None => observation
-            .model
+        None => priced_model(&observation)
             .and_then(|model| estimate(pricing, card, home, model, &observation)),
     };
     let cost = observation.recorded_cost.or(estimated);
     if policy.zero_token_guard && tokens == 0 && cost.is_none_or(|cost| cost <= 0.0) {
         return false;
     }
-    let label = observation.model.unwrap_or("Unattributed");
-    let family = match (policy.label, observation.model) {
+    let label = priced_model(&observation).unwrap_or("Unattributed");
+    let family = match (policy.label, priced_model(&observation)) {
         (LabelMode::Family | LabelMode::FamilyWithVariant, Some(model)) => {
             Some(pricing.display_family(model))
         }
@@ -419,9 +474,9 @@ mod tests {
     ];
 
     /// Home Cards of the Home clients migrated onto this module, with the policy their native
-    /// loop uses. Gemini CLI's home Card is antigravity. pi's events can have any home Card,
-    /// chosen at parse, so pi appears once per Card.
-    const HOMES: [(&str, TransitionalPolicy); 13] = [
+    /// loop uses. Gemini CLI's home Card is antigravity. pi's and zcode's usage can have any home
+    /// Card, chosen per event, so they appear once per Card.
+    const HOMES: [(&str, TransitionalPolicy); 20] = [
         (
             "claude",
             TransitionalPolicy {
@@ -537,6 +592,69 @@ mod tests {
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "claude",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
+            },
+        ),
+        (
+            "codex",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
+            },
+        ),
+        (
+            "antigravity",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
+            },
+        ),
+        (
+            "grok",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
+            },
+        ),
+        (
+            "kimi",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
+            },
+        ),
+        (
+            "minimax",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
+            },
+        ),
+        (
+            "zai",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
     ];
@@ -655,6 +773,34 @@ mod tests {
                     1,
                     "{home} home, {model:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn usage_keeping_its_home_lands_once_unless_it_has_no_home_or_model() {
+        let pricing = test_bundled_pricing();
+        for (home, policy) in HOMES {
+            if policy.local_runtime != LocalRuntimeMode::ProviderKeepsHome {
+                continue;
+            }
+            for home_is_fallback in [false, true] {
+                for provider_hint in [None, Some("ollama"), Some("openrouter")] {
+                    for model in MODELS {
+                        let observation = UsageObservation {
+                            home_is_fallback,
+                            provider_hint,
+                            ..UsageObservation::new(now(), model, tokens(1_000, 100), None)
+                        };
+                        let model = observation.model;
+                        let expected = usize::from(!(home_is_fallback && model.is_none()));
+                        assert_eq!(
+                            landings(&pricing, home, policy, observation),
+                            expected,
+                            "{home} home, fallback {home_is_fallback}, {provider_hint:?}, {model:?}"
+                        );
+                    }
+                }
             }
         }
     }
