@@ -613,7 +613,6 @@ fn aggregate_into(
         now,
         pricing,
         TransitionalPolicy {
-            zero_token_guard: false,
             label: LabelMode::RawModel,
             local_runtime: LocalRuntimeMode::ModelSlug,
         },
@@ -635,7 +634,6 @@ fn aggregate_routed_into(
         now,
         pricing,
         TransitionalPolicy {
-            zero_token_guard: true,
             label: LabelMode::RawModel,
             local_runtime: LocalRuntimeMode::ModelSlug,
         },
@@ -1146,7 +1144,7 @@ mod tests {
                 event(4, Some("deepseek-chat"), 900, 90, None),
                 event(4, Some("deepseek-chat"), 100, 10, Some(0.01)),
                 event(4, Some("totally-unknown-model"), 50, 5, None),
-                // Zero tokens: no native guard, guarded when routed.
+                // Zero tokens: dropped unless something was paid.
                 event(5, Some("claude-sonnet-4-5"), 0, 0, None),
                 event(5, Some("gpt-5.5"), 0, 0, None),
                 // Window edges: today-29 counts, today-30 does not.
@@ -1316,12 +1314,6 @@ mod tests {
       "tokens": 1540,
       "estimatedCostUsd": 0.05,
       "estimateComplete": false
-    },
-    {
-      "date": "today-5",
-      "tokens": 0,
-      "estimatedCostUsd": 0.0,
-      "estimateComplete": true
     },
     {
       "date": "today-29",

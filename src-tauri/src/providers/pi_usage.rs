@@ -292,7 +292,6 @@ fn aggregate_into(
     accumulator: &mut DailyUsageAccumulator,
 ) -> PiUsageSources {
     let policy = TransitionalPolicy {
-        zero_token_guard: false,
         label: LabelMode::RawModel,
         local_runtime: LocalRuntimeMode::ModelSlug,
     };
@@ -1058,7 +1057,7 @@ mod tests {
                 event(4, Pi, "ollama", "claude-sonnet-4-5", 300, 30, None),
                 // Unmapped providers are dropped at parse too.
                 event(4, Pi, "mystery", "deepseek-chat", 300, 30, None),
-                // Zero tokens: no guard on the estimated path.
+                // Zero tokens: dropped unless something was paid.
                 event(5, Pi, "anthropic", "claude-sonnet-4-5", 0, 0, None),
                 event(5, Pi, "anthropic", "deepseek-chat", 0, 0, None),
                 event(5, Pi, "anthropic", "", 0, 0, None),
@@ -1683,7 +1682,7 @@ deepseek-chat 110: pi=true oh_my_pi=false
 deepseek-chat 0: pi=true oh_my_pi=false
  110: pi=false oh_my_pi=true
  0: pi=false oh_my_pi=false
-gpt-5.5 0: pi=true oh_my_pi=false
+gpt-5.5 0: pi=false oh_my_pi=false
 claude-sonnet-4-5 110: pi=false oh_my_pi=false
 "#;
     }

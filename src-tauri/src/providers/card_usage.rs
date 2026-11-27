@@ -122,8 +122,6 @@ fn scan_window_start(today: NaiveDate) -> NaiveDate {
 /// (`.scratch/card-usage/issues/11`–`14`); the type goes with the last one.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TransitionalPolicy {
-    /// Drop observations with no tokens and no cost above zero.
-    pub zero_token_guard: bool,
     /// How priced usage on the Card's own series is labelled.
     pub label: LabelMode,
     /// How Local runtime usage is recognised.
@@ -434,7 +432,8 @@ fn add_own_series(
             .and_then(|model| estimate(pricing, card, home, model, &observation)),
     };
     let cost = observation.recorded_cost.or(estimated);
-    if policy.zero_token_guard && tokens == 0 && cost.is_none_or(|cost| cost <= 0.0) {
+    // Usage with no tokens and nothing to pay is not usage, unless its label must stay visible.
+    if tokens == 0 && cost.is_none_or(|cost| cost <= 0.0) && !observation.keep_when_empty {
         return false;
     }
     let label = priced_model(&observation).unwrap_or("Unattributed");
@@ -582,7 +581,6 @@ mod tests {
         (
             "claude",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -590,7 +588,6 @@ mod tests {
         (
             "codex",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -598,7 +595,6 @@ mod tests {
         (
             "grok",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -606,7 +602,6 @@ mod tests {
         (
             "antigravity",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -614,7 +609,6 @@ mod tests {
         (
             "kimi",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::Family,
                 local_runtime: LocalRuntimeMode::ModelSlugOrProvider,
             },
@@ -622,7 +616,6 @@ mod tests {
         (
             "antigravity",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -630,7 +623,6 @@ mod tests {
         (
             "claude",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -638,7 +630,6 @@ mod tests {
         (
             "codex",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -646,7 +637,6 @@ mod tests {
         (
             "antigravity",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -654,7 +644,6 @@ mod tests {
         (
             "grok",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -662,7 +651,6 @@ mod tests {
         (
             "kimi",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -670,7 +658,6 @@ mod tests {
         (
             "minimax",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -678,7 +665,6 @@ mod tests {
         (
             "zai",
             TransitionalPolicy {
-                zero_token_guard: false,
                 label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
@@ -686,7 +672,6 @@ mod tests {
         (
             "claude",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
@@ -694,7 +679,6 @@ mod tests {
         (
             "codex",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
@@ -702,7 +686,6 @@ mod tests {
         (
             "antigravity",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
@@ -710,7 +693,6 @@ mod tests {
         (
             "grok",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
@@ -718,7 +700,6 @@ mod tests {
         (
             "kimi",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
@@ -726,7 +707,6 @@ mod tests {
         (
             "minimax",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
@@ -734,21 +714,11 @@ mod tests {
         (
             "zai",
             TransitionalPolicy {
-                zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
                 local_runtime: LocalRuntimeMode::ProviderKeepsHome,
             },
         ),
     ];
-
-    /// The policy a home's scanner passes for its Routed usage: its native policy with the
-    /// zero-token guard, which every routed loop already has.
-    fn routed(native: TransitionalPolicy) -> TransitionalPolicy {
-        TransitionalPolicy {
-            zero_token_guard: true,
-            ..native
-        }
-    }
 
     const MODELS: [Option<&str>; 13] = [
         Some("claude-sonnet-4-5"),
@@ -789,11 +759,7 @@ mod tests {
         CARDS
             .iter()
             .filter(|card| {
-                let policy = if **card == home {
-                    home_policy
-                } else {
-                    routed(home_policy)
-                };
+                let policy = home_policy;
                 let mut accumulator = DailyUsageAccumulator::default();
                 record(
                     [observation],
@@ -908,7 +874,6 @@ mod tests {
             let at = now() - Duration::days(days_ago);
             for (home, policy) in HOMES {
                 for card in CARDS {
-                    let policy = if card == home { policy } else { routed(policy) };
                     let observation = UsageObservation::new(
                         at,
                         Some(owned_model(card)),
@@ -967,16 +932,61 @@ mod tests {
     }
 
     #[test]
-    fn zero_token_observations_land_at_most_once() {
+    fn zero_token_observations_with_nothing_paid_land_nowhere() {
         let pricing = test_bundled_pricing();
         for (home, policy) in HOMES {
             for model in MODELS {
-                let observation = UsageObservation::new(now(), model, tokens(0, 0), None);
-                assert!(
-                    landings(&pricing, home, policy, observation) <= 1,
+                for recorded_cost in [None, Some(0.0)] {
+                    let observation =
+                        UsageObservation::new(now(), model, tokens(0, 0), recorded_cost);
+                    assert_eq!(
+                        landings(&pricing, home, policy, observation),
+                        0,
+                        "{home}, {model:?}, cost {recorded_cost:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_token_observations_with_a_recorded_cost_land_exactly_once() {
+        let pricing = test_bundled_pricing();
+        for (home, policy) in HOMES {
+            for model in MODELS {
+                let observation = UsageObservation::new(now(), model, tokens(0, 0), Some(0.25));
+                let model = observation.model;
+                let expected = usize::from(!(observation.home_is_fallback && model.is_none()));
+                assert_eq!(
+                    landings(&pricing, home, policy, observation),
+                    expected,
                     "{home}, {model:?}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_empty_observation_kept_for_its_label_stays_unpriced() {
+        let pricing = test_bundled_pricing();
+        let observation = UsageObservation {
+            keep_when_empty: true,
+            ..UsageObservation::new(now(), Some("codex-auto-review"), tokens(0, 0), None)
+        };
+        let (_, policy) = HOMES[1];
+        let mut accumulator = DailyUsageAccumulator::default();
+        let landed = record(
+            [observation],
+            "codex",
+            "codex",
+            now(),
+            &pricing,
+            policy,
+            &mut accumulator,
+        );
+        assert!(landed.own_series);
+        let history = accumulator.build(now(), "test");
+        assert_eq!(history.unknown_models, ["codex-auto-review"]);
+        assert!(history.daily.is_empty());
     }
 }

@@ -688,7 +688,6 @@ fn aggregate_into(
         now,
         pricing,
         TransitionalPolicy {
-            zero_token_guard: false,
             label: LabelMode::RawModel,
             local_runtime: LocalRuntimeMode::ModelSlug,
         },
@@ -710,7 +709,6 @@ fn aggregate_routed_into(
         now,
         pricing,
         TransitionalPolicy {
-            zero_token_guard: true,
             label: LabelMode::RawModel,
             local_runtime: LocalRuntimeMode::ModelSlug,
         },
@@ -1662,7 +1660,7 @@ mod tests {
                 event(4, "totally-unknown-model", 50, 5, Standard),
                 event(4, "ollama/llama3", 50, 5, Standard),
                 event(4, "gpt-oss-120b", 500, 50, Fast),
-                // Zero reported totals: native has no guard on the priced path.
+                // Zero reported totals: dropped unless something was paid.
                 zero_total,
                 routed_zero_total,
                 // Window edges.
@@ -1857,12 +1855,6 @@ mod tests {
       "tokens": 3410,
       "estimatedCostUsd": null,
       "estimateComplete": false
-    },
-    {
-      "date": "today-5",
-      "tokens": 0,
-      "estimatedCostUsd": 0.0,
-      "estimateComplete": true
     },
     {
       "date": "today-29",
