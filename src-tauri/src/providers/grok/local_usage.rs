@@ -13,7 +13,7 @@ use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
         antigravity,
-        card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
+        card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
         claude, codex,
         daily_usage::DailyUsageAccumulator,
         gemini_cli_usage, kimi,
@@ -450,6 +450,7 @@ fn aggregate_into(
             window_start_days_ago: 30,
             zero_token_guard: true,
             label: LabelMode::RawModel,
+            local_runtime: LocalRuntimeMode::ModelSlug,
         },
         accumulator,
     );
@@ -472,6 +473,7 @@ fn aggregate_routed_into(
             window_start_days_ago: 29,
             zero_token_guard: true,
             label: LabelMode::RawModel,
+            local_runtime: LocalRuntimeMode::ModelSlug,
         },
         accumulator,
     )

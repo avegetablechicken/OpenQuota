@@ -12,7 +12,9 @@ use crate::pricing::{ModelPricing, ServiceTier, TokenBreakdown};
 
 use super::{
     daily_usage::DailyUsageAccumulator,
-    model_scope::{card_for_model, native_log_disposition, LocalModelDisposition},
+    model_scope::{
+        card_for_model, is_local_runtime_provider, native_log_disposition, LocalModelDisposition,
+    },
 };
 
 pub(super) mod codex;
@@ -25,6 +27,8 @@ pub(super) struct UsageObservation<'a> {
     pub model: Option<&'a str>,
     /// Token breakdown used for pricing.
     pub tokens: TokenBreakdown,
+    /// Provider the Home client says served the request, when its logs name one.
+    pub provider_hint: Option<&'a str>,
     /// Tokens counted on the Card. Usually the breakdown's total; some clients report their own.
     pub total_tokens: u64,
     pub tier: ServiceTier,
@@ -60,6 +64,7 @@ impl<'a> UsageObservation<'a> {
             timestamp,
             model: model.map(str::trim).filter(|name| !name.is_empty()),
             tokens,
+            provider_hint: None,
             total_tokens: tokens.total_tokens(),
             tier: if tokens.is_fast {
                 ServiceTier::Fast
@@ -85,6 +90,18 @@ pub(super) struct TransitionalPolicy {
     pub zero_token_guard: bool,
     /// How priced usage on the Card's own series is labelled.
     pub label: LabelMode,
+    /// How Local runtime usage is recognised.
+    pub local_runtime: LocalRuntimeMode,
+}
+
+/// TEMPORARY, see `TransitionalPolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LocalRuntimeMode {
+    /// Only by the model slug (`ollama/...`), which no Card owns, so it lands in Others.
+    ModelSlug,
+    /// Also by the provider hint: such usage lands, unpriced, in the home Card's Others whatever
+    /// the model, and never on another Card.
+    ModelSlugOrProvider,
 }
 
 /// TEMPORARY, see `TransitionalPolicy`.
@@ -92,6 +109,8 @@ pub(super) struct TransitionalPolicy {
 pub(super) enum LabelMode {
     /// The model name as logged.
     RawModel,
+    /// The model's display family, without a variant.
+    Family,
     /// The model's display family, keeping the logged name as a variant when it differs.
     FamilyWithVariant,
 }
@@ -124,6 +143,22 @@ pub(super) fn record<'a>(
     for observation in observations {
         let date = observation.timestamp.with_timezone(&Local).date_naive();
         if date < since || observation.timestamp > now {
+            continue;
+        }
+        if policy.local_runtime == LocalRuntimeMode::ModelSlugOrProvider
+            && observation
+                .provider_hint
+                .is_some_and(is_local_runtime_provider)
+        {
+            if target_card == home_card {
+                accumulator.add_other(
+                    date,
+                    observation.total_tokens,
+                    None,
+                    true,
+                    observation.model.unwrap_or("Unattributed"),
+                );
+            }
             continue;
         }
         landed |= if target_card == home_card {
@@ -227,10 +262,14 @@ fn add_own_series(
     }
     let label = observation.model.unwrap_or("Unattributed");
     let family = match (policy.label, observation.model) {
-        (LabelMode::FamilyWithVariant, Some(model)) => Some(pricing.display_family(model)),
+        (LabelMode::Family | LabelMode::FamilyWithVariant, Some(model)) => {
+            Some(pricing.display_family(model))
+        }
         _ => None,
     };
-    let variant = family.as_deref().filter(|family| *family != label);
+    let variant = family
+        .as_deref()
+        .filter(|family| policy.label == LabelMode::FamilyWithVariant && *family != label);
     if let Some(exact) = observation.recorded_cost {
         match (family.as_deref(), variant) {
             (Some(family), Some(_)) => {
@@ -339,7 +378,7 @@ pub(super) mod test_support {
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
 
-    use super::{record, LabelMode, TransitionalPolicy, UsageObservation};
+    use super::{record, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation};
     use crate::{
         pricing::{test_bundled_pricing, ModelPricing, TokenBreakdown},
         providers::daily_usage::DailyUsageAccumulator,
@@ -357,13 +396,14 @@ mod tests {
     ];
 
     /// Home clients migrated onto this module, with the policy their native loop uses.
-    const HOMES: [(&str, TransitionalPolicy); 4] = [
+    const HOMES: [(&str, TransitionalPolicy); 5] = [
         (
             "claude",
             TransitionalPolicy {
                 window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
@@ -372,6 +412,7 @@ mod tests {
                 window_start_days_ago: 30,
                 zero_token_guard: false,
                 label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
@@ -380,6 +421,7 @@ mod tests {
                 window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
         (
@@ -388,15 +430,29 @@ mod tests {
                 window_start_days_ago: 30,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "kimi",
+            TransitionalPolicy {
+                window_start_days_ago: 29,
+                zero_token_guard: true,
+                label: LabelMode::Family,
+                local_runtime: LocalRuntimeMode::ModelSlugOrProvider,
             },
         ),
     ];
 
-    const ROUTED: TransitionalPolicy = TransitionalPolicy {
-        window_start_days_ago: 29,
-        zero_token_guard: true,
-        label: LabelMode::RawModel,
-    };
+    /// The policy a home's scanner passes for its Routed usage: its native policy, with the
+    /// unified window and the zero-token guard, which every routed loop already has.
+    fn routed(native: TransitionalPolicy) -> TransitionalPolicy {
+        TransitionalPolicy {
+            window_start_days_ago: 29,
+            zero_token_guard: true,
+            ..native
+        }
+    }
 
     const MODELS: [Option<&str>; 13] = [
         Some("claude-sonnet-4-5"),
@@ -437,7 +493,11 @@ mod tests {
         CARDS
             .iter()
             .filter(|card| {
-                let policy = if **card == home { home_policy } else { ROUTED };
+                let policy = if **card == home {
+                    home_policy
+                } else {
+                    routed(home_policy)
+                };
                 let mut accumulator = DailyUsageAccumulator::default();
                 record(
                     [observation],
@@ -477,6 +537,27 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn local_runtime_providers_land_exactly_once_across_cards() {
+        let pricing = test_bundled_pricing();
+        for (home, policy) in HOMES {
+            if policy.local_runtime != LocalRuntimeMode::ModelSlugOrProvider {
+                continue;
+            }
+            for model in MODELS {
+                let observation = UsageObservation {
+                    provider_hint: Some("ollama"),
+                    ..UsageObservation::new(now(), model, tokens(1_000, 100), None)
+                };
+                assert_eq!(
+                    landings(&pricing, home, policy, observation),
+                    1,
+                    "{home} home, {model:?}"
+                );
             }
         }
     }

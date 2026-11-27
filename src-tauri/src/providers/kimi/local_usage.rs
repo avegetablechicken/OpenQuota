@@ -13,12 +13,9 @@ use walkdir::WalkDir;
 use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
+        card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
         daily_usage::DailyUsageAccumulator,
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
-        model_scope::{
-            card_for_model, is_local_runtime_provider, native_log_disposition,
-            LocalModelDisposition,
-        },
     },
     storage::Storage,
 };
@@ -37,13 +34,6 @@ struct KimiTokenEvent {
 }
 
 impl KimiTokenEvent {
-    fn total_tokens(&self) -> u64 {
-        self.input
-            .saturating_add(self.cache_write)
-            .saturating_add(self.cache_read)
-            .saturating_add(self.output)
-    }
-
     fn pricing_tokens(&self) -> TokenBreakdown {
         TokenBreakdown {
             input: self.input,
@@ -574,87 +564,32 @@ fn aggregate_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(29))
-        .unwrap_or(NaiveDate::MIN);
-    let mut contributed = false;
+    card_usage::record(
+        events.iter().map(observation),
+        "kimi",
+        card_id,
+        now,
+        pricing,
+        TransitionalPolicy {
+            window_start_days_ago: 29,
+            zero_token_guard: true,
+            label: LabelMode::Family,
+            local_runtime: LocalRuntimeMode::ModelSlugOrProvider,
+        },
+        accumulator,
+    )
+}
 
-    for event in events {
-        if event.timestamp > now {
-            continue;
-        }
-        let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since {
-            continue;
-        }
-        let total = event.total_tokens();
-        if total == 0 {
-            continue;
-        }
-        let tokens = event.pricing_tokens();
-
-        // Local runtimes are free and never route to a paid card; keep them as unpriced Others.
-        if event
-            .provider
-            .as_deref()
-            .is_some_and(is_local_runtime_provider)
-        {
-            if card_id == "kimi" {
-                let model = event
-                    .model
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("Unattributed");
-                accumulator.add_other(date, total, None, true, model);
-            }
-            continue;
-        }
-
-        if card_id == "kimi" {
-            let Some(model) = event.model.as_deref().filter(|value| !value.is_empty()) else {
-                accumulator.add_unpriced(date, total, "Unattributed");
-                contributed = true;
-                continue;
-            };
-            match native_log_disposition("kimi", model) {
-                LocalModelDisposition::Home => {
-                    if let Some(cost) =
-                        pricing.estimated_cost_at("kimi", model, event.timestamp, tokens, true)
-                    {
-                        accumulator.add(date, total, cost, &pricing.display_family(model));
-                    } else {
-                        accumulator.add_unpriced(date, total, model);
-                    }
-                    contributed = true;
-                }
-                LocalModelDisposition::RoutedTo(_) => {}
-                LocalModelDisposition::Other => {
-                    let cost =
-                        pricing.estimated_cost_at("kimi", model, event.timestamp, tokens, true);
-                    accumulator.add_other(date, total, cost, true, model);
-                }
-            }
-        } else {
-            let Some(model) = event.model.as_deref().filter(|value| !value.is_empty()) else {
-                continue;
-            };
-            if card_for_model(model) != Some(card_id) {
-                continue;
-            }
-            if let Some(cost) =
-                pricing.estimated_cost_at(card_id, model, event.timestamp, tokens, true)
-            {
-                accumulator.add(date, total, cost, &pricing.display_family(model));
-            } else {
-                accumulator.add_unpriced(date, total, model);
-            }
-            contributed = true;
-        }
+fn observation(event: &KimiTokenEvent) -> UsageObservation<'_> {
+    UsageObservation {
+        provider_hint: event.provider.as_deref(),
+        ..UsageObservation::new(
+            event.timestamp,
+            event.model.as_deref(),
+            event.pricing_tokens(),
+            None,
+        )
     }
-
-    contributed
 }
 
 fn non_empty_str(value: Option<&Value>) -> Option<String> {
@@ -814,7 +749,7 @@ mod tests {
         let parsed_legacy = parse_jsonl(&legacy, Some("moonshot-cn/kimi-k2.7-code"));
         assert_eq!(parsed_legacy.len(), 1);
         assert_eq!(parsed_legacy[0].model.as_deref(), Some("kimi-k2.7-code"));
-        assert_eq!(parsed_legacy[0].total_tokens(), 6_350);
+        assert_eq!(parsed_legacy[0].pricing_tokens().total_tokens(), 6_350);
     }
 
     #[test]
@@ -1202,5 +1137,505 @@ mod tests {
         let mut zai_acc = DailyUsageAccumulator::default();
         assert!(!aggregate_into(&events, now, &pricing, "zai", &mut zai_acc));
         assert!(zai_acc.build(now, "test").today.is_none());
+    }
+
+    /// Pins the output of kimi's per-event policy, so moving it into `card_usage` cannot change
+    /// what any Card shows.
+    mod characterization {
+        use chrono::{DateTime, Duration, TimeZone, Utc};
+
+        use super::super::{aggregate_into, KimiTokenEvent};
+        use crate::{
+            pricing::test_bundled_pricing,
+            providers::{
+                card_usage::test_support::{assert_pinned, relative_json},
+                daily_usage::DailyUsageAccumulator,
+            },
+        };
+
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap()
+        }
+
+        fn event(
+            days_ago: i64,
+            provider: Option<&str>,
+            model: Option<&str>,
+            input: u64,
+            output: u64,
+        ) -> KimiTokenEvent {
+            KimiTokenEvent {
+                timestamp: now() - Duration::days(days_ago),
+                provider: provider.map(str::to_owned),
+                model: model.map(str::to_owned),
+                input,
+                cache_write: 0,
+                cache_read: 0,
+                output,
+            }
+        }
+
+        fn events() -> Vec<KimiTokenEvent> {
+            let kimi = Some("kimi-code");
+            let ollama = Some("ollama");
+            let mut cached = event(0, kimi, Some("kimi-k2"), 10_000, 500);
+            cached.cache_write = 2_000;
+            cached.cache_read = 6_000;
+            let mut future = event(0, kimi, Some("kimi-k2"), 9_999, 9_999);
+            future.timestamp = now() + Duration::hours(1);
+            vec![
+                // Home models, labelled by family without a variant when priced.
+                cached,
+                event(0, kimi, Some("kimi-k2.5"), 2_000, 200),
+                event(1, kimi, Some("kimi-k2-thinking"), 1_000, 100),
+                event(1, None, Some("moonshot-v1-8k"), 1_000, 100),
+                // A kimi-family model without a price, and a missing model.
+                event(2, kimi, Some("kimi-k99-unreleased"), 700, 70),
+                event(2, kimi, None, 400, 40),
+                // Routed to other Cards.
+                event(3, kimi, Some("claude-sonnet-4-5"), 1_500, 150),
+                event(3, kimi, Some("gpt-5.5"), 1_500, 150),
+                event(3, kimi, Some("gemini-3-pro"), 800, 80),
+                event(3, kimi, Some("grok-4"), 800, 80),
+                event(3, kimi, Some("glm-4.6"), 600, 60),
+                event(3, kimi, Some("minimax-m2"), 600, 60),
+                // Others: priced, unpriced, and gpt-oss.
+                event(4, kimi, Some("deepseek-chat"), 900, 90),
+                event(4, kimi, Some("totally-unknown-model"), 50, 5),
+                event(4, kimi, Some("gpt-oss-120b"), 500, 50),
+                // Local runtime by provider: Others on kimi whatever the model, skipped elsewhere.
+                event(4, ollama, Some("llama3"), 300, 30),
+                event(4, ollama, Some("claude-sonnet-4-5"), 300, 30),
+                event(4, ollama, Some("kimi-k2"), 300, 30),
+                event(4, ollama, None, 300, 30),
+                // Local runtime by slug only.
+                event(4, kimi, Some("ollama/llama3"), 50, 5),
+                // Zero tokens, guarded everywhere.
+                event(5, kimi, Some("kimi-k2"), 0, 0),
+                event(5, kimi, Some("deepseek-chat"), 0, 0),
+                event(5, kimi, Some("gpt-5.5"), 0, 0),
+                event(5, ollama, Some("llama3"), 0, 0),
+                event(5, kimi, None, 0, 0),
+                // Window edges: kimi already uses 30 days including today everywhere.
+                event(29, kimi, Some("kimi-k2"), 100, 10),
+                event(29, kimi, Some("gpt-5.5"), 100, 10),
+                event(30, kimi, Some("kimi-k2"), 100, 10),
+                event(30, kimi, Some("gpt-5.5"), 100, 10),
+                event(30, kimi, Some("deepseek-chat"), 100, 10),
+                future,
+            ]
+        }
+
+        #[test]
+        fn output_is_pinned_per_card() {
+            let actual = [
+                "kimi",
+                "claude",
+                "codex",
+                "antigravity",
+                "grok",
+                "zai",
+                "minimax",
+            ]
+            .map(|card_id| {
+                let mut accumulator = DailyUsageAccumulator::default();
+                let contributed = aggregate_into(
+                    &events(),
+                    now(),
+                    &test_bundled_pricing(),
+                    card_id,
+                    &mut accumulator,
+                );
+                let json = relative_json(&accumulator.build(now(), "test"), now());
+                format!("== {card_id} contributed={contributed}\n{json}")
+            })
+            .join("\n");
+            assert_pinned("per card", &actual, PER_CARD);
+        }
+
+        const PER_CARD: &str = r#"
+== kimi contributed=true
+{
+  "today": {
+    "tokens": 20700,
+    "estimatedCostUsd": 0.01061,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "kimi-k2",
+          "totalTokens": 18500,
+          "costUsd": 0.00881
+        },
+        {
+          "model": "moonshot/kimi-k2.5",
+          "totalTokens": 2200,
+          "costUsd": 0.0018
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "yesterday": {
+    "tokens": 2200,
+    "estimatedCostUsd": 0.00125,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "kimi-k2-thinking",
+          "totalTokens": 1100,
+          "costUsd": 0.00085
+        },
+        {
+          "model": "moonshot-v1-8k",
+          "totalTokens": 1100,
+          "costUsd": 0.0004
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "last30Days": {
+    "tokens": 24220,
+    "estimatedCostUsd": 0.011944999999999999,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "kimi-k2",
+          "totalTokens": 18610,
+          "costUsd": 0.008895
+        },
+        {
+          "model": "moonshot/kimi-k2.5",
+          "totalTokens": 2200,
+          "costUsd": 0.0018
+        },
+        {
+          "model": "Other",
+          "totalTokens": 3410,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "kimi-k2-thinking",
+              "totalTokens": 1100,
+              "costUsd": 0.00085
+            },
+            {
+              "model": "moonshot-v1-8k",
+              "totalTokens": 1100,
+              "costUsd": 0.0004
+            },
+            {
+              "model": "kimi-k99-unreleased",
+              "totalTokens": 770,
+              "costUsd": null
+            },
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "kimi-k99-unreleased"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 20700,
+      "estimatedCostUsd": 0.01061,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-1",
+      "tokens": 2200,
+      "estimatedCostUsd": 0.00125,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-2",
+      "tokens": 1210,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.000085,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed",
+    "kimi-k99-unreleased"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": {
+      "models": {
+        "Unattributed": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "claude-sonnet-4-5": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "deepseek-chat": {
+          "tokens": 990,
+          "pricedTokens": 990,
+          "estimatedCostUsd": 0.0002898,
+          "costEstimated": true
+        },
+        "gpt-oss-120b": {
+          "tokens": 550,
+          "pricedTokens": 550,
+          "estimatedCostUsd": 0.000105,
+          "costEstimated": true
+        },
+        "kimi-k2": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "llama3": {
+          "tokens": 330,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "ollama/llama3": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "totally-unknown-model": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        }
+      },
+      "tokens": 2970,
+      "pricedTokens": 1540,
+      "estimatedCostUsd": 0.0003948,
+      "costEstimated": true,
+      "estimateComplete": false
+    }
+  }
+}
+== claude contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1650,
+    "estimatedCostUsd": 0.00675,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1650,
+          "costUsd": 0.00675
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 1650,
+      "estimatedCostUsd": 0.00675,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== codex contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1760,
+    "estimatedCostUsd": 0.0128,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 1760,
+          "costUsd": 0.0128
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 1650,
+      "estimatedCostUsd": 0.012,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.0008,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== antigravity contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 880,
+    "estimatedCostUsd": 0.00256,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 880,
+          "costUsd": 0.00256
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 880,
+      "estimatedCostUsd": 0.00256,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== grok contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 880,
+    "estimatedCostUsd": 0.0002,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "grok-4",
+          "totalTokens": 880,
+          "costUsd": 0.0002
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 880,
+      "estimatedCostUsd": 0.0002,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== zai contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.000384,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 660,
+          "costUsd": 0.000384
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.000384,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== minimax contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.000252,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "minimax-m2",
+          "totalTokens": 660,
+          "costUsd": 0.000252
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.000252,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+"#;
     }
 }
