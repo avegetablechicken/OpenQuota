@@ -180,21 +180,11 @@ pub(super) fn is_model_obviously_foreign_to_card(card_id: &str, model: &str) -> 
     }
 }
 
-/// Formats a dynamic local usage source note naming `base` followed by contributing clients.
-pub(super) fn format_source_note(base: &str, extras: &[&str]) -> String {
-    let suffix = match extras {
-        [] => String::new(),
-        [source] => format!(" and {source}"),
-        [leading @ .., last] => format!(", {}, and {last}", leading.join(", ")),
-    };
-    format!("From your {base}{suffix} (estimated)")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        card_for_model, format_source_note, is_model_obviously_foreign_to_card,
-        model_belongs_to_card, native_log_disposition, LocalModelDisposition,
+        card_for_model, is_model_obviously_foreign_to_card, model_belongs_to_card,
+        native_log_disposition, LocalModelDisposition,
     };
 
     #[test]
@@ -339,21 +329,5 @@ mod tests {
             "claude-sonnet-4-6"
         ));
         assert!(is_model_obviously_foreign_to_card("zai", "deepseek-v4"));
-    }
-
-    #[test]
-    fn source_note_formats_zero_one_and_multiple_extras() {
-        assert_eq!(
-            format_source_note("Codex logs", &[]),
-            "From your Codex logs (estimated)"
-        );
-        assert_eq!(
-            format_source_note("Codex logs", &["OpenCode"]),
-            "From your Codex logs and OpenCode (estimated)"
-        );
-        assert_eq!(
-            format_source_note("Codex logs", &["pi", "OpenCode", "ZCode"]),
-            "From your Codex logs, pi, OpenCode, and ZCode (estimated)"
-        );
     }
 }

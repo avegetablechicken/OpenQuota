@@ -18,14 +18,10 @@ use crate::{
 
 use super::CodexError;
 use crate::providers::{
-    antigravity,
     card_usage::DailyUsageAccumulator,
     card_usage::{self, PriceSource, UsageObservation},
-    claude, gemini_cli_usage, grok, kimi,
+    home_clients::{self, Card, FoldContext},
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
-    model_scope::format_source_note,
-    opencode, pi_usage,
-    zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,9 +48,6 @@ pub(crate) fn scan_routed_usage_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, CodexError> {
-    if card_id == "codex" {
-        return Ok(false);
-    }
     let home = home_directory();
     let configured_home = crate::provider_environment::value("CODEX_HOME");
     let homes = codex_homes(configured_home.as_deref().map(OsStr::new), &home);
@@ -88,149 +81,20 @@ pub fn scan_local_usage(
         .unwrap_or(NaiveDate::MIN);
     let events = scan_codex_events(storage, &homes, since_date)?;
 
-    let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(&events, now, pricing, &mut accumulator);
-    let includes_pi = match pi_usage::scan_into(storage, now, pricing, "codex", &mut accumulator) {
-        Ok(includes_pi) => includes_pi,
-        Err(_) => {
-            crate::app_warn!(
-                "plugin:pi",
-                "pi/oh-my-pi usage history could not be folded into Codex"
-            );
-            pi_usage::PiUsageSources::default()
-        }
-    };
-    let includes_antigravity = match antigravity::local_usage::scan_routed_usage_into(
-        storage,
-        now,
-        pricing,
-        "codex",
-        &mut accumulator,
-    ) {
-        Ok(includes_antigravity) => includes_antigravity,
-        Err(_) => {
-            crate::app_warn!(
-                "plugin:antigravity",
-                "Antigravity usage history could not be folded into Codex"
-            );
-            false
-        }
-    };
-    let includes_claude = match claude::local_usage::scan_routed_usage_into(
-        storage,
-        now,
-        pricing,
-        "codex",
-        &mut accumulator,
-    ) {
-        Ok(includes_claude) => includes_claude,
-        Err(_) => {
-            crate::app_warn!(
-                "plugin:claude",
-                "Claude Code usage history could not be folded into Codex"
-            );
-            false
-        }
-    };
-    let includes_grok = match grok::local_usage::scan_routed_usage_into(
-        storage,
-        now,
-        pricing,
-        "codex",
-        &mut accumulator,
-    ) {
-        Ok(includes_grok) => includes_grok,
-        Err(_) => {
-            crate::app_warn!(
-                "plugin:grok",
-                "Grok CLI usage history could not be folded into Codex"
-            );
-            false
-        }
-    };
-    let includes_kimi = match kimi::local_usage::scan_routed_usage_into(
-        storage,
-        now,
-        pricing,
-        "codex",
-        &mut accumulator,
-    ) {
-        Ok(includes_kimi) => includes_kimi,
-        Err(_) => {
-            crate::app_warn!(
-                "plugin:kimi",
-                "Kimi Code usage history could not be folded into Codex"
-            );
-            false
-        }
-    };
-    let includes_gemini_cli =
-        match gemini_cli_usage::scan_into(storage, now, pricing, "codex", &mut accumulator) {
-            Ok(includes_gemini_cli) => includes_gemini_cli,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:gemini-cli",
-                    "Gemini CLI usage history could not be folded into Codex"
-                );
-                false
-            }
-        };
-    let includes_opencode =
-        match opencode::scan_routed_usage_into(now, pricing, "codex", &mut accumulator) {
-            Ok(includes_opencode) => includes_opencode,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:opencode",
-                    "OpenCode usage history could not be folded into Codex"
-                );
-                false
-            }
-        };
-    let includes_zcode = match ZCodeUsageScanner::new().scan_into(
-        now,
-        pricing,
-        ZCodeProvider::Codex,
-        &mut accumulator,
-    ) {
-        Ok(includes_zcode) => includes_zcode,
-        Err(_) => {
-            crate::app_warn!(
-                "plugin:zcode",
-                "ZCode usage history could not be folded into Codex"
-            );
-            false
-        }
-    };
-    let mut extras = Vec::new();
-    if includes_pi.pi {
-        extras.push("pi");
-    }
-    if includes_pi.oh_my_pi {
-        extras.push("oh-my-pi");
-    }
-    if includes_antigravity {
-        extras.push("Antigravity");
-    }
-    if includes_claude {
-        extras.push("Claude Code");
-    }
-    if includes_grok {
-        extras.push("Grok");
-    }
-    if includes_kimi {
-        extras.push("Kimi Code");
-    }
-    if includes_gemini_cli {
-        extras.push("Gemini CLI");
-    }
-    if includes_opencode {
-        extras.push("OpenCode");
-    }
-    if includes_zcode {
-        extras.push("ZCode");
-    }
-    let source_note = format_source_note("Codex logs", &extras);
-    Ok(accumulator.build(now, &source_note))
+    home_clients::card_history(
+        &home_clients::CLIENTS,
+        &FoldContext {
+            storage,
+            now,
+            pricing,
+        },
+        Card {
+            id: "codex",
+            name: "Codex",
+        },
+        "Codex logs",
+        |accumulator| Ok(aggregate_into(&events, now, pricing, accumulator)),
+    )
 }
 
 static LOADED_EVENTS: LoadedEventsMemo<TokenEvent> = LoadedEventsMemo::new();
@@ -678,8 +542,8 @@ fn aggregate_into(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
-) {
-    card_usage::record(
+) -> bool {
+    let landed = card_usage::record(
         unique(events).map(observation),
         "codex",
         "codex",
@@ -687,6 +551,7 @@ fn aggregate_into(
         pricing,
         accumulator,
     );
+    landed.own_series || landed.others
 }
 
 fn aggregate_routed_into(

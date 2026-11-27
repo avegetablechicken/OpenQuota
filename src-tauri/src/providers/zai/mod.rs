@@ -23,8 +23,7 @@ use self::{
 };
 
 use super::{
-    local_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
-    zcode_usage::ZCodeProvider,
+    home_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
     ProviderError, UsageProvider,
 };
 
@@ -194,7 +193,7 @@ impl ZaiProvider {
         let local_usage = self
             .local_usage
             .as_ref()
-            .map(|local| local.history("zai", "Z.ai", ZCodeProvider::Zai, now, &mut warnings))
+            .map(|local| local.history("zai", "Z.ai", now, &mut warnings))
             .unwrap_or_default();
         let value_metrics = account_usage
             .as_ref()

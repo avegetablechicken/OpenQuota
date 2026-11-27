@@ -24,8 +24,7 @@ use self::{
 };
 
 use super::{
-    local_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
-    zcode_usage::ZCodeProvider,
+    home_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
     ProviderError, UsageProvider,
 };
 
@@ -156,15 +155,7 @@ impl MiniMaxProvider {
         let usage = self
             .local_usage
             .as_ref()
-            .map(|local| {
-                local.history(
-                    "minimax",
-                    "MiniMax",
-                    ZCodeProvider::MiniMax,
-                    now,
-                    &mut warnings,
-                )
-            })
+            .map(|local| local.history("minimax", "MiniMax", now, &mut warnings))
             .unwrap_or_default();
         Ok(ProviderSnapshot {
             upstream_provider_id: None,

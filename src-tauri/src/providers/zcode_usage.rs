@@ -47,6 +47,20 @@ pub(crate) enum ZCodeProvider {
 }
 
 impl ZCodeProvider {
+    /// The provider for `card_id`, when ZCode can serve that Card.
+    pub(crate) fn from_card_id(card_id: &str) -> Option<Self> {
+        Some(match card_id {
+            "antigravity" => Self::Antigravity,
+            "claude" => Self::Claude,
+            "codex" => Self::Codex,
+            "grok" => Self::Grok,
+            "kimi" => Self::Kimi,
+            "minimax" => Self::MiniMax,
+            "zai" => Self::Zai,
+            _ => return None,
+        })
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Antigravity => "antigravity",

@@ -62,19 +62,6 @@ pub(crate) fn scan_into(
     scan_roots_into(storage, &roots, now, pricing, card_id, accumulator)
 }
 
-pub(crate) fn scan_routed_usage_into(
-    storage: &Storage,
-    now: DateTime<Utc>,
-    pricing: &ModelPricing,
-    card_id: &str,
-    accumulator: &mut DailyUsageAccumulator,
-) -> Result<bool, LogCacheError> {
-    if card_id == "kimi" {
-        return Ok(false);
-    }
-    scan_into(storage, now, pricing, card_id, accumulator)
-}
-
 fn default_roots() -> Vec<PathBuf> {
     let home = home_directory();
     kimi_roots(

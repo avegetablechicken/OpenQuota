@@ -25,8 +25,7 @@ use self::{
 };
 
 use super::{
-    local_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
-    zcode_usage::ZCodeProvider,
+    home_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
     ProviderError, UsageProvider,
 };
 
@@ -153,7 +152,7 @@ impl KimiProvider {
         let usage = self
             .local_usage
             .as_ref()
-            .map(|local| local.history("kimi", "Kimi", ZCodeProvider::Kimi, now, &mut warnings))
+            .map(|local| local.history("kimi", "Kimi", now, &mut warnings))
             .unwrap_or_default();
         Ok(ProviderSnapshot {
             upstream_provider_id: None,

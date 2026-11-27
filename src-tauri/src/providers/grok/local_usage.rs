@@ -12,14 +12,10 @@ use crate::{
     models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
-        antigravity,
         card_usage::DailyUsageAccumulator,
         card_usage::{self, UsageObservation},
-        claude, codex, gemini_cli_usage, kimi,
+        home_clients::{self, Card, FoldContext, HomeClient},
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
-        model_scope::format_source_note,
-        opencode, pi_usage,
-        zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
     },
     storage::Storage,
 };
@@ -33,29 +29,21 @@ const SOURCE_NOTE: &str = "From your Grok logs (estimated)";
 #[derive(Debug, Clone)]
 pub struct GrokLogUsageScanner {
     path: PathBuf,
-    zcode: ZCodeUsageScanner,
-    fold_external: bool,
+    /// Home clients folded into the Grok Card: all of them, or none in tests.
+    clients: &'static [&'static dyn HomeClient],
 }
 
 impl GrokLogUsageScanner {
     pub fn new() -> Self {
         Self {
             path: default_log_path(),
-            zcode: ZCodeUsageScanner::new(),
-            fold_external: true,
+            clients: &home_clients::CLIENTS,
         }
     }
 
     #[cfg(test)]
     pub fn for_path(path: PathBuf) -> Self {
-        Self {
-            zcode: ZCodeUsageScanner::for_paths(
-                path.with_extension("missing-zcode.sqlite"),
-                path.with_extension("missing-zcode.json"),
-            ),
-            path,
-            fold_external: false,
-        }
+        Self { path, clients: &[] }
     }
 
     pub fn scan(
@@ -64,14 +52,7 @@ impl GrokLogUsageScanner {
         now: DateTime<Utc>,
         pricing: &ModelPricing,
     ) -> Result<UsageHistory, GrokError> {
-        scan_path(
-            storage,
-            &self.path,
-            &self.zcode,
-            self.fold_external,
-            now,
-            pricing,
-        )
+        scan_path(storage, &self.path, self.clients, now, pricing)
     }
 }
 
@@ -82,9 +63,6 @@ pub(crate) fn scan_routed_usage_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, GrokError> {
-    if card_id == "grok" {
-        return Ok(false);
-    }
     let path = default_log_path();
     let events = load_events(storage, &path)?;
     Ok(aggregate_routed_into(
@@ -156,178 +134,26 @@ fn load_log_file(storage: &Storage, path: &Path) -> Result<Vec<TokenEvent>, Grok
 fn scan_path(
     storage: &Storage,
     path: &Path,
-    zcode: &ZCodeUsageScanner,
-    fold_external: bool,
+    clients: &[&dyn HomeClient],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
 ) -> Result<UsageHistory, GrokError> {
     let events = load_events(storage, path)?;
 
-    let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(&events, now, pricing, &mut accumulator);
-    let includes_pi = if fold_external {
-        match pi_usage::scan_into(storage, now, pricing, "grok", &mut accumulator) {
-            Ok(includes_pi) => includes_pi,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:pi",
-                    "pi/oh-my-pi usage history could not be folded into Grok"
-                );
-                pi_usage::PiUsageSources::default()
-            }
-        }
-    } else {
-        pi_usage::PiUsageSources::default()
-    };
-    let includes_antigravity = if fold_external {
-        match antigravity::local_usage::scan_routed_usage_into(
+    home_clients::card_history(
+        clients,
+        &FoldContext {
             storage,
             now,
             pricing,
-            "grok",
-            &mut accumulator,
-        ) {
-            Ok(includes_antigravity) => includes_antigravity,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:antigravity",
-                    "Antigravity usage history could not be folded into Grok"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_claude = if fold_external {
-        match claude::local_usage::scan_routed_usage_into(
-            storage,
-            now,
-            pricing,
-            "grok",
-            &mut accumulator,
-        ) {
-            Ok(includes_claude) => includes_claude,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:claude",
-                    "Claude Code usage history could not be folded into Grok"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_codex = if fold_external {
-        match codex::local_usage::scan_routed_usage_into(
-            storage,
-            now,
-            pricing,
-            "grok",
-            &mut accumulator,
-        ) {
-            Ok(includes_codex) => includes_codex,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:codex",
-                    "Codex CLI usage history could not be folded into Grok"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_kimi = if fold_external {
-        match kimi::local_usage::scan_routed_usage_into(
-            storage,
-            now,
-            pricing,
-            "grok",
-            &mut accumulator,
-        ) {
-            Ok(includes_kimi) => includes_kimi,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:kimi",
-                    "Kimi Code usage history could not be folded into Grok"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_gemini_cli = if fold_external {
-        match gemini_cli_usage::scan_into(storage, now, pricing, "grok", &mut accumulator) {
-            Ok(includes_gemini_cli) => includes_gemini_cli,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:gemini-cli",
-                    "Gemini CLI usage history could not be folded into Grok"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_opencode = if fold_external {
-        match opencode::scan_routed_usage_into(now, pricing, "grok", &mut accumulator) {
-            Ok(includes_opencode) => includes_opencode,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:opencode",
-                    "OpenCode usage history could not be folded into Grok"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_zcode = match zcode.scan_into(now, pricing, ZCodeProvider::Grok, &mut accumulator)
-    {
-        Ok(includes_zcode) => includes_zcode,
-        Err(_) => {
-            crate::app_warn!(
-                "plugin:zcode",
-                "ZCode usage history could not be folded into Grok"
-            );
-            false
-        }
-    };
-    let mut extras = Vec::new();
-    if includes_pi.pi {
-        extras.push("pi");
-    }
-    if includes_pi.oh_my_pi {
-        extras.push("oh-my-pi");
-    }
-    if includes_antigravity {
-        extras.push("Antigravity");
-    }
-    if includes_claude {
-        extras.push("Claude Code");
-    }
-    if includes_codex {
-        extras.push("Codex");
-    }
-    if includes_kimi {
-        extras.push("Kimi Code");
-    }
-    if includes_gemini_cli {
-        extras.push("Gemini CLI");
-    }
-    if includes_opencode {
-        extras.push("OpenCode");
-    }
-    if includes_zcode {
-        extras.push("ZCode");
-    }
-    let source_note = format_source_note("Grok logs", &extras);
-    Ok(accumulator.build(now, &source_note))
+        },
+        Card {
+            id: "grok",
+            name: "Grok",
+        },
+        "Grok logs",
+        |accumulator| Ok(aggregate_into(&events, now, pricing, accumulator)),
+    )
 }
 
 fn log_path(home: &Path, configured_home: Option<&str>) -> PathBuf {
@@ -438,8 +264,8 @@ fn aggregate_into(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
-) {
-    card_usage::record(
+) -> bool {
+    let landed = card_usage::record(
         events.iter().map(observation),
         "grok",
         "grok",
@@ -447,6 +273,7 @@ fn aggregate_into(
         pricing,
         accumulator,
     );
+    landed.own_series || landed.others
 }
 
 fn aggregate_routed_into(

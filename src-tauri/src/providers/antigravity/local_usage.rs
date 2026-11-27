@@ -18,11 +18,8 @@ use super::AntigravityError;
 use crate::providers::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, UsageObservation},
-    claude, codex, gemini_cli_usage, grok, kimi,
+    home_clients::{self, Card, FoldContext, HomeClient},
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
-    model_scope::format_source_note,
-    opencode, pi_usage,
-    zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
 
 pub(super) const USAGE_SOURCE_NOTE: &str = "From your Antigravity transcripts (estimated)";
@@ -137,9 +134,6 @@ pub(crate) fn scan_routed_usage_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, AntigravityError> {
-    if card_id == "antigravity" {
-        return Ok(false);
-    }
     let roots = default_roots();
     scan_routed_roots_into(storage, &roots, now, pricing, card_id, accumulator)
 }
@@ -173,7 +167,7 @@ pub fn scan_local_usage(
     pricing: &ModelPricing,
 ) -> Result<UsageHistory, AntigravityError> {
     let roots = default_roots();
-    scan_roots(storage, &roots, now, pricing, true)
+    scan_roots(storage, &roots, now, pricing, &home_clients::CLIENTS)
 }
 
 fn scan_roots(
@@ -181,7 +175,7 @@ fn scan_roots(
     roots: &[PathBuf],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
-    fold_pi: bool,
+    clients: &[&dyn HomeClient],
 ) -> Result<UsageHistory, AntigravityError> {
     let since_date = now
         .with_timezone(&Local)
@@ -190,179 +184,20 @@ fn scan_roots(
         .unwrap_or(NaiveDate::MIN);
     let events = load_local_events(storage, roots, since_date)?;
 
-    let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(&events, now, pricing, &mut accumulator);
-    let includes_pi = if fold_pi {
-        match pi_usage::scan_into(storage, now, pricing, "antigravity", &mut accumulator) {
-            Ok(includes_pi) => includes_pi,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:pi",
-                    "pi/oh-my-pi usage history could not be folded into Antigravity"
-                );
-                pi_usage::PiUsageSources::default()
-            }
-        }
-    } else {
-        pi_usage::PiUsageSources::default()
-    };
-    let includes_claude = if fold_pi {
-        match claude::local_usage::scan_routed_usage_into(
+    home_clients::card_history(
+        clients,
+        &FoldContext {
             storage,
             now,
             pricing,
-            "antigravity",
-            &mut accumulator,
-        ) {
-            Ok(includes_claude) => includes_claude,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:claude",
-                    "Claude Code usage history could not be folded into Antigravity"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_codex = if fold_pi {
-        match codex::local_usage::scan_routed_usage_into(
-            storage,
-            now,
-            pricing,
-            "antigravity",
-            &mut accumulator,
-        ) {
-            Ok(includes_codex) => includes_codex,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:codex",
-                    "Codex CLI usage history could not be folded into Antigravity"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_grok = if fold_pi {
-        match grok::local_usage::scan_routed_usage_into(
-            storage,
-            now,
-            pricing,
-            "antigravity",
-            &mut accumulator,
-        ) {
-            Ok(includes_grok) => includes_grok,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:grok",
-                    "Grok CLI usage history could not be folded into Antigravity"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_gemini_cli = if fold_pi {
-        match gemini_cli_usage::scan_into(storage, now, pricing, "antigravity", &mut accumulator) {
-            Ok(includes_gemini_cli) => includes_gemini_cli,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:gemini-cli",
-                    "Gemini CLI usage history could not be folded into Antigravity"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_kimi = if fold_pi {
-        match kimi::local_usage::scan_routed_usage_into(
-            storage,
-            now,
-            pricing,
-            "antigravity",
-            &mut accumulator,
-        ) {
-            Ok(includes_kimi) => includes_kimi,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:kimi",
-                    "Kimi Code usage history could not be folded into Antigravity"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_opencode = if fold_pi {
-        match opencode::scan_routed_usage_into(now, pricing, "antigravity", &mut accumulator) {
-            Ok(includes_opencode) => includes_opencode,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:opencode",
-                    "OpenCode usage history could not be folded into Antigravity"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let includes_zcode = if fold_pi {
-        match ZCodeUsageScanner::new().scan_into(
-            now,
-            pricing,
-            ZCodeProvider::Antigravity,
-            &mut accumulator,
-        ) {
-            Ok(includes_zcode) => includes_zcode,
-            Err(_) => {
-                crate::app_warn!(
-                    "plugin:zcode",
-                    "ZCode usage history could not be folded into Antigravity"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-    let mut extras = Vec::new();
-    if includes_pi.pi {
-        extras.push("pi");
-    }
-    if includes_pi.oh_my_pi {
-        extras.push("oh-my-pi");
-    }
-    if includes_claude {
-        extras.push("Claude Code");
-    }
-    if includes_codex {
-        extras.push("Codex");
-    }
-    if includes_grok {
-        extras.push("Grok");
-    }
-    if includes_gemini_cli {
-        extras.push("Gemini CLI");
-    }
-    if includes_kimi {
-        extras.push("Kimi Code");
-    }
-    if includes_opencode {
-        extras.push("OpenCode");
-    }
-    if includes_zcode {
-        extras.push("ZCode");
-    }
-    let source_note = format_source_note("Antigravity transcripts", &extras);
-    Ok(accumulator.build(now, &source_note))
+        },
+        Card {
+            id: "antigravity",
+            name: "Antigravity",
+        },
+        "Antigravity transcripts",
+        |accumulator| Ok(aggregate_into(&events, now, pricing, accumulator)),
+    )
 }
 
 fn antigravity_roots(
@@ -590,8 +425,8 @@ fn aggregate_into(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
-) {
-    card_usage::record(
+) -> bool {
+    let landed = card_usage::record(
         events.iter().map(observation),
         "antigravity",
         "antigravity",
@@ -599,6 +434,7 @@ fn aggregate_into(
         pricing,
         accumulator,
     );
+    landed.own_series || landed.others
 }
 
 fn aggregate_routed_into(
@@ -747,7 +583,7 @@ mod tests {
 
         let pricing = test_bundled_pricing();
         let history =
-            scan_roots(&storage, std::slice::from_ref(&root), now, &pricing, false).unwrap();
+            scan_roots(&storage, std::slice::from_ref(&root), now, &pricing, &[]).unwrap();
 
         let today = history.today.expect("today usage should exist");
         assert_eq!(today.tokens, 310_000);
@@ -840,7 +676,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert!(files[0].to_string_lossy().contains("antigravity-cli"));
 
-        let history = scan_roots(&storage, &roots, now, &test_bundled_pricing(), false).unwrap();
+        let history = scan_roots(&storage, &roots, now, &test_bundled_pricing(), &[]).unwrap();
         assert_eq!(history.today.unwrap().tokens, 38_000);
     }
 
@@ -873,7 +709,7 @@ mod tests {
             std::slice::from_ref(&root),
             now,
             &test_bundled_pricing(),
-            false,
+            &[],
         )
         .unwrap();
         // shared_step (11_000) counted once + fork_step (15_500) = 26_500.
