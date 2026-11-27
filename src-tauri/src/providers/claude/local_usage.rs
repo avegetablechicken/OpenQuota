@@ -17,13 +17,13 @@ use crate::{
 
 use super::ClaudeError;
 use crate::providers::{
-    antigravity, codex,
+    antigravity,
+    card_usage::{self, TransitionalPolicy, UsageObservation},
+    codex,
     daily_usage::DailyUsageAccumulator,
     gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
-    model_scope::{
-        card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
-    },
+    model_scope::format_source_note,
     opencode, pi_usage,
     zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
@@ -607,61 +607,18 @@ fn aggregate_into(
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
 ) {
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    for event in events {
-        let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since || event.timestamp > now {
-            continue;
-        }
-        let tokens = TokenBreakdown {
-            input: event.input,
-            cache_write_5m: event.cache_write_5m,
-            cache_write_1h: event.cache_write_1h,
-            cache_read: event.cache_read,
-            output: event.output,
-            is_fast: event.is_fast,
-            ..TokenBreakdown::default()
-        };
-        let model_name = event
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty());
-        if let Some(model) = model_name {
-            match native_log_disposition("claude", model) {
-                LocalModelDisposition::Home => {}
-                LocalModelDisposition::RoutedTo(_) => continue,
-                LocalModelDisposition::Other => {
-                    let cost = event.cost_usd.or_else(|| {
-                        pricing.estimated_cost_at("claude", model, event.timestamp, tokens, true)
-                    });
-                    accumulator.add_other(
-                        date,
-                        tokens.total_tokens(),
-                        cost,
-                        event.cost_usd.is_none(),
-                        model,
-                    );
-                    continue;
-                }
-            }
-        }
-        let cost = event.cost_usd.or_else(|| {
-            pricing.estimated_cost_at("claude", model_name?, event.timestamp, tokens, true)
-        });
-        let model_label = model_name.unwrap_or("Unattributed");
-        if let Some(exact) = event.cost_usd {
-            accumulator.add_exact(date, tokens.total_tokens(), exact, model_label);
-        } else if let Some(cost) = cost {
-            accumulator.add(date, tokens.total_tokens(), cost, model_label);
-        } else if tokens.total_tokens() > 0 {
-            accumulator.add_unpriced(date, tokens.total_tokens(), model_label);
-        }
-    }
+    card_usage::record(
+        events.iter().map(observation),
+        "claude",
+        "claude",
+        now,
+        pricing,
+        TransitionalPolicy {
+            window_start_days_ago: 30,
+            zero_token_guard: false,
+        },
+        accumulator,
+    );
 }
 
 fn aggregate_routed_into(
@@ -671,29 +628,25 @@ fn aggregate_routed_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(29))
-        .unwrap_or(NaiveDate::MIN);
-    let mut contributed = false;
-    for event in events {
-        let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since || event.timestamp > now {
-            continue;
-        }
-        let Some(model) = event
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        if card_for_model(model) != Some(card_id) {
-            continue;
-        }
-        let tokens = TokenBreakdown {
+    card_usage::record(
+        events.iter().map(observation),
+        "claude",
+        card_id,
+        now,
+        pricing,
+        TransitionalPolicy {
+            window_start_days_ago: 29,
+            zero_token_guard: true,
+        },
+        accumulator,
+    )
+}
+
+fn observation(event: &ClaudeTokenEvent) -> UsageObservation<'_> {
+    UsageObservation::new(
+        event.timestamp,
+        event.model.as_deref(),
+        TokenBreakdown {
             input: event.input,
             cache_write_5m: event.cache_write_5m,
             cache_write_1h: event.cache_write_1h,
@@ -701,24 +654,9 @@ fn aggregate_routed_into(
             output: event.output,
             is_fast: event.is_fast,
             ..TokenBreakdown::default()
-        };
-        if tokens.total_tokens() == 0 && event.cost_usd.is_none_or(|cost| cost <= 0.0) {
-            continue;
-        }
-        if let Some(exact) = event.cost_usd {
-            accumulator.add_exact(date, tokens.total_tokens(), exact, model);
-            contributed = true;
-        } else if let Some(cost) =
-            pricing.estimated_cost_at(card_id, model, event.timestamp, tokens, true)
-        {
-            accumulator.add(date, tokens.total_tokens(), cost, model);
-            contributed = true;
-        } else if tokens.total_tokens() > 0 {
-            accumulator.add_unpriced(date, tokens.total_tokens(), model);
-            contributed = true;
-        }
-    }
-    contributed
+        },
+        event.cost_usd,
+    )
 }
 
 fn integer(value: Option<&Value>) -> Option<u64> {
@@ -1136,5 +1074,433 @@ mod tests {
         let event = parse_jsonl(content).pop().unwrap();
         assert!(event.is_fast);
         assert!(event.has_speed);
+    }
+
+    /// Pins the output of claude's per-event policy, so moving it into `card_usage` cannot
+    /// change what any Card shows. Dates are rewritten as `today-N` to stay timezone-neutral.
+    mod characterization {
+        use chrono::{DateTime, Days, Duration, Local, TimeZone, Utc};
+
+        use super::super::{aggregate, aggregate_routed_into, ClaudeTokenEvent};
+        use crate::{
+            models::UsageHistory, pricing::test_bundled_pricing,
+            providers::daily_usage::DailyUsageAccumulator,
+        };
+
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap()
+        }
+
+        fn event(
+            days_ago: i64,
+            model: Option<&str>,
+            input: u64,
+            output: u64,
+            cost_usd: Option<f64>,
+        ) -> ClaudeTokenEvent {
+            ClaudeTokenEvent {
+                timestamp: now() - Duration::days(days_ago),
+                model: model.map(str::to_owned),
+                input,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_read: 0,
+                output,
+                message_id: None,
+                request_id: None,
+                sidechain: false,
+                is_fast: false,
+                has_speed: false,
+                cost_usd,
+            }
+        }
+
+        fn events() -> Vec<ClaudeTokenEvent> {
+            let mut fast = event(1, Some("claude-opus-4-6"), 1_000, 100, None);
+            fast.is_fast = true;
+            fast.cache_write_5m = 300;
+            fast.cache_read = 2_000;
+            let mut future = event(0, Some("claude-sonnet-4-5"), 9_999, 9_999, None);
+            future.timestamp = now() + Duration::hours(1);
+            vec![
+                // Recorded cost, a recorded $0, and an estimate on the Home model family.
+                event(0, Some("claude-sonnet-4-5"), 1_000, 200, Some(0.42)),
+                event(0, Some("claude-sonnet-4-5"), 500, 50, Some(0.0)),
+                event(0, Some("claude-opus-4-6"), 2_000, 300, None),
+                fast,
+                // A claude-family model without a price.
+                event(2, Some("claude-unreleased-zz-9"), 700, 70, None),
+                // Missing model, with and without a recorded cost.
+                event(2, None, 400, 40, Some(0.05)),
+                event(2, None, 300, 30, None),
+                // Routed to other Cards.
+                event(3, Some("gpt-5.5"), 1_500, 150, None),
+                event(3, Some("gemini-3-pro"), 800, 80, None),
+                event(3, Some("glm-4.6"), 600, 60, Some(0.02)),
+                // Others: estimated, recorded, and unpriced.
+                event(4, Some("deepseek-chat"), 900, 90, None),
+                event(4, Some("deepseek-chat"), 100, 10, Some(0.01)),
+                event(4, Some("totally-unknown-model"), 50, 5, None),
+                // Zero tokens: no native guard, guarded when routed.
+                event(5, Some("claude-sonnet-4-5"), 0, 0, None),
+                event(5, Some("gpt-5.5"), 0, 0, None),
+                // Window edges: today-29 counts everywhere, today-30 only natively.
+                event(29, Some("claude-sonnet-4-5"), 100, 10, None),
+                event(29, Some("gpt-5.5"), 100, 10, None),
+                event(30, Some("claude-sonnet-4-5"), 100, 10, None),
+                event(30, Some("gpt-5.5"), 100, 10, None),
+                event(30, Some("deepseek-chat"), 100, 10, None),
+                future,
+            ]
+        }
+
+        fn relative_json(history: &UsageHistory) -> String {
+            let mut json = serde_json::to_string_pretty(history).unwrap();
+            let today = now().with_timezone(&Local).date_naive();
+            for offset in 0..=40 {
+                let date = today.checked_sub_days(Days::new(offset)).unwrap();
+                json = json.replace(&format!("\"{date}\""), &format!("\"today-{offset}\""));
+            }
+            json
+        }
+
+        fn routed(card_id: &str, events: &[ClaudeTokenEvent]) -> (bool, String) {
+            let mut accumulator = DailyUsageAccumulator::default();
+            let contributed = aggregate_routed_into(
+                events,
+                now(),
+                &test_bundled_pricing(),
+                card_id,
+                &mut accumulator,
+            );
+            (
+                contributed,
+                relative_json(&accumulator.build(now(), "test")),
+            )
+        }
+
+        fn assert_pinned(name: &str, actual: &str, expected: &str) {
+            if actual.trim() != expected.trim() {
+                panic!("{name} changed. Actual output:\n{actual}");
+            }
+        }
+
+        #[test]
+        fn native_card_output_is_pinned() {
+            let history = aggregate(&events(), now(), &test_bundled_pricing());
+            assert_pinned("native", &relative_json(&history), NATIVE);
+        }
+
+        #[test]
+        fn routed_output_is_pinned_per_card() {
+            let actual = ["codex", "antigravity", "zai", "kimi", "grok"]
+                .map(|card_id| {
+                    let (contributed, json) = routed(card_id, &events());
+                    format!("== {card_id} contributed={contributed}\n{json}")
+                })
+                .join("\n");
+            assert_pinned("routed", &actual, ROUTED);
+        }
+
+        #[test]
+        fn only_today_minus_30_shapes_native_others_but_not_routed() {
+            let native = aggregate(
+                &[event(30, Some("deepseek-chat"), 100, 10, None)],
+                now(),
+                &test_bundled_pricing(),
+            );
+            assert_pinned(
+                "native today-30",
+                &relative_json(&native),
+                NATIVE_TODAY_MINUS_30,
+            );
+            let (contributed, _) = routed("codex", &[event(30, Some("gpt-5.5"), 100, 10, None)]);
+            assert!(!contributed);
+        }
+
+        const NATIVE: &str = r#"
+{
+  "today": {
+    "tokens": 4050,
+    "estimatedCostUsd": 0.4375,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1750,
+          "costUsd": 0.42
+        },
+        {
+          "model": "Other",
+          "totalTokens": 2300,
+          "costUsd": 0.0175,
+          "variants": [
+            {
+              "model": "claude-opus-4-6",
+              "totalTokens": 2300,
+              "costUsd": 0.0175
+            }
+          ]
+        }
+      ],
+      "sourceNote": "From your Claude usage history (estimated)"
+    },
+    "unknownModels": []
+  },
+  "yesterday": {
+    "tokens": 3400,
+    "estimatedCostUsd": 0.010375,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 3400,
+          "costUsd": 0.010375
+        }
+      ],
+      "sourceNote": "From your Claude usage history (estimated)"
+    },
+    "unknownModels": []
+  },
+  "last30Days": {
+    "tokens": 9100,
+    "estimatedCostUsd": 0.498325,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1860,
+          "costUsd": 0.42045
+        },
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 5700,
+          "costUsd": 0.027875000000000004
+        },
+        {
+          "model": "claude-unreleased-zz-9",
+          "totalTokens": 770,
+          "costUsd": null
+        },
+        {
+          "model": "Other",
+          "totalTokens": 770,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "Unattributed",
+              "totalTokens": 770,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "From your Claude usage history (estimated)"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "claude-unreleased-zz-9"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 4050,
+      "estimatedCostUsd": 0.4375,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-1",
+      "tokens": 3400,
+      "estimatedCostUsd": 0.010375,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-2",
+      "tokens": 1540,
+      "estimatedCostUsd": 0.05,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-5",
+      "tokens": 0,
+      "estimatedCostUsd": 0.0,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.00045,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed",
+    "claude-unreleased-zz-9"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 1100,
+          "pricedTokens": 1100,
+          "estimatedCostUsd": 0.0102898,
+          "costEstimated": true
+        },
+        "totally-unknown-model": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        }
+      },
+      "tokens": 1155,
+      "pricedTokens": 1100,
+      "estimatedCostUsd": 0.0102898,
+      "costEstimated": true,
+      "estimateComplete": false
+    }
+  }
+}
+"#;
+        const ROUTED: &str = r#"
+== codex contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1760,
+    "estimatedCostUsd": 0.0128,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 1760,
+          "costUsd": 0.0128
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 1650,
+      "estimatedCostUsd": 0.012,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.0008,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== antigravity contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 880,
+    "estimatedCostUsd": 0.00256,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro",
+          "totalTokens": 880,
+          "costUsd": 0.00256
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 880,
+      "estimatedCostUsd": 0.00256,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== zai contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.02,
+    "costEstimated": false,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 660,
+          "costUsd": 0.02
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.02,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== kimi contributed=false
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": []
+}
+== grok contributed=false
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": []
+}
+"#;
+        const NATIVE_TODAY_MINUS_30: &str = r#"
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": [],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": null
+  }
+}
+"#;
     }
 }
