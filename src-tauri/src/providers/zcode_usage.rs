@@ -16,7 +16,7 @@ use crate::{
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     providers::{
         card_usage::DailyUsageAccumulator,
-        card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
+        card_usage::{self, UsageObservation},
         model_scope::normalize_provider_model,
     },
 };
@@ -148,9 +148,6 @@ impl ZCodeUsageScanner {
         let configured = configured_providers(&self.config_path);
         let events = read_events(&self.database_path, now)?;
         let target_card = target.as_str();
-        let policy = TransitionalPolicy {
-            label: LabelMode::FamilyWithVariant,
-        };
         let mut contributed = false;
         for mut event in events {
             if is_delegated_cli(&event.provider_id.trim().to_ascii_lowercase()) {
@@ -188,7 +185,6 @@ impl ZCodeUsageScanner {
                 target_card,
                 now,
                 pricing,
-                policy,
                 accumulator,
             )
             .own_series;

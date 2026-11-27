@@ -19,7 +19,7 @@ use super::ClaudeError;
 use crate::providers::{
     antigravity,
     card_usage::DailyUsageAccumulator,
-    card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
+    card_usage::{self, UsageObservation},
     codex, gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
     model_scope::format_source_note,
@@ -612,9 +612,6 @@ fn aggregate_into(
         "claude",
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::RawModel,
-        },
         accumulator,
     );
 }
@@ -632,9 +629,6 @@ fn aggregate_routed_into(
         card_id,
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::RawModel,
-        },
         accumulator,
     )
     .own_series
@@ -1401,9 +1395,16 @@ mod tests {
     "modelBreakdown": {
       "models": [
         {
-          "model": "gemini-3-pro",
+          "model": "gemini-3-pro-preview",
           "totalTokens": 880,
-          "costUsd": 0.00256
+          "costUsd": 0.00256,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 880,
+              "costUsd": 0.00256
+            }
+          ]
         }
       ],
       "sourceNote": "test"

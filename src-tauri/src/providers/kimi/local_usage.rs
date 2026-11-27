@@ -14,7 +14,7 @@ use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
         card_usage::DailyUsageAccumulator,
-        card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
+        card_usage::{self, UsageObservation},
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     },
     storage::Storage,
@@ -570,9 +570,6 @@ fn aggregate_into(
         card_id,
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::Family,
-        },
         accumulator,
     )
     .own_series
@@ -1269,7 +1266,14 @@ mod tests {
         {
           "model": "moonshot/kimi-k2.5",
           "totalTokens": 2200,
-          "costUsd": 0.0018
+          "costUsd": 0.0018,
+          "variants": [
+            {
+              "model": "kimi-k2.5",
+              "totalTokens": 2200,
+              "costUsd": 0.0018
+            }
+          ]
         }
       ],
       "sourceNote": "test"
@@ -1313,7 +1317,14 @@ mod tests {
         {
           "model": "moonshot/kimi-k2.5",
           "totalTokens": 2200,
-          "costUsd": 0.0018
+          "costUsd": 0.0018,
+          "variants": [
+            {
+              "model": "kimi-k2.5",
+              "totalTokens": 2200,
+              "costUsd": 0.0018
+            }
+          ]
         },
         {
           "model": "Other",
@@ -1524,7 +1535,14 @@ mod tests {
         {
           "model": "gemini-3-pro-preview",
           "totalTokens": 880,
-          "costUsd": 0.00256
+          "costUsd": 0.00256,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 880,
+              "costUsd": 0.00256
+            }
+          ]
         }
       ],
       "sourceNote": "test"

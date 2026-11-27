@@ -17,7 +17,7 @@ use crate::{
 use super::AntigravityError;
 use crate::providers::{
     card_usage::DailyUsageAccumulator,
-    card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
+    card_usage::{self, UsageObservation},
     claude, codex, gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
     model_scope::format_source_note,
@@ -597,9 +597,6 @@ fn aggregate_into(
         "antigravity",
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::FamilyWithVariant,
-        },
         accumulator,
     );
 }
@@ -617,9 +614,6 @@ fn aggregate_routed_into(
         card_id,
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::FamilyWithVariant,
-        },
         accumulator,
     )
     .own_series
@@ -1008,6 +1002,11 @@ mod tests {
           "costUsd": 0.0376,
           "variants": [
             {
+              "model": "gemini-3-pro-preview",
+              "totalTokens": 18500,
+              "costUsd": 0.0312
+            },
+            {
               "model": "gemini-3-pro",
               "totalTokens": 2200,
               "costUsd": 0.0064
@@ -1061,9 +1060,16 @@ mod tests {
           "costUsd": 0.000105
         },
         {
-          "model": "gemini-3.5-flash-lite-tiered-high",
+          "model": "gemini-3.5-flash-lite",
           "totalTokens": 1100,
-          "costUsd": null
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "gemini-3.5-flash-lite-tiered-high",
+              "totalTokens": 1100,
+              "costUsd": null
+            }
+          ]
         }
       ],
       "sourceNote": "test"
@@ -1084,6 +1090,11 @@ mod tests {
           "totalTokens": 21910,
           "costUsd": 0.041120000000000004,
           "variants": [
+            {
+              "model": "gemini-3-pro-preview",
+              "totalTokens": 18500,
+              "costUsd": 0.0312
+            },
             {
               "model": "gemini-3-pro",
               "totalTokens": 2310,
@@ -1124,7 +1135,7 @@ mod tests {
               "costUsd": 0.000105
             },
             {
-              "model": "gemini-3.5-flash-lite-tiered-high",
+              "model": "gemini-3.5-flash-lite",
               "totalTokens": 1100,
               "costUsd": null
             },

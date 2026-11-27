@@ -3,8 +3,9 @@
 //! Every local-log scanner hands its parsed events to this module as `UsageObservation`s. The
 //! module owns the per-observation policy: the Scan window, the zero-token guard, Unattributed
 //! and Local runtime usage, the Disposition (the Card's own series, Routed usage on another Card,
-//! or Others), and which pricing path applies (Recorded cost or estimate). Adapters keep discovery, parsing and
-//! deduplication. Terms are defined in `GLOSSARY.md`.
+//! or Others), which pricing path applies (Recorded cost or estimate), and the label: every Card
+//! shows a model by its display family, with the model as logged as the family's variant.
+//! Adapters keep discovery, parsing and deduplication. Terms are defined in `GLOSSARY.md`.
 
 use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
@@ -51,7 +52,7 @@ pub(super) struct UsageObservation<'a> {
 /// Where an observation lands and what it costs, when its Home client settled both itself
 /// because it prices and deduplicates whole messages first. See `record_settled`.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Settled<'a> {
+pub(super) struct Settled {
     pub others: bool,
     pub cost: Option<f64>,
     pub estimated: bool,
@@ -59,9 +60,6 @@ pub(super) struct Settled<'a> {
     pub priced_tokens: u64,
     /// Every part of the usage was priced.
     pub complete: bool,
-    /// TEMPORARY, until every Card labels by family (ticket 14): label priced usage by this
-    /// family, keeping the model as a variant.
-    pub family: Option<&'a str>,
     /// Unpriced usage leaves only an unknown-model marker instead of counting its tokens.
     pub unpriced_marker_only: bool,
 }
@@ -116,26 +114,6 @@ fn scan_window_start(today: NaiveDate) -> NaiveDate {
         .unwrap_or(NaiveDate::MIN)
 }
 
-/// TEMPORARY. Rules that still differ between scanners while they migrate onto this module
-/// without changing their output. Each field is removed by the ticket that unifies its rule
-/// (`.scratch/card-usage/issues/11`–`14`); the type goes with the last one.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct TransitionalPolicy {
-    /// How priced usage on the Card's own series is labelled.
-    pub label: LabelMode,
-}
-
-/// TEMPORARY, see `TransitionalPolicy`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LabelMode {
-    /// The model name as logged.
-    RawModel,
-    /// The model's display family, without a variant.
-    Family,
-    /// The model's display family, keeping the logged name as a variant when it differs.
-    FamilyWithVariant,
-}
-
 /// Records `observations` from `home_card`'s Home client onto `target_card`.
 ///
 /// When `target_card` is the home Card, observations land on its own series (models it owns and
@@ -151,7 +129,6 @@ pub(super) fn record<'a>(
     target_card: &str,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
-    policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Landed {
     let mut landed = Landed::default();
@@ -160,14 +137,14 @@ pub(super) fn record<'a>(
             continue;
         };
         if target_card == home_card {
-            match record_home(observation, date, home_card, pricing, policy, accumulator) {
+            match record_home(observation, date, home_card, pricing, accumulator) {
                 Some(Bucket::OwnSeries) => landed.own_series = true,
                 Some(Bucket::Others) => landed.others = true,
                 None => {}
             }
         } else {
             landed.own_series |=
-                record_routed(observation, date, target_card, pricing, policy, accumulator);
+                record_routed(observation, date, target_card, pricing, accumulator);
         }
     }
     landed
@@ -179,9 +156,10 @@ pub(super) fn record<'a>(
 /// Without `apply_scan_window`, as for an account export that keeps its own dates, every
 /// observation is recorded and building the history trims the dates.
 pub(super) fn record_settled<'a>(
-    observations: impl IntoIterator<Item = (UsageObservation<'a>, Settled<'a>)>,
+    observations: impl IntoIterator<Item = (UsageObservation<'a>, Settled)>,
     now: DateTime<Utc>,
     apply_scan_window: bool,
+    pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Landed {
     let mut landed = Landed::default();
@@ -194,7 +172,7 @@ pub(super) fn record_settled<'a>(
         let Some(date) = date else {
             continue;
         };
-        match add_settled(observation, settled, date, accumulator) {
+        match add_settled(observation, settled, date, pricing, accumulator) {
             Some(Bucket::OwnSeries) => landed.own_series = true,
             Some(Bucket::Others) => landed.others = true,
             None => {}
@@ -228,12 +206,12 @@ enum Bucket {
 
 fn add_settled(
     observation: UsageObservation<'_>,
-    settled: Settled<'_>,
+    settled: Settled,
     date: NaiveDate,
+    pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Option<Bucket> {
     let tokens = observation.total_tokens;
-    let model = observation.model.unwrap_or("Unattributed");
     if settled.others {
         accumulator.add_partially_priced_other(
             date,
@@ -241,28 +219,25 @@ fn add_settled(
             settled.priced_tokens,
             settled.cost,
             settled.estimated,
-            model,
+            observation.model.unwrap_or("Unattributed"),
         );
         return Some(Bucket::Others);
     }
+    let (family, model) = label(pricing, observation.model);
     match settled.cost {
         // Only some of the usage is priced, so the model's cost must not read as complete.
         Some(cost) if !settled.complete => {
-            accumulator.add_partially_priced(date, tokens, cost, model, settled.estimated);
+            accumulator.add_partially_priced(date, tokens, cost, &family, model, settled.estimated);
         }
-        Some(cost) => match (settled.family, settled.estimated) {
-            (Some(family), true) => accumulator.add_variant(date, tokens, cost, family, model),
-            (Some(family), false) => {
-                accumulator.add_exact_variant(date, tokens, cost, family, model);
-            }
-            (None, true) => accumulator.add(date, tokens, cost, model),
-            (None, false) => accumulator.add_exact(date, tokens, cost, model),
-        },
+        Some(cost) if settled.estimated => {
+            accumulator.add_variant(date, tokens, cost, &family, model)
+        }
+        Some(cost) => accumulator.add_exact_variant(date, tokens, cost, &family, model),
         None if tokens > 0 && settled.unpriced_marker_only => {
             // A missing model leaves no marker to name.
             accumulator.add_unknown_model(date, observation.model.unwrap_or_default());
         }
-        None if tokens > 0 => accumulator.add_unpriced(date, tokens, model),
+        None if tokens > 0 => accumulator.add_unpriced(date, tokens, &family, model),
         None if !settled.complete => accumulator.add_unknown_model(date, model),
         None => return None,
     }
@@ -274,20 +249,11 @@ fn record_home(
     date: NaiveDate,
     home_card: &str,
     pricing: &ModelPricing,
-    policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Option<Bucket> {
     let own_series = |accumulator: &mut DailyUsageAccumulator| {
-        add_own_series(
-            observation,
-            date,
-            home_card,
-            true,
-            pricing,
-            policy,
-            accumulator,
-        )
-        .then_some(Bucket::OwnSeries)
+        add_own_series(observation, date, home_card, true, pricing, accumulator)
+            .then_some(Bucket::OwnSeries)
     };
     // Unattributed usage under a fallback home may belong to any Card, so it lands nowhere.
     if observation.model.is_none() && observation.home_is_fallback {
@@ -339,6 +305,15 @@ fn add_others(
     );
 }
 
+/// How a model's usage is labelled on a Card: by its display family, keeping the model as
+/// logged as the family's variant. Usage without a model is labelled Unattributed.
+fn label<'a>(pricing: &ModelPricing, model: Option<&'a str>) -> (String, &'a str) {
+    match model {
+        Some(model) => (pricing.display_family(model), model),
+        None => ("Unattributed".to_owned(), "Unattributed"),
+    }
+}
+
 /// The model usage is priced and labelled by.
 fn priced_model<'a>(observation: &UsageObservation<'a>) -> Option<&'a str> {
     observation.rate_model.or(observation.model)
@@ -358,22 +333,15 @@ fn record_routed(
     date: NaiveDate,
     target_card: &str,
     pricing: &ModelPricing,
-    policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
     if served_by_local_runtime(&observation) {
         return false;
     }
     match observation.model {
-        Some(model) if card_for_model(model) == Some(target_card) => add_own_series(
-            observation,
-            date,
-            target_card,
-            false,
-            pricing,
-            policy,
-            accumulator,
-        ),
+        Some(model) if card_for_model(model) == Some(target_card) => {
+            add_own_series(observation, date, target_card, false, pricing, accumulator)
+        }
         _ => false,
     }
 }
@@ -386,7 +354,6 @@ fn add_own_series(
     card: &str,
     home: bool,
     pricing: &ModelPricing,
-    policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
     let tokens = observation.total_tokens;
@@ -400,32 +367,13 @@ fn add_own_series(
     if tokens == 0 && cost.is_none_or(|cost| cost <= 0.0) && !observation.keep_when_empty {
         return false;
     }
-    let label = priced_model(&observation).unwrap_or("Unattributed");
-    let family = match (policy.label, priced_model(&observation)) {
-        (LabelMode::Family | LabelMode::FamilyWithVariant, Some(model)) => {
-            Some(pricing.display_family(model))
-        }
-        _ => None,
-    };
-    let variant = family
-        .as_deref()
-        .filter(|family| policy.label == LabelMode::FamilyWithVariant && *family != label);
+    let (family, model) = label(pricing, priced_model(&observation));
     if let Some(exact) = observation.recorded_cost {
-        match (family.as_deref(), variant) {
-            (Some(family), Some(_)) => {
-                accumulator.add_exact_variant(date, tokens, exact, family, label)
-            }
-            (Some(family), None) => accumulator.add_exact(date, tokens, exact, family),
-            _ => accumulator.add_exact(date, tokens, exact, label),
-        }
+        accumulator.add_exact_variant(date, tokens, exact, &family, model);
     } else if let Some(cost) = estimated {
-        match (family.as_deref(), variant) {
-            (Some(family), Some(_)) => accumulator.add_variant(date, tokens, cost, family, label),
-            (Some(family), None) => accumulator.add(date, tokens, cost, family),
-            _ => accumulator.add(date, tokens, cost, label),
-        }
+        accumulator.add_variant(date, tokens, cost, &family, model);
     } else if tokens > 0 || observation.keep_when_empty {
-        accumulator.add_unpriced(date, tokens, label);
+        accumulator.add_unpriced(date, tokens, &family, model);
     } else {
         return false;
     }
@@ -518,13 +466,14 @@ pub(super) mod test_support {
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
 
-    use super::{record, record_settled, LabelMode, Settled, TransitionalPolicy, UsageObservation};
+    use super::{record, record_settled, Settled, UsageObservation};
     use crate::{
         pricing::{is_local_runtime_model, test_bundled_pricing, ModelPricing, TokenBreakdown},
         providers::card_usage::DailyUsageAccumulator,
     };
 
-    /// Every Card a Home client's usage can land on.
+    /// Every Card a Home client's usage can land on, and every home Card: pi's and zcode's usage
+    /// can have any home Card, chosen per event.
     const CARDS: [&str; 7] = [
         "claude",
         "codex",
@@ -533,132 +482,6 @@ mod tests {
         "kimi",
         "minimax",
         "zai",
-    ];
-
-    /// Home Cards of the Home clients migrated onto this module, with the policy their native
-    /// loop uses. Gemini CLI's home Card is antigravity. pi's and zcode's usage can have any home
-    /// Card, chosen per event, so they appear once per Card.
-    const HOMES: [(&str, TransitionalPolicy); 20] = [
-        (
-            "claude",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "codex",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "grok",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "antigravity",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
-        (
-            "kimi",
-            TransitionalPolicy {
-                label: LabelMode::Family,
-            },
-        ),
-        (
-            "antigravity",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
-        (
-            "claude",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "codex",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "antigravity",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "grok",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "kimi",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "minimax",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "zai",
-            TransitionalPolicy {
-                label: LabelMode::RawModel,
-            },
-        ),
-        (
-            "claude",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
-        (
-            "codex",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
-        (
-            "antigravity",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
-        (
-            "grok",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
-        (
-            "kimi",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
-        (
-            "minimax",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
-        (
-            "zai",
-            TransitionalPolicy {
-                label: LabelMode::FamilyWithVariant,
-            },
-        ),
     ];
 
     const MODELS: [Option<&str>; 13] = [
@@ -691,26 +514,12 @@ mod tests {
 
     /// Number of places one observation lands across every Card: a Card's own series or its
     /// Others.
-    fn landings(
-        pricing: &ModelPricing,
-        home: &str,
-        home_policy: TransitionalPolicy,
-        observation: UsageObservation,
-    ) -> usize {
+    fn landings(pricing: &ModelPricing, home: &str, observation: UsageObservation) -> usize {
         CARDS
             .iter()
             .filter(|card| {
-                let policy = home_policy;
                 let mut accumulator = DailyUsageAccumulator::default();
-                record(
-                    [observation],
-                    home,
-                    card,
-                    now(),
-                    pricing,
-                    policy,
-                    &mut accumulator,
-                );
+                record([observation], home, card, now(), pricing, &mut accumulator);
                 let history = accumulator.build(now(), "test");
                 !history.daily.is_empty()
                     || history
@@ -723,7 +532,7 @@ mod tests {
     #[test]
     fn each_observation_lands_exactly_once_across_cards() {
         let pricing = test_bundled_pricing();
-        for (home, policy) in HOMES {
+        for home in CARDS {
             for model in MODELS {
                 for days_ago in [0, 1, 28, 29] {
                     for recorded_cost in [None, Some(0.0), Some(0.25)] {
@@ -734,7 +543,7 @@ mod tests {
                             recorded_cost,
                         );
                         assert_eq!(
-                            landings(&pricing, home, policy, observation),
+                            landings(&pricing, home, observation),
                             1,
                             "{home} home, {model:?}, {days_ago} days ago, cost {recorded_cost:?}"
                         );
@@ -749,7 +558,7 @@ mod tests {
     #[test]
     fn local_runtime_usage_lands_unpriced_in_the_home_cards_others() {
         let pricing = test_bundled_pricing();
-        for (home, policy) in HOMES {
+        for home in CARDS {
             let foreign = CARDS.iter().copied().find(|card| *card != home).unwrap();
             let cases = [
                 ("slug only", Some("ollama/llama3"), None),
@@ -770,15 +579,7 @@ mod tests {
                     };
                     for card in CARDS {
                         let mut accumulator = DailyUsageAccumulator::default();
-                        record(
-                            [observation],
-                            home,
-                            card,
-                            now(),
-                            &pricing,
-                            policy,
-                            &mut accumulator,
-                        );
+                        record([observation], home, card, now(), &pricing, &mut accumulator);
                         let history = accumulator.build(now(), "test");
                         let context = format!("{case}: {home} home on {card}, {recorded_cost:?}");
                         assert!(history.daily.is_empty(), "{context}");
@@ -800,7 +601,7 @@ mod tests {
     #[test]
     fn usage_keeping_its_home_lands_once_unless_it_has_no_home_or_model() {
         let pricing = test_bundled_pricing();
-        for (home, policy) in HOMES {
+        for home in CARDS {
             for home_is_fallback in [false, true] {
                 for provider_hint in [None, Some("ollama"), Some("openrouter")] {
                     for model in MODELS {
@@ -812,7 +613,7 @@ mod tests {
                         let model = observation.model;
                         let expected = usize::from(!(home_is_fallback && model.is_none()));
                         assert_eq!(
-                            landings(&pricing, home, policy, observation),
+                            landings(&pricing, home, observation),
                             expected,
                             "{home} home, fallback {home_is_fallback}, {provider_hint:?}, {model:?}"
                         );
@@ -842,7 +643,7 @@ mod tests {
         let pricing = test_bundled_pricing();
         for (days_ago, inside) in [(0, true), (29, true), (30, false), (31, false)] {
             let at = now() - Duration::days(days_ago);
-            for (home, policy) in HOMES {
+            for home in CARDS {
                 for card in CARDS {
                     let observation = UsageObservation::new(
                         at,
@@ -851,15 +652,8 @@ mod tests {
                         None,
                     );
                     let mut accumulator = DailyUsageAccumulator::default();
-                    let landed = record(
-                        [observation],
-                        home,
-                        card,
-                        now(),
-                        &pricing,
-                        policy,
-                        &mut accumulator,
-                    );
+                    let landed =
+                        record([observation], home, card, now(), &pricing, &mut accumulator);
                     assert_eq!(
                         landed.own_series, inside,
                         "{home} -> {card}, {days_ago} days ago"
@@ -874,11 +668,16 @@ mod tests {
                 estimated: true,
                 priced_tokens: 1_100,
                 complete: true,
-                family: None,
                 unpriced_marker_only: false,
             };
             let mut accumulator = DailyUsageAccumulator::default();
-            let landed = record_settled([(observation, settled)], now(), true, &mut accumulator);
+            let landed = record_settled(
+                [(observation, settled)],
+                now(),
+                true,
+                &pricing,
+                &mut accumulator,
+            );
             assert_eq!(landed.own_series, inside, "settled, {days_ago} days ago");
         }
     }
@@ -886,13 +685,13 @@ mod tests {
     #[test]
     fn observations_outside_the_window_or_in_the_future_land_nowhere() {
         let pricing = test_bundled_pricing();
-        for (home, policy) in HOMES {
+        for home in CARDS {
             for model in MODELS {
                 for timestamp in [now() - Duration::days(30), now() + Duration::hours(1)] {
                     let observation =
                         UsageObservation::new(timestamp, model, tokens(1_000, 100), None);
                     assert_eq!(
-                        landings(&pricing, home, policy, observation),
+                        landings(&pricing, home, observation),
                         0,
                         "{home}, {model:?}"
                     );
@@ -904,13 +703,13 @@ mod tests {
     #[test]
     fn zero_token_observations_with_nothing_paid_land_nowhere() {
         let pricing = test_bundled_pricing();
-        for (home, policy) in HOMES {
+        for home in CARDS {
             for model in MODELS {
                 for recorded_cost in [None, Some(0.0)] {
                     let observation =
                         UsageObservation::new(now(), model, tokens(0, 0), recorded_cost);
                     assert_eq!(
-                        landings(&pricing, home, policy, observation),
+                        landings(&pricing, home, observation),
                         0,
                         "{home}, {model:?}, cost {recorded_cost:?}"
                     );
@@ -923,7 +722,7 @@ mod tests {
     #[test]
     fn zero_token_observations_with_a_recorded_cost_land_exactly_once() {
         let pricing = test_bundled_pricing();
-        for (home, policy) in HOMES {
+        for home in CARDS {
             for model in MODELS {
                 let observation = UsageObservation::new(now(), model, tokens(0, 0), Some(0.25));
                 let model = observation.model;
@@ -932,7 +731,7 @@ mod tests {
                     local_runtime || (observation.home_is_fallback && model.is_none());
                 let expected = usize::from(!lands_nowhere);
                 assert_eq!(
-                    landings(&pricing, home, policy, observation),
+                    landings(&pricing, home, observation),
                     expected,
                     "{home}, {model:?}"
                 );
@@ -947,7 +746,6 @@ mod tests {
             keep_when_empty: true,
             ..UsageObservation::new(now(), Some("codex-auto-review"), tokens(0, 0), None)
         };
-        let (_, policy) = HOMES[1];
         let mut accumulator = DailyUsageAccumulator::default();
         let landed = record(
             [observation],
@@ -955,12 +753,101 @@ mod tests {
             "codex",
             now(),
             &pricing,
-            policy,
             &mut accumulator,
         );
         assert!(landed.own_series);
         let history = accumulator.build(now(), "test");
         assert_eq!(history.unknown_models, ["codex-auto-review"]);
         assert!(history.daily.is_empty());
+    }
+
+    /// The model breakdown of `history`'s last 30 days, as (label, variants) rows.
+    fn breakdown(history: &crate::models::UsageHistory) -> Vec<(String, Vec<String>)> {
+        history
+            .last_30_days
+            .as_ref()
+            .and_then(|period| period.model_breakdown.as_ref())
+            .map(|breakdown| {
+                breakdown
+                    .models
+                    .iter()
+                    .map(|entry| {
+                        let variants = entry.variants.iter().flatten();
+                        let variants = variants.map(|variant| variant.model.clone()).collect();
+                        (entry.model.clone(), variants)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every Card labels a model by its display family and keeps the model as logged as its
+    /// variant, whichever Home client the usage came from, priced or not.
+    #[test]
+    fn the_same_model_gets_the_same_family_label_on_every_card() {
+        let pricing = test_bundled_pricing();
+        for (model, priced) in [
+            ("claude-4.5-sonnet-thinking", true),
+            ("claude-unreleased-zz-9-fast", false),
+        ] {
+            let family = pricing.display_family(model);
+            assert_ne!(family, model);
+            for home in CARDS {
+                let mut accumulator = DailyUsageAccumulator::default();
+                let observation =
+                    UsageObservation::new(now(), Some(model), tokens(1_000, 100), None);
+                record(
+                    [observation],
+                    home,
+                    "claude",
+                    now(),
+                    &pricing,
+                    &mut accumulator,
+                );
+                let history = accumulator.build(now(), "test");
+                assert_eq!(
+                    breakdown(&history),
+                    [(family.clone(), vec![model.to_owned()])],
+                    "{model} from {home}"
+                );
+                let cost = history
+                    .last_30_days
+                    .and_then(|period| period.estimated_cost_usd);
+                assert_eq!(cost.is_some(), priced, "{model} from {home}");
+                let unknown = history.unknown_models.iter().any(|name| name == model);
+                assert_eq!(unknown, !priced, "{model} from {home}");
+            }
+        }
+    }
+
+    /// Settled usage is labelled the same way as usage the module prices.
+    #[test]
+    fn settled_usage_gets_the_family_label() {
+        let pricing = test_bundled_pricing();
+        let model = "claude-4.5-sonnet-thinking";
+        for (cost, complete) in [(Some(0.1), true), (Some(0.1), false), (None, true)] {
+            let observation = UsageObservation::new(now(), Some(model), tokens(1_000, 100), None);
+            let settled = Settled {
+                others: false,
+                cost,
+                estimated: true,
+                priced_tokens: 1_100,
+                complete,
+                unpriced_marker_only: false,
+            };
+            let mut accumulator = DailyUsageAccumulator::default();
+            record_settled(
+                [(observation, settled)],
+                now(),
+                true,
+                &pricing,
+                &mut accumulator,
+            );
+            assert_eq!(
+                breakdown(&accumulator.build(now(), "test")),
+                [(pricing.display_family(model), vec![model.to_owned()])],
+                "{cost:?}, complete {complete}"
+            );
+        }
     }
 }

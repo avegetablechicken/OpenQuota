@@ -103,10 +103,13 @@ impl ModelAccumulator {
         }
     }
 
-    fn add_unpriced(&mut self, spelling: &str, tokens: u64) {
+    fn add_unpriced(&mut self, spelling: &str, variant: &str, tokens: u64) {
         self.tokens = self.tokens.saturating_add(tokens);
         self.cost_complete = false;
         *self.spellings.entry(spelling.to_owned()).or_default() += tokens.max(1);
+        let variant = self.variants.entry(variant.to_owned()).or_default();
+        variant.tokens = variant.tokens.saturating_add(tokens);
+        variant.cost_complete = false;
     }
 
     fn display_name(&self) -> String {
@@ -129,13 +132,14 @@ impl ModelAccumulator {
 
 impl DailyUsageAccumulator {
     /// Adds usage whose dollar cost was derived from a pricing estimate.
-    pub(super) fn add(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
+    #[cfg(test)]
+    fn add(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
         self.add_internal(date, tokens, cost, model, None, true);
     }
 
     /// Adds usage whose dollar cost was recorded exactly by the source.
-    #[allow(dead_code)]
-    pub(super) fn add_exact(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
+    #[cfg(test)]
+    fn add_exact(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
         self.add_internal(date, tokens, cost, model, None, false);
     }
 
@@ -153,7 +157,6 @@ impl DailyUsageAccumulator {
     }
 
     /// Adds variant usage whose dollar cost was recorded exactly by the source.
-    #[allow(dead_code)]
     pub(super) fn add_exact_variant(
         &mut self,
         date: NaiveDate,
@@ -187,42 +190,56 @@ impl DailyUsageAccumulator {
             .add(family, variant, tokens, cost);
     }
 
-    /// Adds usage whose cost covers only some of its tokens. The day keeps the partial dollars,
-    /// but the model's cost is incomplete, as if its unpriced part were added separately.
+    /// Adds `family`'s `variant` usage whose cost covers only some of its tokens. The day keeps
+    /// the partial dollars, but the cost of the family and of the variant is incomplete, as if
+    /// the unpriced part were added separately.
     pub(super) fn add_partially_priced(
         &mut self,
         date: NaiveDate,
         tokens: u64,
         cost: f64,
-        model: &str,
+        family: &str,
+        variant: &str,
         cost_estimated: bool,
     ) {
-        let model = normalized_model_name(model);
-        self.add_internal(date, tokens, cost, model, None, cost_estimated);
+        let family = normalized_model_name(family);
+        let variant = normalized_model_name(variant);
+        self.add_internal(date, tokens, cost, family, Some(variant), cost_estimated);
         if let Some(usage) = self
             .days
             .get_mut(&date)
-            .and_then(|day| day.models.get_mut(&model.to_lowercase()))
+            .and_then(|day| day.models.get_mut(&family.to_lowercase()))
         {
             usage.cost_complete = false;
+            if let Some(variant) = usage.variants.get_mut(variant) {
+                variant.cost_complete = false;
+            }
         }
-        self.add_unknown_model(date, model);
+        self.add_unknown_model(date, variant);
     }
 
-    /// Keeps measured token history visible when the model has no usable pricing entry.
-    pub(super) fn add_unpriced(&mut self, date: NaiveDate, tokens: u64, model: &str) {
+    /// Keeps measured token history of `family`'s `variant` visible when the variant has no
+    /// usable pricing entry. The variant is named as the unknown model.
+    pub(super) fn add_unpriced(
+        &mut self,
+        date: NaiveDate,
+        tokens: u64,
+        family: &str,
+        variant: &str,
+    ) {
         if tokens == 0 {
-            self.add_unknown_model(date, model);
+            self.add_unknown_model(date, variant);
             return;
         }
-        let model = normalized_model_name(model);
+        let family = normalized_model_name(family);
+        let variant = normalized_model_name(variant);
         let day = self.days.entry(date).or_default();
         day.tokens = day.tokens.saturating_add(tokens);
         day.models
-            .entry(model.to_lowercase())
+            .entry(family.to_lowercase())
             .or_default()
-            .add_unpriced(model, tokens);
-        self.add_unknown_model(date, model);
+            .add_unpriced(family, variant, tokens);
+        self.add_unknown_model(date, variant);
     }
 
     pub(super) fn add_unknown_model(&mut self, date: NaiveDate, model: &str) {
@@ -640,7 +657,7 @@ mod tests {
     fn measured_unpriced_tokens_keep_history_without_inventing_cost() {
         let now = Utc.with_ymd_and_hms(2026, 6, 26, 12, 0, 0).unwrap();
         let mut accumulator = DailyUsageAccumulator::default();
-        accumulator.add_unpriced(day(2026, 6, 26), 420, "future-model");
+        accumulator.add_unpriced(day(2026, 6, 26), 420, "future-model", "future-model");
 
         let history = accumulator.build(now, "From test logs");
         let today = history.today.unwrap();

@@ -16,7 +16,7 @@ use crate::{
 
 use super::{
     card_usage::DailyUsageAccumulator,
-    card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
+    card_usage::{self, UsageObservation},
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     model_scope::{card_for_model, normalize_provider_model},
 };
@@ -288,9 +288,6 @@ fn aggregate_into(
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
 ) -> PiUsageSources {
-    let policy = TransitionalPolicy {
-        label: LabelMode::RawModel,
-    };
     let mut contributed = PiUsageSources::default();
     for event in events.iter().filter(|event| event.card_id == card_id) {
         let landed = card_usage::record(
@@ -299,7 +296,6 @@ fn aggregate_into(
             card_id,
             now,
             pricing,
-            policy,
             accumulator,
         );
         if landed.own_series || landed.others {
@@ -1442,9 +1438,16 @@ mod tests {
     "modelBreakdown": {
       "models": [
         {
-          "model": "gemini-3-pro",
+          "model": "gemini-3-pro-preview",
           "totalTokens": 1100,
-          "costUsd": 0.0032
+          "costUsd": 0.0032,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 1100,
+              "costUsd": 0.0032
+            }
+          ]
         }
       ],
       "sourceNote": "test"
@@ -1459,9 +1462,16 @@ mod tests {
     "modelBreakdown": {
       "models": [
         {
-          "model": "gemini-3-pro",
+          "model": "gemini-3-pro-preview",
           "totalTokens": 1100,
-          "costUsd": 0.0032
+          "costUsd": 0.0032,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 1100,
+              "costUsd": 0.0032
+            }
+          ]
         },
         {
           "model": "Other",
@@ -1554,9 +1564,16 @@ mod tests {
     "modelBreakdown": {
       "models": [
         {
-          "model": "kimi-k2p5",
+          "model": "moonshot/kimi-k2.5",
           "totalTokens": 1100,
-          "costUsd": 0.0009
+          "costUsd": 0.0009,
+          "variants": [
+            {
+              "model": "kimi-k2p5",
+              "totalTokens": 1100,
+              "costUsd": 0.0009
+            }
+          ]
         }
       ],
       "sourceNote": "test"
@@ -1571,9 +1588,16 @@ mod tests {
     "modelBreakdown": {
       "models": [
         {
-          "model": "kimi-k2p5",
+          "model": "moonshot/kimi-k2.5",
           "totalTokens": 1100,
-          "costUsd": 0.0009
+          "costUsd": 0.0009,
+          "variants": [
+            {
+              "model": "kimi-k2p5",
+              "totalTokens": 1100,
+              "costUsd": 0.0009
+            }
+          ]
         }
       ],
       "sourceNote": "test"

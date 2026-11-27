@@ -78,7 +78,7 @@ impl OpenCodeUsageScanner {
             return Ok(None);
         };
         Ok(Some(OpenCodeUsageScan {
-            usage: aggregate_history(&scan.records, now),
+            usage: aggregate_history(&scan.records, now, pricing),
             warnings: scan.warnings,
         }))
     }
@@ -94,7 +94,7 @@ impl OpenCodeUsageScanner {
         let Some(scan) = scan_records(paths, now, pricing, card_id)? else {
             return Ok(false);
         };
-        Ok(aggregate_into(&scan.records, now, accumulator))
+        Ok(aggregate_into(&scan.records, now, pricing, accumulator))
     }
 
     pub(crate) fn has_hosted_usage(&self) -> bool {
@@ -212,9 +212,13 @@ fn better_record(candidate: &UsageRecord, current: &UsageRecord) -> bool {
             && candidate.cost.unwrap_or_default() > current.cost.unwrap_or_default())
 }
 
-fn aggregate_history(records: &[UsageRecord], now: DateTime<Utc>) -> UsageHistory {
+fn aggregate_history(
+    records: &[UsageRecord],
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+) -> UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(records, now, &mut accumulator);
+    aggregate_into(records, now, pricing, &mut accumulator);
     accumulator.build(now, USAGE_SOURCE_NOTE)
 }
 
@@ -222,6 +226,7 @@ fn aggregate_history(records: &[UsageRecord], now: DateTime<Utc>) -> UsageHistor
 fn aggregate_into(
     records: &[UsageRecord],
     now: DateTime<Utc>,
+    pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
     let observations = records.iter().map(|record| {
@@ -240,12 +245,11 @@ fn aggregate_into(
             estimated: record.cost_provenance == CostProvenance::Estimated,
             priced_tokens: record.priced_tokens,
             complete: !record.incomplete_cost,
-            family: None,
             unpriced_marker_only: false,
         };
         (observation, settled)
     });
-    card_usage::record_settled(observations, now, true, accumulator).own_series
+    card_usage::record_settled(observations, now, true, pricing, accumulator).own_series
 }
 
 #[cfg(test)]
@@ -289,10 +293,18 @@ mod unit_tests {
     #[test]
     fn exact_and_estimated_costs_keep_their_period_provenance() {
         let now = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
-        let exact = aggregate_history(&[record(100, Some(1.0), true)], now);
+        let exact = aggregate_history(
+            &[record(100, Some(1.0), true)],
+            now,
+            &crate::pricing::test_bundled_pricing(),
+        );
         assert!(!exact.today.unwrap().cost_estimated);
 
-        let estimated = aggregate_history(&[record(100, Some(1.0), false)], now);
+        let estimated = aggregate_history(
+            &[record(100, Some(1.0), false)],
+            now,
+            &crate::pricing::test_bundled_pricing(),
+        );
         assert!(estimated.today.unwrap().cost_estimated);
     }
 
@@ -306,7 +318,13 @@ mod unit_tests {
         priced.key.1 = "priced".into();
         priced.model = "priced-model".into();
 
-        let today = aggregate_history(&[partial, priced], now).today.unwrap();
+        let today = aggregate_history(
+            &[partial, priced],
+            now,
+            &crate::pricing::test_bundled_pricing(),
+        )
+        .today
+        .unwrap();
         assert_eq!(today.tokens, 1_100);
         assert!((today.estimated_cost_usd.unwrap() - 1.1).abs() < 1e-9);
         assert_eq!(today.unknown_models, ["model"]);
@@ -481,7 +499,12 @@ mod unit_tests {
         #[test]
         fn settled_records_are_pinned() {
             let mut accumulator = DailyUsageAccumulator::default();
-            let contributed = aggregate_into(&records(), now(), &mut accumulator);
+            let contributed = aggregate_into(
+                &records(),
+                now(),
+                &crate::pricing::test_bundled_pricing(),
+                &mut accumulator,
+            );
             let json = relative_json(&accumulator.build(now(), "test"), now());
             assert_pinned(
                 "settled",
@@ -503,13 +526,28 @@ mod unit_tests {
                 true,
             )];
             let mut accumulator = DailyUsageAccumulator::default();
-            assert!(!aggregate_into(&others, now(), &mut accumulator));
+            assert!(!aggregate_into(
+                &others,
+                now(),
+                &crate::pricing::test_bundled_pricing(),
+                &mut accumulator
+            ));
             let unknown = [record(0, "claude-ghost", 0, None, false, true, 0, false)];
             let mut accumulator = DailyUsageAccumulator::default();
-            assert!(aggregate_into(&unknown, now(), &mut accumulator));
+            assert!(aggregate_into(
+                &unknown,
+                now(),
+                &crate::pricing::test_bundled_pricing(),
+                &mut accumulator
+            ));
             let empty = [record(0, "claude-empty", 0, None, false, false, 0, false)];
             let mut accumulator = DailyUsageAccumulator::default();
-            assert!(!aggregate_into(&empty, now(), &mut accumulator));
+            assert!(!aggregate_into(
+                &empty,
+                now(),
+                &crate::pricing::test_bundled_pricing(),
+                &mut accumulator
+            ));
         }
 
         const SETTLED: &str = r#"

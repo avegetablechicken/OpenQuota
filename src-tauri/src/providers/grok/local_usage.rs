@@ -14,7 +14,7 @@ use crate::{
     providers::{
         antigravity,
         card_usage::DailyUsageAccumulator,
-        card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
+        card_usage::{self, UsageObservation},
         claude, codex, gemini_cli_usage, kimi,
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
         model_scope::format_source_note,
@@ -445,9 +445,6 @@ fn aggregate_into(
         "grok",
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::RawModel,
-        },
         accumulator,
     );
 }
@@ -465,9 +462,6 @@ fn aggregate_routed_into(
         card_id,
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::RawModel,
-        },
         accumulator,
     )
     .own_series
@@ -760,9 +754,16 @@ mod tests {
     "modelBreakdown": {
       "models": [
         {
-          "model": "grok-code-fast-1",
+          "model": "grok-build-0.1",
           "totalTokens": 1100,
-          "costUsd": 0.0012
+          "costUsd": 0.0012,
+          "variants": [
+            {
+              "model": "grok-code-fast-1",
+              "totalTokens": 1100,
+              "costUsd": 0.0012
+            }
+          ]
         },
         {
           "model": "grok-4-fast-reasoning",
@@ -787,9 +788,16 @@ mod tests {
           "costUsd": 0.001845
         },
         {
-          "model": "grok-code-fast-1",
+          "model": "grok-build-0.1",
           "totalTokens": 1100,
-          "costUsd": 0.0012
+          "costUsd": 0.0012,
+          "variants": [
+            {
+              "model": "grok-code-fast-1",
+              "totalTokens": 1100,
+              "costUsd": 0.0012
+            }
+          ]
         },
         {
           "model": "grok-4-fast-reasoning",
@@ -971,9 +979,16 @@ mod tests {
     "modelBreakdown": {
       "models": [
         {
-          "model": "gemini-3-pro",
+          "model": "gemini-3-pro-preview",
           "totalTokens": 880,
-          "costUsd": 0.00256
+          "costUsd": 0.00256,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 880,
+              "costUsd": 0.00256
+            }
+          ]
         }
       ],
       "sourceNote": "test"

@@ -500,16 +500,8 @@ pub fn usage_history(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
 ) -> UsageHistory {
-    // The export is already priced; its rows are labelled by family, keeping the model as a
-    // variant, and unpriced rows only name their model as unknown.
-    let families = rows
-        .iter()
-        .map(|row| match row.model.trim() {
-            "" => "Unattributed".to_owned(),
-            model => pricing.display_family(model),
-        })
-        .collect::<Vec<_>>();
-    let observations = rows.iter().zip(&families).map(|(row, family)| {
+    // The export is already priced, and unpriced rows only name their model as unknown.
+    let observations = rows.iter().map(|row| {
         let cost = row.reported_cost_usd.or(row.estimated_cost_usd);
         let observation = UsageObservation::new(row.date, Some(&row.model), row.tokens, None);
         let settled = Settled {
@@ -518,13 +510,12 @@ pub fn usage_history(
             estimated: row.reported_cost_usd.is_none(),
             priced_tokens: row.tokens.total_tokens(),
             complete: true,
-            family: Some(family),
             unpriced_marker_only: true,
         };
         (observation, settled)
     });
     let mut accumulator = DailyUsageAccumulator::default();
-    card_usage::record_settled(observations, now, false, &mut accumulator);
+    card_usage::record_settled(observations, now, false, pricing, &mut accumulator);
     accumulator.build(now, "From your Cursor usage export")
 }
 

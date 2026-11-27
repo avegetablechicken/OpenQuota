@@ -13,7 +13,7 @@ use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
         card_usage::DailyUsageAccumulator,
-        card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
+        card_usage::{self, UsageObservation},
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     },
     storage::Storage,
@@ -433,9 +433,6 @@ fn aggregate_into(
         card_id,
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::FamilyWithVariant,
-        },
         accumulator,
     )
     .own_series
@@ -899,6 +896,11 @@ mod tests {
           "costUsd": 0.0336,
           "variants": [
             {
+              "model": "gemini-3-pro-preview",
+              "totalTokens": 16500,
+              "costUsd": 0.0272
+            },
+            {
               "model": "gemini-3-pro",
               "totalTokens": 2200,
               "costUsd": 0.0064
@@ -940,9 +942,16 @@ mod tests {
           "costUsd": 0.000105
         },
         {
-          "model": "gemini-3.5-flash-lite-tiered-high",
+          "model": "gemini-3.5-flash-lite",
           "totalTokens": 1100,
-          "costUsd": null
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "gemini-3.5-flash-lite-tiered-high",
+              "totalTokens": 1100,
+              "costUsd": null
+            }
+          ]
         }
       ],
       "sourceNote": "test"
@@ -963,6 +972,11 @@ mod tests {
           "totalTokens": 18810,
           "costUsd": 0.03392,
           "variants": [
+            {
+              "model": "gemini-3-pro-preview",
+              "totalTokens": 16500,
+              "costUsd": 0.0272
+            },
             {
               "model": "gemini-3-pro",
               "totalTokens": 2310,
@@ -998,7 +1012,7 @@ mod tests {
               "costUsd": 0.000105
             },
             {
-              "model": "gemini-3.5-flash-lite-tiered-high",
+              "model": "gemini-3.5-flash-lite",
               "totalTokens": 1100,
               "costUsd": null
             },

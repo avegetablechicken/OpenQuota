@@ -20,7 +20,7 @@ use super::CodexError;
 use crate::providers::{
     antigravity,
     card_usage::DailyUsageAccumulator,
-    card_usage::{self, LabelMode, PriceSource, TransitionalPolicy, UsageObservation},
+    card_usage::{self, PriceSource, UsageObservation},
     claude, gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
     model_scope::format_source_note,
@@ -685,9 +685,6 @@ fn aggregate_into(
         "codex",
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::RawModel,
-        },
         accumulator,
     );
 }
@@ -705,9 +702,6 @@ fn aggregate_routed_into(
         card_id,
         now,
         pricing,
-        TransitionalPolicy {
-            label: LabelMode::RawModel,
-        },
         accumulator,
     )
     .own_series
@@ -1195,7 +1189,9 @@ mod tests {
         assert_eq!(today.tokens, 110);
         assert!(today.estimated_cost_usd.is_some());
         assert!(today.estimate_complete);
-        assert_eq!(today.model_breakdown.unwrap().models[0].model, "GPT-5.5");
+        let entry = &today.model_breakdown.unwrap().models[0];
+        assert_eq!(entry.model, "gpt-5.5");
+        assert_eq!(entry.variants.as_ref().unwrap()[0].model, "GPT-5.5");
         assert!(history.unknown_models.is_empty());
     }
 
@@ -1209,8 +1205,10 @@ mod tests {
         assert_eq!(today.tokens, 110);
         assert_eq!(today.estimated_cost_usd, Some(0.0008));
         assert!(today.estimate_complete);
+        let entry = &today.model_breakdown.as_ref().unwrap().models[0];
+        assert_eq!(entry.model, "gpt-5.6-sol");
         assert_eq!(
-            today.model_breakdown.as_ref().unwrap().models[0].model,
+            entry.variants.as_ref().unwrap()[0].model,
             "gpt-daybreak-blue-latest"
         );
         assert!(history.unknown_models.is_empty());
@@ -1729,23 +1727,30 @@ mod tests {
       "models": [
         {
           "model": "gpt-5.5",
-          "totalTokens": 302000,
-          "costUsd": 2.19
-        },
-        {
-          "model": "Other",
-          "totalTokens": 4400,
-          "costUsd": 0.08230000000000001,
+          "totalTokens": 303100,
+          "costUsd": 2.21,
           "variants": [
             {
-              "model": "gpt-5.4-pro",
-              "totalTokens": 1100,
-              "costUsd": 0.048
+              "model": "gpt-5.5",
+              "totalTokens": 302000,
+              "costUsd": 2.19
             },
             {
               "model": "gpt-5.5-fast",
               "totalTokens": 1100,
               "costUsd": 0.02
+            }
+          ]
+        },
+        {
+          "model": "Other",
+          "totalTokens": 3300,
+          "costUsd": 0.0623,
+          "variants": [
+            {
+              "model": "gpt-5.4-pro",
+              "totalTokens": 1100,
+              "costUsd": 0.048
             },
             {
               "model": "gpt-5.5-2026-04-23",
@@ -1773,23 +1778,30 @@ mod tests {
       "models": [
         {
           "model": "gpt-5.5",
-          "totalTokens": 321710,
-          "costUsd": null
+          "totalTokens": 322810,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "gpt-5.5-fast",
+              "totalTokens": 1100,
+              "costUsd": 0.02
+            },
+            {
+              "model": "gpt-5.5",
+              "totalTokens": 321710,
+              "costUsd": null
+            }
+          ]
         },
         {
           "model": "Other",
-          "totalTokens": 9130,
+          "totalTokens": 8030,
           "costUsd": null,
           "variants": [
             {
               "model": "gpt-5.4-pro",
               "totalTokens": 1100,
               "costUsd": 0.048
-            },
-            {
-              "model": "gpt-5.5-fast",
-              "totalTokens": 1100,
-              "costUsd": 0.02
             },
             {
               "model": "gpt-5.5-2026-04-23",
@@ -1969,9 +1981,16 @@ mod tests {
     "modelBreakdown": {
       "models": [
         {
-          "model": "gemini-3-pro",
+          "model": "gemini-3-pro-preview",
           "totalTokens": 880,
-          "costUsd": 0.00256
+          "costUsd": 0.00256,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 880,
+              "costUsd": 0.00256
+            }
+          ]
         }
       ],
       "sourceNote": "test"
