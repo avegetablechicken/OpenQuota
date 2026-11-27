@@ -6,8 +6,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     commands::credential_change::{
-        self, Finish, OnSettingsError, Policy, RefreshWhen, SettingsChange, TauriApp,
-        TemplateHandoff, Timing,
+        self, OnSettingsError, Policy, SettingsChange, TauriApp, TemplateHandoff, Timing,
     },
     models::{ApiKeyMutationOutcome, ApiKeyStatus, ProviderApiKeyState, ProviderLink},
     pacing::NotificationEvaluator,
@@ -162,9 +161,6 @@ pub(crate) const SAVE_API_KEY: Policy = Policy {
     on_settings_error: OnSettingsError::Warn,
     clear_cached_usage: false,
     timing: Timing::Wait,
-    refresh_when: RefreshWhen::Always,
-    finish: Finish::Full,
-    announce_cleared_usage: false,
 };
 
 pub(crate) const DELETE_API_KEY: Policy = Policy {
@@ -173,9 +169,6 @@ pub(crate) const DELETE_API_KEY: Policy = Policy {
     on_settings_error: OnSettingsError::Warn,
     clear_cached_usage: false,
     timing: Timing::Wait,
-    refresh_when: RefreshWhen::IfEnabled,
-    finish: Finish::Full,
-    announce_cleared_usage: false,
 };
 
 pub(crate) const SAVE_SUB2API: Policy = Policy {
@@ -184,9 +177,6 @@ pub(crate) const SAVE_SUB2API: Policy = Policy {
     on_settings_error: OnSettingsError::Fail,
     clear_cached_usage: true,
     timing: Timing::Background,
-    refresh_when: RefreshWhen::IfEnabled,
-    finish: Finish::Full,
-    announce_cleared_usage: true,
 };
 
 pub(crate) const CLEAR_SUB2API: Policy = Policy {
@@ -195,9 +185,6 @@ pub(crate) const CLEAR_SUB2API: Policy = Policy {
     on_settings_error: OnSettingsError::Fail,
     clear_cached_usage: true,
     timing: Timing::Wait,
-    refresh_when: RefreshWhen::Always,
-    finish: Finish::TrayOnly,
-    announce_cleared_usage: false,
 };
 
 pub(crate) const DELETE_SUB2API: Policy = Policy {
@@ -206,9 +193,6 @@ pub(crate) const DELETE_SUB2API: Policy = Policy {
     on_settings_error: OnSettingsError::Fail,
     clear_cached_usage: true,
     timing: Timing::Wait,
-    refresh_when: RefreshWhen::Never,
-    finish: Finish::Nothing,
-    announce_cleared_usage: true,
 };
 
 #[tauri::command]

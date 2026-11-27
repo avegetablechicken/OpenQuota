@@ -29,8 +29,6 @@ pub(crate) trait CredentialApp: Send + Sync + 'static {
     fn refresh(&self, provider_id: &str) -> impl Future<Output = ()> + Send;
     /// Ends a change: the tray, notification pruning and alerts for the current usage.
     fn finish(&self);
-    /// TEMPORARY: clearing a Sub2API connection ends with only a tray update.
-    fn update_tray(&self);
 }
 
 /// How the settings follow the stored credential.
@@ -65,22 +63,6 @@ pub(crate) enum Timing {
     Background,
 }
 
-/// TEMPORARY: which changes refresh the provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RefreshWhen {
-    Always,
-    IfEnabled,
-    Never,
-}
-
-/// TEMPORARY: how a change ends after its refresh.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Finish {
-    Full,
-    TrayOnly,
-    Nothing,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Policy {
     /// Names the change in logs, as in "provider state after {action} could not be reconciled".
@@ -90,10 +72,6 @@ pub(crate) struct Policy {
     pub on_settings_error: OnSettingsError,
     pub clear_cached_usage: bool,
     pub timing: Timing,
-    pub refresh_when: RefreshWhen,
-    pub finish: Finish,
-    /// TEMPORARY: whether usage is shown again right after the cached usage is cleared.
-    pub announce_cleared_usage: bool,
 }
 
 pub(crate) struct Committed<T> {
@@ -108,7 +86,8 @@ pub(crate) struct Committed<T> {
 /// Stores a credential change and brings settings, cached usage and the app in line with it.
 ///
 /// The store step runs under the credential lock; the settings change runs under the command lock
-/// too. Both are released before the refresh.
+/// too. Both are released before the refresh, which runs when the provider is enabled after the
+/// change. Every change ends with [`CredentialApp::finish`], after the refresh if there is one.
 pub(crate) async fn commit<A, T, S, P>(
     app: &Arc<A>,
     provider_id: &str,
@@ -145,38 +124,26 @@ where
     };
     if policy.clear_cached_usage {
         app.clear_cached_usage(provider_id)?;
-        if policy.announce_cleared_usage {
-            app.usage_changed();
-        }
+        app.usage_changed();
     }
     let enabled = settings
         .get()
         .providers
         .iter()
         .any(|provider| provider.id == provider_id && provider.enabled);
-    let refresh = match policy.refresh_when {
-        RefreshWhen::Always => true,
-        RefreshWhen::IfEnabled => enabled,
-        RefreshWhen::Never => false,
-    };
     drop(command_guard);
     drop(credential_guard);
 
     let mut background = None;
-    if refresh {
-        match policy.timing {
-            Timing::Wait => {
-                app.refresh(provider_id).await;
-                after_refresh(app.as_ref(), policy.finish);
-            }
-            Timing::Background => {
-                let app = app.clone();
-                let provider_id = provider_id.to_owned();
-                background = Some(tauri::async_runtime::spawn(async move {
-                    app.refresh(&provider_id).await;
-                    after_refresh(app.as_ref(), policy.finish);
-                }));
-            }
+    match (enabled, policy.timing) {
+        (false, _) => app.finish(),
+        (true, Timing::Wait) => refresh(app.as_ref(), provider_id).await,
+        (true, Timing::Background) => {
+            let app = app.clone();
+            let provider_id = provider_id.to_owned();
+            background = Some(tauri::async_runtime::spawn(async move {
+                refresh(app.as_ref(), &provider_id).await;
+            }));
         }
     }
     Ok(Committed {
@@ -231,13 +198,10 @@ async fn change_settings(
     Ok(())
 }
 
-fn after_refresh(app: &impl CredentialApp, finish: Finish) {
+async fn refresh(app: &impl CredentialApp, provider_id: &str) {
+    app.refresh(provider_id).await;
     app.usage_changed();
-    match finish {
-        Finish::Full => app.finish(),
-        Finish::TrayOnly => app.update_tray(),
-        Finish::Nothing => {}
-    }
+    app.finish();
 }
 
 /// The running app: Tauri events, the tray, the provider service and notifications.
@@ -308,15 +272,6 @@ impl CredentialApp for TauriApp {
             &self.notifications,
         );
     }
-
-    fn update_tray(&self) {
-        tray_presentation::update(
-            &self.app,
-            &self.service.state(),
-            &self.settings.get(),
-            self.settings.registry(),
-        );
-    }
 }
 
 #[cfg(test)]
@@ -325,7 +280,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{commit, CredentialApp, Policy, RefreshWhen, SettingsChange};
+    use super::{commit, CredentialApp, Policy, SettingsChange};
     use crate::{
         commands::provider::{
             CLEAR_SUB2API, DELETE_API_KEY, DELETE_SUB2API, SAVE_API_KEY, SAVE_SUB2API,
@@ -343,7 +298,6 @@ mod tests {
         Usage,
         Refresh,
         Finish,
-        Tray,
     }
     use Event::*;
 
@@ -384,10 +338,6 @@ mod tests {
 
         fn finish(&self) {
             self.push(Finish);
-        }
-
-        fn update_tray(&self) {
-            self.push(Tray);
         }
     }
 
@@ -469,7 +419,7 @@ mod tests {
                 DELETE_API_KEY,
                 false,
                 || reconcile(false, false),
-                &[Settings],
+                &[Settings, Finish],
             ),
             (
                 "save Sub2API",
@@ -483,28 +433,28 @@ mod tests {
                 SAVE_SUB2API,
                 false,
                 || reconcile(true, false),
-                &[Settings, Cleared, Usage],
+                &[Settings, Cleared, Usage, Finish],
             ),
             (
                 "clear Sub2API",
                 CLEAR_SUB2API,
                 false,
                 || reconcile(false, true),
-                &[Settings, Cleared, Refresh, Usage, Tray],
+                &[Settings, Cleared, Usage, Refresh, Usage, Finish],
             ),
             (
                 "delete Sub2API",
                 DELETE_SUB2API,
                 true,
                 || SettingsChange::Remove,
-                &[Settings, Cleared, Usage],
+                &[Settings, Cleared, Usage, Finish],
             ),
             (
                 "delete Sub2API, disabled",
                 DELETE_SUB2API,
                 false,
                 || SettingsChange::Remove,
-                &[Settings, Cleared, Usage],
+                &[Settings, Cleared, Usage, Finish],
             ),
         ];
         for (name, policy, enabled, change, expected) in cases {
@@ -525,18 +475,20 @@ mod tests {
     #[test]
     fn a_settings_error_warns_for_api_keys_and_fails_sub2api_changes() {
         // No settings exist for an unknown provider, so the settings cannot follow the store.
-        let (result, events, _) = run(SAVE_API_KEY, "unknown", true, || reconcile(true, true));
-        assert_eq!(result, Ok(false));
-        assert_eq!(events, [Refresh, Usage, Finish]);
-        let (result, events, _) = run(DELETE_API_KEY, "unknown", true, || reconcile(false, false));
-        assert_eq!(result, Ok(false));
-        assert_eq!(events, []);
-        for policy in [SAVE_SUB2API, CLEAR_SUB2API, DELETE_SUB2API] {
-            let change = if policy.refresh_when == RefreshWhen::Never {
-                || SettingsChange::Remove
-            } else {
-                || reconcile(true, true)
-            };
+        // Nothing is enabled, so nothing is refreshed.
+        for policy in [SAVE_API_KEY, DELETE_API_KEY] {
+            let (result, events, _) = run(policy, "unknown", true, || reconcile(true, true));
+            assert_eq!(result, Ok(false), "{}", policy.action);
+            assert_eq!(events, [Finish], "{}", policy.action);
+        }
+        for (policy, change) in [
+            (
+                SAVE_SUB2API,
+                (|| reconcile(true, true)) as fn() -> SettingsChange,
+            ),
+            (CLEAR_SUB2API, || reconcile(false, true)),
+            (DELETE_SUB2API, || SettingsChange::Remove),
+        ] {
             let (result, events, _) = run(policy, "unknown", true, change);
             assert!(result.is_err(), "{}", policy.action);
             assert_eq!(events, [], "{}", policy.action);
