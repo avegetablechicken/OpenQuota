@@ -54,7 +54,7 @@ pub struct SettingsService {
 
 impl SettingsService {
     #[cfg(test)]
-    fn new_for_test(
+    pub(crate) fn new_for_test(
         storage: Arc<Storage>,
         registry: Arc<ProviderRegistry>,
         detected: &HashSet<String>,
@@ -623,6 +623,7 @@ impl SettingsService {
         self.credential_revision.fetch_add(1, Ordering::SeqCst);
     }
 
+    #[cfg(test)]
     pub fn reconcile_provider_credential_state(
         &self,
         provider_id: &str,

@@ -1,24 +1,25 @@
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
 
 use crate::{
-    commands::settings::settings_view_state,
+    commands::credential_change::{
+        self, Finish, OnSettingsError, Policy, RefreshWhen, SettingsChange, TauriApp,
+        TemplateHandoff, Timing,
+    },
     models::{ApiKeyMutationOutcome, ApiKeyStatus, ProviderApiKeyState, ProviderLink},
-    notifications::finish_refresh,
     pacing::NotificationEvaluator,
     providers::{
         sub2api::{
             claude_provider_base_url, codex_provider_base_url, metric_template, track_provider_id,
-            Sub2ApiConfigInput, Sub2ApiConfigState, Sub2ApiProviders,
+            Sub2ApiConfigInput, Sub2ApiConfigSaveOutcome, Sub2ApiConfigState, Sub2ApiProviders,
         },
         ProviderRegistry, UsageProvider,
     },
     service::ProviderService,
     settings::{MetricTemplateChange, SettingsService},
-    tray_presentation,
 };
 
 #[tauri::command]
@@ -141,49 +142,10 @@ fn mutate_api_key(
     })
 }
 
-fn reconcile_provider_credential_state(
-    app: &AppHandle,
-    service: &ProviderService,
-    settings: &SettingsService,
-    provider_id: &str,
-    detected: bool,
-    enable: bool,
-    metric_template: Option<MetricTemplateChange>,
-) -> Result<(), String> {
-    let updated = if metric_template.is_some() {
-        settings.reconcile_provider_credential_state_with_metrics(
-            provider_id,
-            detected,
-            enable,
-            metric_template,
-        )?
-    } else {
-        settings.reconcile_provider_credential_state(provider_id, detected, enable)?
-    };
-    tray_presentation::update(app, &service.state(), &updated, settings.registry());
-    let _ = app.emit("settings-state", settings_view_state(app, settings));
-    Ok(())
-}
-
 fn incomplete_mutation_warning(action: &str) -> String {
     format!(
         "The API key was {action}, but OpenQuota could not finish updating provider status. Restart OpenQuota or try again."
     )
-}
-
-fn spawn_sub2api_refresh(
-    app: AppHandle,
-    service: Arc<ProviderService>,
-    settings: Arc<SettingsService>,
-    notifications: Arc<NotificationEvaluator>,
-    provider_id: String,
-) {
-    tauri::async_runtime::spawn(async move {
-        service.refresh(&provider_id, true).await;
-        let usage = service.state();
-        let _ = app.emit("usage-state", &usage);
-        finish_refresh(&app, &usage, &settings, &notifications);
-    });
 }
 
 #[tauri::command]
@@ -193,6 +155,61 @@ pub async fn get_provider_api_key_state(
 ) -> Result<Option<ProviderApiKeyState>, String> {
     api_key_state(registry.inner().clone(), provider_id).await
 }
+
+pub(crate) const SAVE_API_KEY: Policy = Policy {
+    action: "API key save",
+    store_failure: "The API key could not be saved.",
+    on_settings_error: OnSettingsError::Warn,
+    clear_cached_usage: false,
+    timing: Timing::Wait,
+    refresh_when: RefreshWhen::Always,
+    finish: Finish::Full,
+    announce_cleared_usage: false,
+};
+
+pub(crate) const DELETE_API_KEY: Policy = Policy {
+    action: "API key removal",
+    store_failure: "The API key could not be removed.",
+    on_settings_error: OnSettingsError::Warn,
+    clear_cached_usage: false,
+    timing: Timing::Wait,
+    refresh_when: RefreshWhen::IfEnabled,
+    finish: Finish::Full,
+    announce_cleared_usage: false,
+};
+
+pub(crate) const SAVE_SUB2API: Policy = Policy {
+    action: "Sub2API save",
+    store_failure: "The Sub2API connection could not be saved.",
+    on_settings_error: OnSettingsError::Fail,
+    clear_cached_usage: true,
+    timing: Timing::Background,
+    refresh_when: RefreshWhen::IfEnabled,
+    finish: Finish::Full,
+    announce_cleared_usage: true,
+};
+
+pub(crate) const CLEAR_SUB2API: Policy = Policy {
+    action: "Sub2API clear",
+    store_failure: "The Sub2API connection could not be cleared.",
+    on_settings_error: OnSettingsError::Fail,
+    clear_cached_usage: true,
+    timing: Timing::Wait,
+    refresh_when: RefreshWhen::Always,
+    finish: Finish::TrayOnly,
+    announce_cleared_usage: false,
+};
+
+pub(crate) const DELETE_SUB2API: Policy = Policy {
+    action: "Sub2API removal",
+    store_failure: "The Sub2API connection could not be removed.",
+    on_settings_error: OnSettingsError::Fail,
+    clear_cached_usage: true,
+    timing: Timing::Wait,
+    refresh_when: RefreshWhen::Never,
+    finish: Finish::Nothing,
+    announce_cleared_usage: true,
+};
 
 #[tauri::command]
 pub async fn save_provider_api_key(
@@ -208,54 +225,37 @@ pub async fn save_provider_api_key(
     let runtime = registry
         .runtime(&provider_id)
         .ok_or_else(|| "Unknown provider.".to_owned())?;
-    let credential_guard = settings.lock_credential_mutation().await;
-    settings.record_provider_credential_mutation();
+    let app = TauriApp::new(app, &service, &settings, &notifications);
     let provider_for_save = provider_id.clone();
-    let applied = tauri::async_runtime::spawn_blocking(move || {
-        mutate_api_key(
-            runtime.as_ref(),
-            provider_for_save,
-            ApiKeyMutation::Save(api_key.as_str()),
-        )
-    })
-    .await
-    .map_err(|_| "The API key could not be saved.".to_owned())??;
-
-    let command_guard = settings.lock_command_mutation().await;
-    let settings_reconciled = match reconcile_provider_credential_state(
+    let committed = credential_change::commit(
         &app,
-        &service,
-        &settings,
         &provider_id,
-        true,
-        true,
-        None,
-    ) {
-        Ok(()) => true,
-        Err(error) => {
-            crate::app_warn!(
-                "auth",
-                "provider state after API key save could not be reconciled for {provider_id}: {error}"
-            );
-            false
-        }
-    };
+        SAVE_API_KEY,
+        move || {
+            mutate_api_key(
+                runtime.as_ref(),
+                provider_for_save,
+                ApiKeyMutation::Save(api_key.as_str()),
+            )
+        },
+        |_, _| SettingsChange::Reconcile {
+            detected: true,
+            enable: true,
+            template: None,
+        },
+    )
+    .await?;
+    let applied = committed.value;
     if applied.status_uncertain {
         crate::app_warn!(
             "auth",
             "API key status could not be confirmed after saving for {provider_id}"
         );
     }
-    drop(command_guard);
-    drop(credential_guard);
-    service.refresh(&provider_id, true).await;
-    let usage = service.state();
-    let _ = app.emit("usage-state", &usage);
-    finish_refresh(&app, &usage, &settings, &notifications);
     crate::app_info!("auth", "API key saved for {provider_id}");
     Ok(ApiKeyMutationOutcome {
         state: applied.state,
-        warning: (applied.status_uncertain || !settings_reconciled)
+        warning: (applied.status_uncertain || !committed.settings_saved)
             .then(|| incomplete_mutation_warning("saved securely")),
     })
 }
@@ -272,62 +272,37 @@ pub async fn delete_provider_api_key(
     let runtime = registry
         .runtime(&provider_id)
         .ok_or_else(|| "Unknown provider.".to_owned())?;
-    let credential_guard = settings.lock_credential_mutation().await;
-    settings.record_provider_credential_mutation();
+    let app = TauriApp::new(app, &service, &settings, &notifications);
     let provider_for_delete = provider_id.clone();
-    let applied = tauri::async_runtime::spawn_blocking(move || {
-        mutate_api_key(
-            runtime.as_ref(),
-            provider_for_delete,
-            ApiKeyMutation::Delete,
-        )
-    })
-    .await
-    .map_err(|_| "The API key could not be removed.".to_owned())??;
-
-    let command_guard = settings.lock_command_mutation().await;
-    let detected = applied.state.status != ApiKeyStatus::NotSet;
-    let settings_reconciled = match reconcile_provider_credential_state(
+    let committed = credential_change::commit(
         &app,
-        &service,
-        &settings,
         &provider_id,
-        detected,
-        false,
-        None,
-    ) {
-        Ok(()) => true,
-        Err(error) => {
-            crate::app_warn!(
-                "auth",
-                "provider state after API key removal could not be reconciled for {provider_id}: {error}"
-            );
-            false
-        }
-    };
+        DELETE_API_KEY,
+        move || {
+            mutate_api_key(
+                runtime.as_ref(),
+                provider_for_delete,
+                ApiKeyMutation::Delete,
+            )
+        },
+        |applied: &AppliedApiKeyMutation, _| SettingsChange::Reconcile {
+            detected: applied.state.status != ApiKeyStatus::NotSet,
+            enable: false,
+            template: None,
+        },
+    )
+    .await?;
+    let applied = committed.value;
     if applied.status_uncertain {
         crate::app_warn!(
             "auth",
             "API key status could not be confirmed after removal for {provider_id}"
         );
     }
-    let should_refresh = settings
-        .get()
-        .providers
-        .iter()
-        .any(|provider| provider.id == provider_id && provider.enabled);
-    drop(command_guard);
-    drop(credential_guard);
-    if should_refresh {
-        service.refresh(&provider_id, true).await;
-        let usage = service.state();
-        let _ = app.emit("usage-state", &usage);
-        finish_refresh(&app, &usage, &settings, &notifications);
-    }
     crate::app_info!("auth", "saved API key removed for {provider_id}");
     Ok(ApiKeyMutationOutcome {
         state: applied.state,
-        warning: (applied.status_uncertain || !settings_reconciled)
+        warning: (applied.status_uncertain || !committed.settings_saved)
             .then(|| incomplete_mutation_warning("removed")),
     })
 }
@@ -372,86 +347,57 @@ pub async fn save_sub2api_config(
     provider_id: String,
     config: Sub2ApiConfigInput,
 ) -> Result<Sub2ApiConfigState, String> {
-    let credential_guard = settings.lock_credential_mutation().await;
-    settings.record_provider_credential_mutation();
     let provider = providers
         .provider(&provider_id)
         .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
+    let app = TauriApp::new(app, &service, &settings, &notifications);
     let provider_for_save = provider.clone();
-    let outcome =
-        tauri::async_runtime::spawn_blocking(move || provider_for_save.save_config(config))
-            .await
-            .map_err(|_| "The Sub2API connection could not be saved.".to_owned())?
-            .map_err(|error| error.to_string())?;
-
-    let command_guard = settings.lock_command_mutation().await;
-    let template = outcome.apply_metric_template.then(|| MetricTemplateChange {
-        template: metric_template(&provider_id, outcome.state.upstream, outcome.state.mode),
-        previous: outcome
-            .previous_track
-            .map(|(mode, upstream)| metric_template(&provider_id, upstream, mode)),
-        upstream_provider_id: Some(track_provider_id(
-            outcome.state.mode,
-            outcome.state.upstream,
-        )),
-    });
-    // First setup enables the provider; editing an existing connection preserves its toggle.
-    let enable = settings
-        .get()
-        .providers
-        .iter()
-        .find(|provider| provider.id == provider_id)
-        .is_some_and(|provider| !provider.detected);
-    reconcile_provider_credential_state(
+    let committed = credential_change::commit(
         &app,
-        &service,
-        &settings,
         &provider_id,
-        true,
-        enable,
-        template,
-    )?;
-    if outcome.apply_metric_template {
-        let provider = provider.clone();
-        if let Err(error) =
-            tauri::async_runtime::spawn_blocking(move || provider.mark_metric_template_applied())
-                .await
-                .map_err(|_| "The Sub2API metric template state could not be saved.".to_owned())?
-        {
-            crate::app_warn!(
-                "auth",
-                "Sub2API metric template was applied but could not be marked complete: {error}"
-            );
-        }
-    }
-    service
-        .clear_provider_data(&provider_id)
-        .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;
-    let usage = service.state();
-    let _ = app.emit("usage-state", &usage);
-    let refresh_service = service.inner().clone();
-    let refresh_settings = settings.inner().clone();
-    let refresh_notifications = notifications.inner().clone();
-    let refresh_provider_id = provider_id.clone();
-    // A disabled connection keeps its toggle, so it is not fetched until it is enabled.
-    let should_refresh = settings
-        .get()
-        .providers
-        .iter()
-        .any(|provider| provider.id == provider_id && provider.enabled);
-    drop(command_guard);
-    drop(credential_guard);
+        SAVE_SUB2API,
+        move || {
+            provider_for_save
+                .save_config(config)
+                .map_err(|error| error.to_string())
+        },
+        |outcome: &Sub2ApiConfigSaveOutcome, current| {
+            let template = outcome.apply_metric_template.then(|| TemplateHandoff {
+                change: MetricTemplateChange {
+                    template: metric_template(
+                        &provider_id,
+                        outcome.state.upstream,
+                        outcome.state.mode,
+                    ),
+                    previous: outcome
+                        .previous_track
+                        .map(|(mode, upstream)| metric_template(&provider_id, upstream, mode)),
+                    upstream_provider_id: Some(track_provider_id(
+                        outcome.state.mode,
+                        outcome.state.upstream,
+                    )),
+                },
+                mark_applied: Box::new(move || {
+                    provider
+                        .mark_metric_template_applied()
+                        .map_err(|error| error.to_string())
+                }),
+            });
+            SettingsChange::Reconcile {
+                detected: true,
+                // First setup enables the provider; editing an existing connection keeps its toggle.
+                enable: current
+                    .providers
+                    .iter()
+                    .find(|layout| layout.id == provider_id)
+                    .is_some_and(|layout| !layout.detected),
+                template,
+            }
+        },
+    )
+    .await?;
     crate::app_info!("auth", "Sub2API connection saved");
-    if should_refresh {
-        spawn_sub2api_refresh(
-            app,
-            refresh_service,
-            refresh_settings,
-            refresh_notifications,
-            refresh_provider_id,
-        );
-    }
-    Ok(outcome.state)
+    Ok(committed.value.state)
 }
 
 #[tauri::command]
@@ -460,39 +406,27 @@ pub async fn clear_sub2api_config(
     providers: State<'_, Arc<Sub2ApiProviders>>,
     service: State<'_, Arc<ProviderService>>,
     settings: State<'_, Arc<SettingsService>>,
+    notifications: State<'_, Arc<NotificationEvaluator>>,
     provider_id: String,
 ) -> Result<Sub2ApiConfigState, String> {
-    let credential_guard = settings.lock_credential_mutation().await;
-    settings.record_provider_credential_mutation();
     let provider = providers
         .provider(&provider_id)
         .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
-    let state = tauri::async_runtime::spawn_blocking(move || provider.delete_config())
-        .await
-        .map_err(|_| "The Sub2API connection could not be cleared.".to_owned())?
-        .map_err(|error| error.to_string())?;
-
-    let command_guard = settings.lock_command_mutation().await;
-    reconcile_provider_credential_state(
+    let app = TauriApp::new(app, &service, &settings, &notifications);
+    let committed = credential_change::commit(
         &app,
-        &service,
-        &settings,
         &provider_id,
-        false,
-        true,
-        None,
-    )?;
-    service
-        .clear_provider_data(&provider_id)
-        .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;
-    drop(command_guard);
-    drop(credential_guard);
-    service.refresh(&provider_id, true).await;
-    let usage = service.state();
-    tray_presentation::update(&app, &usage, &settings.get(), settings.registry());
-    let _ = app.emit("usage-state", &usage);
+        CLEAR_SUB2API,
+        move || provider.delete_config().map_err(|error| error.to_string()),
+        |_, _| SettingsChange::Reconcile {
+            detected: false,
+            enable: true,
+            template: None,
+        },
+    )
+    .await?;
     crate::app_info!("auth", "Sub2API connection cleared");
-    Ok(state)
+    Ok(committed.value)
 }
 
 #[tauri::command]
@@ -501,31 +435,23 @@ pub async fn delete_sub2api_config(
     providers: State<'_, Arc<Sub2ApiProviders>>,
     service: State<'_, Arc<ProviderService>>,
     settings: State<'_, Arc<SettingsService>>,
+    notifications: State<'_, Arc<NotificationEvaluator>>,
     provider_id: String,
 ) -> Result<Sub2ApiConfigState, String> {
-    let credential_guard = settings.lock_credential_mutation().await;
-    settings.record_provider_credential_mutation();
     let provider = providers
         .provider(&provider_id)
         .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
-    let state = tauri::async_runtime::spawn_blocking(move || provider.delete_config())
-        .await
-        .map_err(|_| "The Sub2API connection could not be removed.".to_owned())?
-        .map_err(|error| error.to_string())?;
-
-    let command_guard = settings.lock_command_mutation().await;
-    let updated = settings.remove_dynamic_provider(&provider_id)?;
-    service
-        .clear_provider_data(&provider_id)
-        .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())?;
-    tray_presentation::update(&app, &service.state(), &updated, settings.registry());
-    let _ = app.emit("settings-state", settings_view_state(&app, &settings));
-    drop(command_guard);
-    drop(credential_guard);
-    let usage = service.state();
-    let _ = app.emit("usage-state", &usage);
+    let app = TauriApp::new(app, &service, &settings, &notifications);
+    let committed = credential_change::commit(
+        &app,
+        &provider_id,
+        DELETE_SUB2API,
+        move || provider.delete_config().map_err(|error| error.to_string()),
+        |_, _| SettingsChange::Remove,
+    )
+    .await?;
     crate::app_info!("auth", "Sub2API connection removed");
-    Ok(state)
+    Ok(committed.value)
 }
 
 #[cfg(test)]

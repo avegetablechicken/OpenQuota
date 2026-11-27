@@ -1,0 +1,564 @@
+//! The transaction every credential change goes through, after the credential itself is stored.
+//!
+//! A command supplies its store step, a plan for the settings, and a [`Policy`]. This module owns
+//! the rest: the lock order, recording the change, the settings change and its metric template,
+//! clearing cached usage, telling the app, and the refresh that follows.
+
+use std::{future::Future, sync::Arc};
+
+use tauri::{AppHandle, Emitter};
+
+use crate::{
+    commands::settings::settings_view_state,
+    models::AppSettings,
+    notifications::finish_refresh,
+    pacing::NotificationEvaluator,
+    service::ProviderService,
+    settings::{MetricTemplateChange, SettingsService},
+    tray_presentation,
+};
+
+/// What a credential change needs from the app around it.
+pub(crate) trait CredentialApp: Send + Sync + 'static {
+    fn settings(&self) -> &SettingsService;
+    /// Shows changed settings: the tray and the settings view state.
+    fn settings_changed(&self, settings: &AppSettings);
+    /// Shows the current usage.
+    fn usage_changed(&self);
+    fn clear_cached_usage(&self, provider_id: &str) -> Result<(), String>;
+    fn refresh(&self, provider_id: &str) -> impl Future<Output = ()> + Send;
+    /// Ends a change: the tray, notification pruning and alerts for the current usage.
+    fn finish(&self);
+    /// TEMPORARY: clearing a Sub2API connection ends with only a tray update.
+    fn update_tray(&self);
+}
+
+/// How the settings follow the stored credential.
+pub(crate) enum SettingsChange {
+    Reconcile {
+        detected: bool,
+        enable: bool,
+        template: Option<TemplateHandoff>,
+    },
+    Remove,
+}
+
+/// A new metric template, and how to record that it was applied.
+pub(crate) struct TemplateHandoff {
+    pub change: MetricTemplateChange,
+    pub mark_applied: Box<dyn FnOnce() -> Result<(), String> + Send>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnSettingsError {
+    /// Log it and carry on; [`Committed::settings_saved`] reports it.
+    Warn,
+    /// Fail the command.
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Timing {
+    /// The command returns after the refresh.
+    Wait,
+    /// The command returns at once and the refresh runs on its own.
+    Background,
+}
+
+/// TEMPORARY: which changes refresh the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshWhen {
+    Always,
+    IfEnabled,
+    Never,
+}
+
+/// TEMPORARY: how a change ends after its refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Finish {
+    Full,
+    TrayOnly,
+    Nothing,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Policy {
+    /// Names the change in logs, as in "provider state after {action} could not be reconciled".
+    pub action: &'static str,
+    /// The error when the store step could not run at all.
+    pub store_failure: &'static str,
+    pub on_settings_error: OnSettingsError,
+    pub clear_cached_usage: bool,
+    pub timing: Timing,
+    pub refresh_when: RefreshWhen,
+    pub finish: Finish,
+    /// TEMPORARY: whether usage is shown again right after the cached usage is cleared.
+    pub announce_cleared_usage: bool,
+}
+
+pub(crate) struct Committed<T> {
+    pub value: T,
+    /// False when the store succeeded but the settings could not follow it.
+    pub settings_saved: bool,
+    /// The refresh, when it runs in the background.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub background: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+/// Stores a credential change and brings settings, cached usage and the app in line with it.
+///
+/// The store step runs under the credential lock; the settings change runs under the command lock
+/// too. Both are released before the refresh.
+pub(crate) async fn commit<A, T, S, P>(
+    app: &Arc<A>,
+    provider_id: &str,
+    policy: Policy,
+    store: S,
+    plan: P,
+) -> Result<Committed<T>, String>
+where
+    A: CredentialApp,
+    T: Send + 'static,
+    S: FnOnce() -> Result<T, String> + Send + 'static,
+    P: FnOnce(&T, &AppSettings) -> SettingsChange + Send,
+{
+    let settings = app.settings();
+    let credential_guard = settings.lock_credential_mutation().await;
+    settings.record_provider_credential_mutation();
+    let value = tauri::async_runtime::spawn_blocking(store)
+        .await
+        .map_err(|_| policy.store_failure.to_owned())??;
+
+    let command_guard = settings.lock_command_mutation().await;
+    let change = plan(&value, &settings.get());
+    let settings_saved = match change_settings(app.as_ref(), provider_id, change).await {
+        Ok(()) => true,
+        Err(error) if policy.on_settings_error == OnSettingsError::Warn => {
+            crate::app_warn!(
+                "auth",
+                "provider state after {} could not be reconciled for {provider_id}: {error}",
+                policy.action
+            );
+            false
+        }
+        Err(error) => return Err(error),
+    };
+    if policy.clear_cached_usage {
+        app.clear_cached_usage(provider_id)?;
+        if policy.announce_cleared_usage {
+            app.usage_changed();
+        }
+    }
+    let enabled = settings
+        .get()
+        .providers
+        .iter()
+        .any(|provider| provider.id == provider_id && provider.enabled);
+    let refresh = match policy.refresh_when {
+        RefreshWhen::Always => true,
+        RefreshWhen::IfEnabled => enabled,
+        RefreshWhen::Never => false,
+    };
+    drop(command_guard);
+    drop(credential_guard);
+
+    let mut background = None;
+    if refresh {
+        match policy.timing {
+            Timing::Wait => {
+                app.refresh(provider_id).await;
+                after_refresh(app.as_ref(), policy.finish);
+            }
+            Timing::Background => {
+                let app = app.clone();
+                let provider_id = provider_id.to_owned();
+                background = Some(tauri::async_runtime::spawn(async move {
+                    app.refresh(&provider_id).await;
+                    after_refresh(app.as_ref(), policy.finish);
+                }));
+            }
+        }
+    }
+    Ok(Committed {
+        value,
+        settings_saved,
+        background,
+    })
+}
+
+async fn change_settings(
+    app: &impl CredentialApp,
+    provider_id: &str,
+    change: SettingsChange,
+) -> Result<(), String> {
+    let settings = app.settings();
+    match change {
+        SettingsChange::Reconcile {
+            detected,
+            enable,
+            template,
+        } => {
+            let (template, mark_applied) = match template {
+                Some(handoff) => (Some(handoff.change), Some(handoff.mark_applied)),
+                None => (None, None),
+            };
+            let updated = settings.reconcile_provider_credential_state_with_metrics(
+                provider_id,
+                detected,
+                enable,
+                template,
+            )?;
+            app.settings_changed(&updated);
+            if let Some(mark_applied) = mark_applied {
+                let marked = tauri::async_runtime::spawn_blocking(mark_applied)
+                    .await
+                    .map_err(|_| {
+                        "The Sub2API metric template state could not be saved.".to_owned()
+                    })?;
+                if let Err(error) = marked {
+                    crate::app_warn!(
+                        "auth",
+                        "Sub2API metric template was applied but could not be marked complete: {error}"
+                    );
+                }
+            }
+        }
+        SettingsChange::Remove => {
+            let updated = settings.remove_dynamic_provider(provider_id)?;
+            app.settings_changed(&updated);
+        }
+    }
+    Ok(())
+}
+
+fn after_refresh(app: &impl CredentialApp, finish: Finish) {
+    app.usage_changed();
+    match finish {
+        Finish::Full => app.finish(),
+        Finish::TrayOnly => app.update_tray(),
+        Finish::Nothing => {}
+    }
+}
+
+/// The running app: Tauri events, the tray, the provider service and notifications.
+pub(crate) struct TauriApp {
+    app: AppHandle,
+    service: Arc<ProviderService>,
+    settings: Arc<SettingsService>,
+    notifications: Arc<NotificationEvaluator>,
+}
+
+impl TauriApp {
+    pub(crate) fn new(
+        app: AppHandle,
+        service: &Arc<ProviderService>,
+        settings: &Arc<SettingsService>,
+        notifications: &Arc<NotificationEvaluator>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            app,
+            service: service.clone(),
+            settings: settings.clone(),
+            notifications: notifications.clone(),
+        })
+    }
+}
+
+impl CredentialApp for TauriApp {
+    fn settings(&self) -> &SettingsService {
+        &self.settings
+    }
+
+    fn settings_changed(&self, settings: &AppSettings) {
+        tray_presentation::update(
+            &self.app,
+            &self.service.state(),
+            settings,
+            self.settings.registry(),
+        );
+        let _ = self.app.emit(
+            "settings-state",
+            settings_view_state(&self.app, &self.settings),
+        );
+    }
+
+    fn usage_changed(&self) {
+        let _ = self.app.emit("usage-state", &self.service.state());
+    }
+
+    fn clear_cached_usage(&self, provider_id: &str) -> Result<(), String> {
+        self.service
+            .clear_provider_data(provider_id)
+            .map_err(|_| "Cached Sub2API quota could not be cleared.".to_owned())
+    }
+
+    fn refresh(&self, provider_id: &str) -> impl Future<Output = ()> + Send {
+        let service = self.service.clone();
+        let provider_id = provider_id.to_owned();
+        async move {
+            service.refresh(&provider_id, true).await;
+        }
+    }
+
+    fn finish(&self) {
+        finish_refresh(
+            &self.app,
+            &self.service.state(),
+            &self.settings,
+            &self.notifications,
+        );
+    }
+
+    fn update_tray(&self) {
+        tray_presentation::update(
+            &self.app,
+            &self.service.state(),
+            &self.settings.get(),
+            self.settings.registry(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashSet, sync::Mutex};
+
+    use tempfile::tempdir;
+
+    use super::{commit, CredentialApp, Policy, RefreshWhen, SettingsChange};
+    use crate::{
+        commands::provider::{
+            CLEAR_SUB2API, DELETE_API_KEY, DELETE_SUB2API, SAVE_API_KEY, SAVE_SUB2API,
+        },
+        models::AppSettings,
+        providers::{codex, ProviderRegistry},
+        settings::SettingsService,
+        storage::Storage,
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Event {
+        Settings,
+        Cleared,
+        Usage,
+        Refresh,
+        Finish,
+        Tray,
+    }
+    use Event::*;
+
+    /// Records what the transaction tells the app.
+    struct Recorder {
+        settings: SettingsService,
+        events: Mutex<Vec<Event>>,
+    }
+
+    impl Recorder {
+        fn push(&self, event: Event) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    impl CredentialApp for Recorder {
+        fn settings(&self) -> &SettingsService {
+            &self.settings
+        }
+
+        fn settings_changed(&self, _: &AppSettings) {
+            self.push(Settings);
+        }
+
+        fn usage_changed(&self) {
+            self.push(Usage);
+        }
+
+        fn clear_cached_usage(&self, _: &str) -> Result<(), String> {
+            self.push(Cleared);
+            Ok(())
+        }
+
+        fn refresh(&self, _: &str) -> impl std::future::Future<Output = ()> + Send {
+            self.push(Refresh);
+            async {}
+        }
+
+        fn finish(&self) {
+            self.push(Finish);
+        }
+
+        fn update_tray(&self) {
+            self.push(Tray);
+        }
+    }
+
+    fn recorder(enabled: bool) -> (std::sync::Arc<Recorder>, tempfile::TempDir) {
+        let directory = tempdir().unwrap();
+        let storage =
+            std::sync::Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+        let registry = std::sync::Arc::new(
+            ProviderRegistry::from_definitions(vec![codex::definition()]).unwrap(),
+        );
+        let detected = HashSet::from(["codex".to_owned()]);
+        let settings = SettingsService::new_for_test(storage, registry, &detected).unwrap();
+        let mut current = settings.get();
+        current.providers[0].enabled = enabled;
+        settings.update(current).unwrap();
+        let recorder = Recorder {
+            settings,
+            events: Mutex::new(Vec::new()),
+        };
+        (std::sync::Arc::new(recorder), directory)
+    }
+
+    fn reconcile(detected: bool, enable: bool) -> SettingsChange {
+        SettingsChange::Reconcile {
+            detected,
+            enable,
+            template: None,
+        }
+    }
+
+    /// Runs a change whose store step succeeds and returns what the app was told.
+    fn run(
+        policy: Policy,
+        provider_id: &str,
+        enabled: bool,
+        change: fn() -> SettingsChange,
+    ) -> (Result<bool, String>, Vec<Event>, bool) {
+        let (app, _directory) = recorder(enabled);
+        let result = tauri::async_runtime::block_on(async {
+            let committed = commit(&app, provider_id, policy, || Ok(()), |_, _| change()).await?;
+            if let Some(background) = committed.background {
+                background.await.unwrap();
+            }
+            Ok(committed.settings_saved)
+        });
+        let events = app.events.lock().unwrap().clone();
+        let enabled_after = app.settings.get().providers[0].enabled;
+        (result, events, enabled_after)
+    }
+
+    /// A command's policy, whether its provider starts enabled, its settings change, and the events.
+    type Case = (
+        &'static str,
+        Policy,
+        bool,
+        fn() -> SettingsChange,
+        &'static [Event],
+    );
+
+    #[test]
+    fn each_credential_command_tells_the_app_what_changed() {
+        let cases: [Case; 8] = [
+            (
+                "save key",
+                SAVE_API_KEY,
+                false,
+                || reconcile(true, true),
+                &[Settings, Refresh, Usage, Finish],
+            ),
+            (
+                "delete key",
+                DELETE_API_KEY,
+                true,
+                || reconcile(false, false),
+                &[Settings, Refresh, Usage, Finish],
+            ),
+            (
+                "delete key, disabled",
+                DELETE_API_KEY,
+                false,
+                || reconcile(false, false),
+                &[Settings],
+            ),
+            (
+                "save Sub2API",
+                SAVE_SUB2API,
+                true,
+                || reconcile(true, false),
+                &[Settings, Cleared, Usage, Refresh, Usage, Finish],
+            ),
+            (
+                "save Sub2API, disabled",
+                SAVE_SUB2API,
+                false,
+                || reconcile(true, false),
+                &[Settings, Cleared, Usage],
+            ),
+            (
+                "clear Sub2API",
+                CLEAR_SUB2API,
+                false,
+                || reconcile(false, true),
+                &[Settings, Cleared, Refresh, Usage, Tray],
+            ),
+            (
+                "delete Sub2API",
+                DELETE_SUB2API,
+                true,
+                || SettingsChange::Remove,
+                &[Settings, Cleared, Usage],
+            ),
+            (
+                "delete Sub2API, disabled",
+                DELETE_SUB2API,
+                false,
+                || SettingsChange::Remove,
+                &[Settings, Cleared, Usage],
+            ),
+        ];
+        for (name, policy, enabled, change, expected) in cases {
+            let (result, events, _) = run(policy, "codex", enabled, change);
+            assert_eq!(result, Ok(true), "{name}");
+            assert_eq!(events, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_removed_connection_ends_disabled_and_a_first_setup_ends_enabled() {
+        let (_, _, enabled) = run(DELETE_SUB2API, "codex", true, || SettingsChange::Remove);
+        assert!(!enabled);
+        let (_, _, enabled) = run(SAVE_API_KEY, "codex", false, || reconcile(true, true));
+        assert!(enabled);
+    }
+
+    #[test]
+    fn a_settings_error_warns_for_api_keys_and_fails_sub2api_changes() {
+        // No settings exist for an unknown provider, so the settings cannot follow the store.
+        let (result, events, _) = run(SAVE_API_KEY, "unknown", true, || reconcile(true, true));
+        assert_eq!(result, Ok(false));
+        assert_eq!(events, [Refresh, Usage, Finish]);
+        let (result, events, _) = run(DELETE_API_KEY, "unknown", true, || reconcile(false, false));
+        assert_eq!(result, Ok(false));
+        assert_eq!(events, []);
+        for policy in [SAVE_SUB2API, CLEAR_SUB2API, DELETE_SUB2API] {
+            let change = if policy.refresh_when == RefreshWhen::Never {
+                || SettingsChange::Remove
+            } else {
+                || reconcile(true, true)
+            };
+            let (result, events, _) = run(policy, "unknown", true, change);
+            assert!(result.is_err(), "{}", policy.action);
+            assert_eq!(events, [], "{}", policy.action);
+        }
+    }
+
+    #[test]
+    fn a_failed_store_changes_nothing() {
+        let (app, _directory) = recorder(true);
+        let before = app.settings.get();
+        let result = tauri::async_runtime::block_on(commit(
+            &app,
+            "codex",
+            SAVE_API_KEY,
+            || Err::<(), _>("The credential store is locked.".to_owned()),
+            |_, _| reconcile(true, true),
+        ));
+        assert_eq!(
+            result.err().as_deref(),
+            Some("The credential store is locked.")
+        );
+        assert!(app.events.lock().unwrap().is_empty());
+        assert_eq!(app.settings.get(), before);
+    }
+}
