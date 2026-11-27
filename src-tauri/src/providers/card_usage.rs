@@ -49,6 +49,19 @@ pub(super) struct UsageObservation<'a> {
     pub price_source: PriceSource,
 }
 
+/// Where an observation lands and what it costs, when its Home client settled both itself
+/// because it prices and deduplicates whole messages first. See `record_settled`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Settled {
+    pub others: bool,
+    pub cost: Option<f64>,
+    pub estimated: bool,
+    /// Tokens `cost` covers; fewer than the total when only part of the usage is priced.
+    pub priced_tokens: u64,
+    /// Every part of the usage was priced.
+    pub complete: bool,
+}
+
 /// How an observation is estimated when it is priced under its home Card. Routed usage is
 /// always estimated from the receiving Card's rates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,17 +160,11 @@ pub(super) fn record<'a>(
     policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Landed {
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(policy.window_start_days_ago))
-        .unwrap_or(NaiveDate::MIN);
     let mut landed = Landed::default();
     for observation in observations {
-        let date = observation.timestamp.with_timezone(&Local).date_naive();
-        if date < since || observation.timestamp > now {
+        let Some(date) = date_in_window(&observation, now, policy.window_start_days_ago) else {
             continue;
-        }
+        };
         if policy.local_runtime == LocalRuntimeMode::ModelSlugOrProvider
             && observation
                 .provider_hint
@@ -189,6 +196,43 @@ pub(super) fn record<'a>(
     landed
 }
 
+/// Records observations whose Card and cost their Home client already settled. Only the Scan
+/// window applies; the observations land on the Card the caller is filling.
+pub(super) fn record_settled<'a>(
+    observations: impl IntoIterator<Item = (UsageObservation<'a>, Settled)>,
+    now: DateTime<Utc>,
+    window_start_days_ago: u64,
+    accumulator: &mut DailyUsageAccumulator,
+) -> Landed {
+    let mut landed = Landed::default();
+    for (observation, settled) in observations {
+        let Some(date) = date_in_window(&observation, now, window_start_days_ago) else {
+            continue;
+        };
+        match add_settled(observation, settled, date, accumulator) {
+            Some(Bucket::OwnSeries) => landed.own_series = true,
+            Some(Bucket::Others) => landed.others = true,
+            None => {}
+        }
+    }
+    landed
+}
+
+/// The observation's local date, when it falls inside the window and not in the future.
+fn date_in_window(
+    observation: &UsageObservation<'_>,
+    now: DateTime<Utc>,
+    window_start_days_ago: u64,
+) -> Option<NaiveDate> {
+    let since = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(window_start_days_ago))
+        .unwrap_or(NaiveDate::MIN);
+    let date = observation.timestamp.with_timezone(&Local).date_naive();
+    (date >= since && observation.timestamp <= now).then_some(date)
+}
+
 /// Where a batch of observations landed on the target Card.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Landed {
@@ -203,6 +247,39 @@ pub(super) struct Landed {
 enum Bucket {
     OwnSeries,
     Others,
+}
+
+fn add_settled(
+    observation: UsageObservation<'_>,
+    settled: Settled,
+    date: NaiveDate,
+    accumulator: &mut DailyUsageAccumulator,
+) -> Option<Bucket> {
+    let tokens = observation.total_tokens;
+    let model = observation.model.unwrap_or("Unattributed");
+    if settled.others {
+        accumulator.add_partially_priced_other(
+            date,
+            tokens,
+            settled.priced_tokens,
+            settled.cost,
+            settled.estimated,
+            model,
+        );
+        return Some(Bucket::Others);
+    }
+    match settled.cost {
+        // Only some of the usage is priced, so the model's cost must not read as complete.
+        Some(cost) if !settled.complete => {
+            accumulator.add_partially_priced(date, tokens, cost, model, settled.estimated);
+        }
+        Some(cost) if settled.estimated => accumulator.add(date, tokens, cost, model),
+        Some(cost) => accumulator.add_exact(date, tokens, cost, model),
+        None if tokens > 0 => accumulator.add_unpriced(date, tokens, model),
+        None if !settled.complete => accumulator.add_unknown_model(date, model),
+        None => return None,
+    }
+    Some(Bucket::OwnSeries)
 }
 
 fn record_home(
