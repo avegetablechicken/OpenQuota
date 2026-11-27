@@ -13,6 +13,18 @@
   import SelectMenu from './SelectMenu.svelte';
   import { saveShortcut } from './saveShortcut';
   import {
+    editorFor,
+    restoreAfterFailure,
+    review,
+    savedMode as savedModeOf,
+    submission,
+    withCustomBaseUrl,
+    withMode,
+    withProviderName,
+    withUpstream,
+    type EditorChange,
+  } from './sub2ApiDraft';
+  import {
     forgetSub2ApiEndpoint,
     rememberSub2ApiEndpoint,
     sub2ApiPublicName,
@@ -24,7 +36,6 @@
     Sub2ApiMode,
     Sub2ApiConfigOutcome,
     Sub2ApiConfigState,
-    Sub2ApiConfigInput,
     Sub2ApiUpstream,
   } from './types';
 
@@ -35,35 +46,9 @@
     children?: Snippet;
   }
 
-  interface ConnectionDraft {
-    providerSource: Sub2ApiUpstream;
-    clearSavedKey: boolean;
-    baseUrl: string;
-    providerName: string;
-    customBaseUrl: boolean;
-    email: string;
-    password: string;
-    apiKey: string;
-    revealPassword: boolean;
-  }
-
-  function emptyConnectionDraft(): ConnectionDraft {
-    return {
-      providerSource: 'codex',
-      baseUrl: '',
-      providerName: '',
-      clearSavedKey: false,
-      customBaseUrl: false,
-      email: '',
-      password: '',
-      apiKey: '',
-      revealPassword: false,
-    };
-  }
-
   let { providerId, onRemove = () => {}, children }: Props = $props();
 
-  let connectionState = $state<Sub2ApiConfigState>({
+  const notConfigured: Sub2ApiConfigState = {
     configured: false,
     mode: 'subscription',
     baseUrl: '',
@@ -71,20 +56,10 @@
     customBaseUrl: false,
     email: '',
     upstream: 'codex',
-  });
+  };
+  let connectionState = $state<Sub2ApiConfigState>(notConfigured);
   let open = $state(false);
-  let baseUrl = $state('');
-  let providerName = $state('');
-  let customBaseUrl = $state(false);
-  let mode = $state<Sub2ApiMode>('subscription');
-  let apiKey = $state('');
-  let clearSavedKey = $state(false);
-  let email = $state('');
-  let password = $state('');
-  let upstream = $state<Sub2ApiUpstream>('codex');
-  let providerSource = $state<Sub2ApiUpstream>('codex');
-  let revealPassword = $state(false);
-  let drafts = $state<Partial<Record<Sub2ApiMode, ConnectionDraft>>>({});
+  let editor = $state(editorFor(notConfigured));
   let saving = $state(false);
   let confirmingClear = $state(false);
   let confirmingItemRemoval = $state(false);
@@ -109,19 +84,12 @@
   // Codex and Claude also name the configuration an address and key are read from.
   const upstreamOptions = sub2ApiUpstreamOptions;
   // Only Codex and Claude configurations name a Base URL; others are always entered.
-  const addressFromProvider = $derived(sub2ApiResolvesProviderNames(providerSource));
+  const addressFromProvider = $derived(sub2ApiResolvesProviderNames(editor.draft.providerSource));
   const providerResolutionDelayMs = 300;
 
-  const endpointReady = $derived(
-    !customBaseUrl
-      ? Boolean(providerName.trim() && baseUrl.trim() && !providerError && !resolvingProvider)
-      : Boolean(baseUrl.trim()),
-  );
-  const savedMode = $derived(
-    connectionState.mode ?? (connectionState.configured ? 'admin' : 'subscription'),
-  );
+  const savedMode = $derived(savedModeOf(connectionState));
   const summarySource = $derived.by(() => {
-    if (open) return mode === 'subscription' ? mode : upstream;
+    if (open) return editor.mode === 'subscription' ? editor.mode : editor.upstream;
     if (!connectionState.configured) return null;
     return savedMode === 'subscription' ? savedMode : connectionState.upstream;
   });
@@ -129,38 +97,20 @@
     if (!open && !connectionState.configured) return 'Provider or custom Base URL';
     if (summarySource === 'subscription') {
       const address = open
-        ? providerName.trim() || baseUrl
+        ? editor.draft.providerName.trim() || editor.draft.baseUrl
         : connectionState.codexProvider || connectionState.baseUrl;
       return address || 'Provider or custom Base URL';
     }
-    return (open ? email.trim() : connectionState.email) || 'Base URL and administrator login';
+    return (
+      (open ? editor.draft.email.trim() : connectionState.email) ||
+      'Base URL and administrator login'
+    );
   });
-  const savedProfile = $derived(mode === savedMode ? connectionState : connectionState.otherMode);
-  const canReuseCredential = $derived(
-    savedProfile?.configured &&
-      !savedProfile.useProviderKey &&
-      (savedProfile.mode ?? savedMode) === mode &&
-      (mode === 'admin' ||
-        providerSource === (savedProfile.providerSource ?? savedProfile.upstream) ||
-        (customBaseUrl && savedProfile.customBaseUrl)) &&
-      (mode !== 'subscription' ||
-        (customBaseUrl === savedProfile.customBaseUrl &&
-          providerName.trim() === (savedProfile.codexProvider ?? ''))) &&
-      baseUrl.trim().replace(/\/+$/, '') === savedProfile.baseUrl,
-  );
-  const keepSavedKey = $derived(canReuseCredential && !clearSavedKey);
-  const automaticKey = $derived(
-    mode === 'subscription' && !customBaseUrl && !apiKey.trim() && !keepSavedKey,
-  );
-  const canSave = $derived(
-    Boolean(
-      endpointReady &&
-      (mode === 'subscription' || email.trim()) &&
-      (mode === 'subscription'
-        ? !customBaseUrl || keepSavedKey || apiKey.trim()
-        : canReuseCredential || password.trim()) &&
-      !saving,
-    ),
+  const checks = $derived(
+    review(editor, connectionState, {
+      lookup: { resolving: resolvingProvider, failed: Boolean(providerError) },
+      saving,
+    }),
   );
 
   function errorMessage(cause: unknown, fallback: string) {
@@ -174,55 +124,19 @@
     providerResolutionTimer = undefined;
   }
 
-  function currentDraft(): ConnectionDraft {
-    return {
-      providerSource,
-      baseUrl,
-      providerName,
-      customBaseUrl,
-      email,
-      password,
-      apiKey,
-      revealPassword,
-      clearSavedKey,
-    };
-  }
-
-  function applyDraft(draft: ConnectionDraft) {
-    providerSource = draft.providerName.trim() ? draft.providerSource : upstream;
-    clearSavedKey = draft.clearSavedKey;
-    baseUrl = draft.baseUrl;
-    providerName = draft.providerName;
-    customBaseUrl = draft.customBaseUrl || !sub2ApiResolvesProviderNames(providerSource);
-    email = draft.email;
-    apiKey = draft.apiKey;
-    password = draft.password;
-    revealPassword = draft.revealPassword;
-  }
-
-  function resetEditor(next = connectionState) {
-    drafts = {};
-    upstream = next.upstream;
-    mode = next.mode ?? (next.configured ? 'admin' : 'subscription');
-    for (const profile of [next, next.otherMode]) {
-      if (!profile) continue;
-      const profileMode = profile.mode ?? mode;
-      drafts[profileMode] = {
-        ...emptyConnectionDraft(),
-        providerSource: profile.providerSource ?? profile.upstream,
-        baseUrl: profile.baseUrl,
-        providerName: profile.codexProvider ?? '',
-        customBaseUrl: profile.customBaseUrl,
-        email: profile.email,
-      };
-    }
-    applyDraft(drafts[mode]!);
-    confirmingClear = false;
-    error = null;
+  /** Stops any provider lookup in flight and forgets its result. */
+  function stopProviderLookup() {
     providerError = null;
     resolvingProvider = false;
     cancelProviderResolution();
     providerResolution += 1;
+  }
+
+  function resetEditor(next = connectionState) {
+    editor = editorFor(next);
+    confirmingClear = false;
+    error = null;
+    stopProviderLookup();
   }
 
   function syncRememberedEndpoint(next: Sub2ApiConfigState) {
@@ -235,70 +149,23 @@
     resetEditor();
   }
 
-  function selectUpstream(next: Sub2ApiUpstream) {
-    upstream = next;
-    if (mode === 'admin' && providerName.trim()) return;
-    providerSource = next;
-    if (!sub2ApiResolvesProviderNames(next)) {
-      // Keep the address already shown: upstreams of one instance share it.
-      customBaseUrl = true;
-      providerName = '';
-      providerError = null;
-      resolvingProvider = false;
-      cancelProviderResolution();
-      providerResolution += 1;
-      return;
-    }
-    if (!customBaseUrl && providerName.trim()) updateProvider(providerName);
-  }
-
-  function selectMode(next: Sub2ApiMode) {
-    drafts[mode] = currentDraft();
-    mode = next;
-    applyDraft(drafts[next] ?? emptyConnectionDraft());
-    error = null;
-    providerError = null;
-    resolvingProvider = false;
-    cancelProviderResolution();
-    providerResolution += 1;
-    if (!customBaseUrl && providerName.trim()) {
-      updateProvider(providerName);
-    }
-  }
-
-  function setCustomBaseUrl(next: boolean) {
-    customBaseUrl = next;
-    providerSource = upstream;
-    baseUrl = '';
-    providerName = '';
-    providerError = null;
-    resolvingProvider = false;
-    cancelProviderResolution();
-    providerResolution += 1;
-  }
-
-  function updateProvider(value: string) {
-    if ((!value.trim() || !providerName.trim()) && sub2ApiResolvesProviderNames(upstream)) {
-      providerSource = upstream;
-    }
-    providerName = value;
-    baseUrl = '';
-    providerError = null;
-    cancelProviderResolution();
-    const candidate = value.trim();
-    const resolution = ++providerResolution;
-    if (!candidate || customBaseUrl) {
-      resolvingProvider = false;
-      return;
-    }
+  /** Shows a change to the draft and starts or stops the provider lookup it asks for. */
+  function apply({ editor: next, lookup }: EditorChange) {
+    editor = next;
+    if (lookup.kind === 'keep') return;
+    stopProviderLookup();
+    if (lookup.kind === 'stop') return;
+    const resolution = providerResolution;
     resolvingProvider = true;
     const resolveProvider =
-      providerSource === 'claude' ? resolveSub2ApiClaudeProvider : resolveSub2ApiCodexProvider;
+      next.draft.providerSource === 'claude'
+        ? resolveSub2ApiClaudeProvider
+        : resolveSub2ApiCodexProvider;
     providerResolutionTimer = window.setTimeout(() => {
       providerResolutionTimer = undefined;
-      void resolveProvider(candidate)
+      void resolveProvider(lookup.name)
         .then((resolved) => {
-          if (resolution === providerResolution) baseUrl = resolved;
+          if (resolution === providerResolution) editor.draft.baseUrl = resolved;
         })
         .catch((cause) => {
           if (resolution === providerResolution) {
@@ -311,41 +178,15 @@
     }, providerResolutionDelayMs);
   }
 
+  function selectMode(next: Sub2ApiMode) {
+    error = null;
+    apply(withMode(editor, next));
+  }
+
   async function save() {
-    if (!canSave) return;
+    if (!checks.canSave) return;
     const previousState = connectionState;
-    const submitted: Sub2ApiConfigInput = {
-      baseUrl: baseUrl.trim(),
-      codexProvider: providerName.trim(),
-      ...(!customBaseUrl && providerSource !== upstream ? { providerSource } : {}),
-      customBaseUrl,
-      mode,
-      email: mode === 'admin' ? email.trim() : '',
-      password: mode === 'admin' ? password : '',
-      ...(automaticKey
-        ? { useProviderKey: true }
-        : mode === 'subscription'
-          ? { apiKey: apiKey.trim() }
-          : {}),
-      upstream,
-    };
-    const optimisticState: Sub2ApiConfigState = {
-      mode: submitted.mode,
-      useProviderKey: automaticKey,
-      otherMode:
-        submitted.mode === savedMode
-          ? previousState.otherMode
-          : previousState.configured
-            ? { ...previousState, otherMode: undefined }
-            : undefined,
-      configured: true,
-      baseUrl: submitted.baseUrl,
-      codexProvider: submitted.codexProvider,
-      customBaseUrl: submitted.customBaseUrl,
-      email: submitted.email,
-      upstream: submitted.upstream,
-      providerSource: submitted.providerSource ?? submitted.upstream,
-    };
+    const { input: submitted, optimistic: optimisticState } = submission(editor, previousState);
     saving = true;
     error = null;
     notice = null;
@@ -363,20 +204,11 @@
       connectionState = previousState;
       syncRememberedEndpoint(previousState);
       resetEditor(previousState);
-      baseUrl = submitted.baseUrl;
-      providerName = submitted.codexProvider;
-      customBaseUrl = submitted.customBaseUrl;
-      mode = submitted.mode;
-      clearSavedKey = Boolean(submitted.useProviderKey);
-      email = submitted.email;
-      upstream = submitted.upstream;
-      providerSource = submitted.providerSource ?? submitted.upstream;
-      revealPassword = false;
-      confirmingClear = false;
+      editor = restoreAfterFailure(previousState, submitted);
       open = true;
       error = errorMessage(cause, 'The Sub2API connection could not be saved.');
     } finally {
-      password = '';
+      editor.draft.password = '';
       saving = false;
     }
   }
@@ -511,7 +343,7 @@
               <span>Track</span>
               <SelectMenu
                 label="Track"
-                value={mode}
+                value={editor.mode}
                 options={[
                   { value: 'subscription', label: 'User subscription' },
                   { value: 'admin', label: 'Upstream accounts (admin)' },
@@ -524,13 +356,13 @@
               <span>Upstream</span>
               <SelectMenu
                 label="Upstream"
-                value={upstream}
+                value={editor.upstream}
                 options={upstreamOptions.map((option) => ({
                   value: option,
                   label: sub2ApiUpstreamLabel(option),
                 }))}
                 disabled={saving}
-                onChange={(value) => selectUpstream(value as Sub2ApiUpstream)}
+                onChange={(value) => apply(withUpstream(editor, value as Sub2ApiUpstream))}
               />
             </div>
             {#if addressFromProvider}
@@ -541,20 +373,21 @@
                     type="checkbox"
                     role="switch"
                     aria-label="Use custom Base URL"
-                    checked={customBaseUrl}
+                    checked={editor.draft.customBaseUrl}
                     disabled={saving}
-                    onchange={(event) => setCustomBaseUrl(event.currentTarget.checked)}
+                    onchange={(event) =>
+                      apply(withCustomBaseUrl(editor, event.currentTarget.checked))}
                   />
                   <span></span>
                 </label>
               </div>
             {/if}
-            {#if customBaseUrl || !addressFromProvider}
+            {#if editor.draft.customBaseUrl || !addressFromProvider}
               <label class="config-row">
                 <span>Base URL</span>
                 <input
                   type="url"
-                  bind:value={baseUrl}
+                  bind:value={editor.draft.baseUrl}
                   autocomplete="url"
                   spellcheck="false"
                   placeholder="https://sub2api.example.com"
@@ -567,17 +400,17 @@
                 <span>Provider</span>
                 <input
                   type="text"
-                  value={providerName}
+                  value={editor.draft.providerName}
                   autocomplete="off"
                   spellcheck="false"
-                  placeholder={providerSource === 'claude'
+                  placeholder={editor.draft.providerSource === 'claude'
                     ? 'Settings name'
                     : 'Provider or profile'}
-                  aria-label={providerSource === 'claude'
+                  aria-label={editor.draft.providerSource === 'claude'
                     ? 'Claude settings provider'
                     : 'Codex provider or profile'}
                   disabled={saving}
-                  oninput={(event) => updateProvider(event.currentTarget.value)}
+                  oninput={(event) => apply(withProviderName(editor, event.currentTarget.value))}
                 />
               </label>
               {#if providerError}
@@ -592,35 +425,35 @@
                 >
                   {resolvingProvider
                     ? 'Looking up the Base URL…'
-                    : baseUrl || 'The Base URL is read from this provider.'}
+                    : editor.draft.baseUrl || 'The Base URL is read from this provider.'}
                 </p>
               {/if}
             {/if}
           </div>
-          {#if mode === 'subscription'}
+          {#if editor.mode === 'subscription'}
             <div class="config-row">
               <span>API key</span>
               <div class="password-field">
                 <input
                   type="password"
-                  bind:value={apiKey}
+                  bind:value={editor.draft.apiKey}
                   autocomplete="off"
                   spellcheck="false"
-                  placeholder={keepSavedKey
+                  placeholder={checks.keepSavedKey
                     ? 'Unchanged'
-                    : customBaseUrl
+                    : editor.draft.customBaseUrl
                       ? 'Subscription API key'
                       : 'From provider (optional override)'}
                   aria-label="Sub2API subscription API key"
                   disabled={saving}
                 />
-                {#if !customBaseUrl && keepSavedKey && !apiKey}
+                {#if !editor.draft.customBaseUrl && checks.keepSavedKey && !editor.draft.apiKey}
                   <button
                     type="button"
                     aria-label="Clear saved API key"
                     title="Clear saved API key"
                     disabled={saving}
-                    onclick={() => (clearSavedKey = true)}
+                    onclick={() => (editor.draft.clearSavedKey = true)}
                     ><Icon name="clear-filled" size={14} /></button
                   >
                 {/if}
@@ -632,7 +465,7 @@
                 <span>Email</span>
                 <input
                   type="email"
-                  bind:value={email}
+                  bind:value={editor.draft.email}
                   autocomplete="username"
                   spellcheck="false"
                   placeholder="admin@example.com"
@@ -644,19 +477,19 @@
                 <span>Password</span>
                 <div class="password-field">
                   <input
-                    type={revealPassword ? 'text' : 'password'}
-                    bind:value={password}
+                    type={editor.draft.revealPassword ? 'text' : 'password'}
+                    bind:value={editor.draft.password}
                     autocomplete="current-password"
-                    placeholder={canReuseCredential ? 'Unchanged' : 'Password'}
+                    placeholder={checks.canReuseCredential ? 'Unchanged' : 'Password'}
                     aria-label="Sub2API administrator password"
                     disabled={saving}
                   />
                   <button
                     type="button"
-                    aria-label={revealPassword ? 'Hide password' : 'Show password'}
-                    onclick={() => (revealPassword = !revealPassword)}
+                    aria-label={editor.draft.revealPassword ? 'Hide password' : 'Show password'}
+                    onclick={() => (editor.draft.revealPassword = !editor.draft.revealPassword)}
                   >
-                    <Icon name={revealPassword ? 'eye-off' : 'eye'} size={15} />
+                    <Icon name={editor.draft.revealPassword ? 'eye-off' : 'eye'} size={15} />
                   </button>
                 </div>
               </div>
@@ -675,8 +508,8 @@
             <button
               class="primary"
               type="button"
-              disabled={!canSave}
-              use:saveShortcut={canSave}
+              disabled={!checks.canSave}
+              use:saveShortcut={checks.canSave}
               onclick={() => void save()}>{saving ? 'Saving…' : 'Save'}</button
             >
           </div>

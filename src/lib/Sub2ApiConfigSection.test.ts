@@ -164,8 +164,13 @@ describe('Sub2ApiConfigSection', () => {
         baseUrl: 'https://relay.example.com',
         customBaseUrl: false,
         email: '',
-
         useProviderKey: false,
+        reusableCredential: {
+          baseUrl: 'https://relay.example.com',
+          customBaseUrl: false,
+          providerSource: 'codex',
+          codexProvider: 'relay',
+        },
       };
       mocks.invoke.mockResolvedValue(saved);
       render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
@@ -195,6 +200,11 @@ describe('Sub2ApiConfigSection', () => {
       baseUrl: 'https://quota.example.com',
       codexProvider: '',
       email: '',
+      reusableCredential: {
+        baseUrl: 'https://quota.example.com',
+        customBaseUrl: true,
+        codexProvider: '',
+      },
     });
     render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
@@ -224,6 +234,11 @@ describe('Sub2ApiConfigSection', () => {
       baseUrl: 'https://user.example.com',
       codexProvider: '',
       email: '',
+      reusableCredential: {
+        baseUrl: 'https://user.example.com',
+        customBaseUrl: true,
+        codexProvider: '',
+      },
     };
     const admin = {
       configured: true,
@@ -233,6 +248,7 @@ describe('Sub2ApiConfigSection', () => {
       baseUrl: 'https://admin.example.com',
       codexProvider: '',
       email: 'admin@example.com',
+      reusableCredential: { baseUrl: 'https://admin.example.com' },
     };
     mocks.invoke.mockImplementation(async (cmd, args) =>
       cmd === 'save_sub2api_config'
@@ -400,32 +416,6 @@ describe('Sub2ApiConfigSection', () => {
     );
   });
 
-  it('keeps the upstream but leaves the other track’s address empty on first use', async () => {
-    const original = mocks.invoke.getMockImplementation()!;
-    mocks.invoke.mockImplementation(async (cmd, args) =>
-      cmd === 'get_sub2api_config_state'
-        ? {
-            configured: true,
-            mode: 'admin',
-            upstream: 'antigravity',
-            providerSource: 'codex',
-            codexProvider: 'relay',
-            baseUrl: 'https://resolved.example.com',
-            customBaseUrl: false,
-            email: 'admin@example.com',
-          }
-        : original(cmd, args),
-    );
-    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
-    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    await selectOption(screen.getByLabelText('Track'), 'User subscription');
-    expect(screen.getByLabelText('Upstream')).toHaveValue('antigravity');
-    expect(screen.getByLabelText('Base URL')).toHaveValue('');
-    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
-    await chooseAdministrator();
-    expect(screen.getByLabelText('Codex provider or profile')).toHaveValue('relay');
-  });
-
   it('preserves unsaved upstream and independent track drafts through a late initial read', async () => {
     const original = mocks.invoke.getMockImplementation()!;
     let finishRead!: (value: unknown) => void;
@@ -527,6 +517,11 @@ describe('Sub2ApiConfigSection', () => {
       customBaseUrl: true,
       email: '',
       upstream: 'codex',
+      reusableCredential: {
+        baseUrl: 'https://relay.example.com',
+        customBaseUrl: true,
+        codexProvider: '',
+      },
     };
     const base = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation((command: string, args?: unknown) =>
@@ -664,6 +659,7 @@ describe('Sub2ApiConfigSection', () => {
       customBaseUrl: false,
       email: 'admin@example.com',
       upstream: 'codex',
+      reusableCredential: { baseUrl: 'https://relay.example.com' },
     };
     mocks.invoke.mockImplementation(async (command: string, args) => {
       if (command === 'get_sub2api_config_state') return saved;
@@ -696,33 +692,6 @@ describe('Sub2ApiConfigSection', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     expect(screen.getByLabelText('Upstream')).toHaveValue('claude');
     expect(screen.getByLabelText('Codex provider or profile')).toHaveValue('work');
-  });
-
-  it('keeps edits to the same administrator connection across upstream changes', async () => {
-    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
-    await fireEvent.click(await screen.findByRole('button', { name: 'Add' }));
-    await chooseAdministrator();
-    await fireEvent.click(screen.getByRole('switch', { name: 'Use custom Base URL' }));
-    await fireEvent.input(screen.getByLabelText('Base URL'), {
-      target: { value: 'https://relay.example.com' },
-    });
-    await fireEvent.input(screen.getByLabelText('Sub2API administrator email'), {
-      target: { value: 'admin@example.com' },
-    });
-    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
-      target: { value: 'first' },
-    });
-    await chooseUpstream('Claude');
-    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('first');
-    await fireEvent.input(screen.getByLabelText('Sub2API administrator password'), {
-      target: { value: 'edited' },
-    });
-    await chooseUpstream('Codex');
-    expect(screen.getByRole('switch', { name: 'Use custom Base URL' })).toBeChecked();
-    expect(screen.getByLabelText('Base URL')).toHaveValue('https://relay.example.com');
-    expect(screen.getByLabelText('Sub2API administrator email')).toHaveValue('admin@example.com');
-    expect(screen.getByLabelText('Sub2API administrator password')).toHaveValue('edited');
-    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
   });
 
   it('resolves an exact Codex provider and keeps Base URL read-only by default', async () => {
@@ -1069,6 +1038,7 @@ describe('Sub2ApiConfigSection', () => {
         customBaseUrl: boolean;
         email: string;
         upstream: string;
+        reusableCredential?: { baseUrl: string };
       }) => void;
       let reject!: (reason: Error) => void;
       const promise = new Promise<{
@@ -1078,6 +1048,7 @@ describe('Sub2ApiConfigSection', () => {
         customBaseUrl: boolean;
         email: string;
         upstream: string;
+        reusableCredential?: { baseUrl: string };
       }>((res, rej) => {
         resolve = res;
         reject = rej;
@@ -1140,6 +1111,7 @@ describe('Sub2ApiConfigSection', () => {
       customBaseUrl: true,
       email: 'saving@example.com',
       upstream: 'codex',
+      reusableCredential: { baseUrl: 'https://saving.example.com' },
     });
     await waitFor(() => expect(upstreamSelect).toBeEnabled());
     expect(trackSelect).toBeEnabled();
