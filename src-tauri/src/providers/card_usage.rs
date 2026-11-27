@@ -395,8 +395,10 @@ mod tests {
         "zai",
     ];
 
-    /// Home clients migrated onto this module, with the policy their native loop uses.
-    const HOMES: [(&str, TransitionalPolicy); 5] = [
+    /// Home Cards of the Home clients migrated onto this module, with the policy their native
+    /// loop uses. Gemini CLI's home Card is antigravity, under the same policy as kimi's except
+    /// for its labels and local runtime detection.
+    const HOMES: [(&str, TransitionalPolicy); 6] = [
         (
             "claude",
             TransitionalPolicy {
@@ -440,6 +442,15 @@ mod tests {
                 zero_token_guard: true,
                 label: LabelMode::Family,
                 local_runtime: LocalRuntimeMode::ModelSlugOrProvider,
+            },
+        ),
+        (
+            "antigravity",
+            TransitionalPolicy {
+                window_start_days_ago: 29,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),
     ];

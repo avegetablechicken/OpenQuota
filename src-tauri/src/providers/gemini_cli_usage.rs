@@ -12,9 +12,9 @@ use walkdir::WalkDir;
 use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
+        card_usage::{self, LabelMode, LocalRuntimeMode, TransitionalPolicy, UsageObservation},
         daily_usage::DailyUsageAccumulator,
         log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
-        model_scope::{card_for_model, native_log_disposition, LocalModelDisposition},
     },
     storage::Storage,
 };
@@ -412,6 +412,7 @@ fn deduplicate(events: Vec<GeminiCliTokenEvent>) -> Vec<GeminiCliTokenEvent> {
     deduplicated
 }
 
+/// Gemini CLI's usage lands on the antigravity Card, which owns Gemini models.
 fn aggregate_into(
     events: &[GeminiCliTokenEvent],
     now: DateTime<Utc>,
@@ -419,85 +420,27 @@ fn aggregate_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(29))
-        .unwrap_or(NaiveDate::MIN);
-    let mut contributed = false;
-
-    for event in events {
-        if event.timestamp > now {
-            continue;
-        }
-        let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since {
-            continue;
-        }
-        let total = event.total_tokens();
-        if total == 0 {
-            continue;
-        }
-        let tokens = event.pricing_tokens();
-
-        if card_id == "antigravity" {
-            let Some(model) = event.model.as_deref().filter(|value| !value.is_empty()) else {
-                accumulator.add_unpriced(date, total, "Unattributed");
-                contributed = true;
-                continue;
-            };
-            match native_log_disposition("antigravity", model) {
-                LocalModelDisposition::Home => {
-                    add_priced_event(accumulator, date, event, model, "antigravity", pricing);
-                    contributed = true;
-                }
-                LocalModelDisposition::RoutedTo(_) => {}
-                LocalModelDisposition::Other => {
-                    let cost = pricing.estimated_cost_at(
-                        "antigravity",
-                        model,
-                        event.timestamp,
-                        tokens,
-                        true,
-                    );
-                    accumulator.add_other(date, total, cost, true, model);
-                }
-            }
-        } else {
-            let Some(model) = event.model.as_deref().filter(|value| !value.is_empty()) else {
-                continue;
-            };
-            if card_for_model(model) != Some(card_id) {
-                continue;
-            }
-            add_priced_event(accumulator, date, event, model, card_id, pricing);
-            contributed = true;
-        }
-    }
-
-    contributed
-}
-
-fn add_priced_event(
-    accumulator: &mut DailyUsageAccumulator,
-    date: NaiveDate,
-    event: &GeminiCliTokenEvent,
-    model: &str,
-    provider: &str,
-    pricing: &ModelPricing,
-) {
-    let total = event.total_tokens();
-    let tokens = event.pricing_tokens();
-    if let Some(cost) = pricing.estimated_cost_at(provider, model, event.timestamp, tokens, true) {
-        let family = pricing.display_family(model);
-        if family != model {
-            accumulator.add_variant(date, total, cost, &family, model);
-        } else {
-            accumulator.add(date, total, cost, &family);
-        }
-    } else {
-        accumulator.add_unpriced(date, total, model);
-    }
+    card_usage::record(
+        events.iter().map(|event| {
+            UsageObservation::new(
+                event.timestamp,
+                event.model.as_deref(),
+                event.pricing_tokens(),
+                None,
+            )
+        }),
+        "antigravity",
+        card_id,
+        now,
+        pricing,
+        TransitionalPolicy {
+            window_start_days_ago: 29,
+            zero_token_guard: true,
+            label: LabelMode::FamilyWithVariant,
+            local_runtime: LocalRuntimeMode::ModelSlug,
+        },
+        accumulator,
+    )
 }
 
 fn unsigned_u64(value: Option<&Value>) -> Option<u64> {
@@ -837,5 +780,483 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id.as_deref(), Some("single-line-session"));
         assert_eq!(events[0].total_tokens(), 150);
+    }
+
+    /// Pins the output of gemini CLI's per-event policy, so moving it into `card_usage` cannot
+    /// change what any Card shows.
+    mod characterization {
+        use chrono::{DateTime, Duration, TimeZone, Utc};
+
+        use super::super::{aggregate_into, GeminiCliTokenEvent};
+        use crate::{
+            pricing::test_bundled_pricing,
+            providers::{
+                card_usage::test_support::{assert_pinned, relative_json},
+                daily_usage::DailyUsageAccumulator,
+            },
+        };
+
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap()
+        }
+
+        fn event(
+            days_ago: i64,
+            model: Option<&str>,
+            input: u64,
+            output: u64,
+        ) -> GeminiCliTokenEvent {
+            GeminiCliTokenEvent {
+                id: None,
+                session_id: None,
+                timestamp: now() - Duration::days(days_ago),
+                model: model.map(str::to_owned),
+                input,
+                cache_read: 0,
+                output,
+            }
+        }
+
+        fn events() -> Vec<GeminiCliTokenEvent> {
+            let mut cached = event(0, Some("gemini-3-pro-preview"), 10_000, 500);
+            cached.cache_read = 6_000;
+            let mut future = event(0, Some("gemini-3-pro"), 9_999, 9_999);
+            future.timestamp = now() + Duration::hours(1);
+            vec![
+                // Home models on the antigravity Card, labelled by family plus variant.
+                cached,
+                event(0, Some("gemini-3-pro"), 2_000, 200),
+                event(0, Some("gemini-3.1-pro-high"), 2_000, 200),
+                event(1, Some("gemini-3.5-flash-lite-tiered-high"), 1_000, 100),
+                event(1, Some("gemini-3.5-flash"), 1_000, 100),
+                event(1, Some("gpt-oss-120b"), 500, 50),
+                // A gemini-family model without a price, and a missing model.
+                event(2, Some("gemini-99-unreleased"), 700, 70),
+                event(2, None, 400, 40),
+                // Routed to other Cards.
+                event(3, Some("claude-sonnet-4-5"), 1_500, 150),
+                event(3, Some("gpt-5.5"), 1_500, 150),
+                event(3, Some("grok-4"), 800, 80),
+                event(3, Some("glm-4.6"), 600, 60),
+                event(3, Some("kimi-k2"), 600, 60),
+                // Others: priced, unpriced, and local runtime.
+                event(4, Some("deepseek-chat"), 900, 90),
+                event(4, Some("totally-unknown-model"), 50, 5),
+                event(4, Some("ollama/llama3"), 50, 5),
+                // Zero tokens, guarded everywhere.
+                event(5, Some("gemini-3-pro"), 0, 0),
+                event(5, Some("deepseek-chat"), 0, 0),
+                event(5, Some("gpt-5.5"), 0, 0),
+                event(5, None, 0, 0),
+                // Window edges.
+                event(29, Some("gemini-3-pro"), 100, 10),
+                event(29, Some("gpt-5.5"), 100, 10),
+                event(30, Some("gemini-3-pro"), 100, 10),
+                event(30, Some("gpt-5.5"), 100, 10),
+                event(30, Some("deepseek-chat"), 100, 10),
+                future,
+            ]
+        }
+
+        #[test]
+        fn output_is_pinned_per_card() {
+            let actual = [
+                "antigravity",
+                "claude",
+                "codex",
+                "grok",
+                "kimi",
+                "zai",
+                "minimax",
+            ]
+            .map(|card_id| {
+                let mut accumulator = DailyUsageAccumulator::default();
+                let contributed = aggregate_into(
+                    &events(),
+                    now(),
+                    &test_bundled_pricing(),
+                    card_id,
+                    &mut accumulator,
+                );
+                let json = relative_json(&accumulator.build(now(), "test"), now());
+                format!("== {card_id} contributed={contributed}\n{json}")
+            })
+            .join("\n");
+            assert_pinned("per card", &actual, PER_CARD);
+        }
+
+        const PER_CARD: &str = r#"
+== antigravity contributed=true
+{
+  "today": {
+    "tokens": 20900,
+    "estimatedCostUsd": 0.04,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 18700,
+          "costUsd": 0.0336,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 2200,
+              "costUsd": 0.0064
+            }
+          ]
+        },
+        {
+          "model": "gemini-3.1-pro-preview",
+          "totalTokens": 2200,
+          "costUsd": 0.0064,
+          "variants": [
+            {
+              "model": "gemini-3.1-pro-high",
+              "totalTokens": 2200,
+              "costUsd": 0.0064
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "yesterday": {
+    "tokens": 2750,
+    "estimatedCostUsd": 0.002505,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3.5-flash",
+          "totalTokens": 1100,
+          "costUsd": 0.0024
+        },
+        {
+          "model": "gpt-oss-120b",
+          "totalTokens": 550,
+          "costUsd": 0.000105
+        },
+        {
+          "model": "gemini-3.5-flash-lite-tiered-high",
+          "totalTokens": 1100,
+          "costUsd": null
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "gemini-3.5-flash-lite-tiered-high"
+    ]
+  },
+  "last30Days": {
+    "tokens": 24970,
+    "estimatedCostUsd": 0.042825,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 18810,
+          "costUsd": 0.03392,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 2310,
+              "costUsd": 0.00672
+            }
+          ]
+        },
+        {
+          "model": "gemini-3.1-pro-preview",
+          "totalTokens": 2200,
+          "costUsd": 0.0064,
+          "variants": [
+            {
+              "model": "gemini-3.1-pro-high",
+              "totalTokens": 2200,
+              "costUsd": 0.0064
+            }
+          ]
+        },
+        {
+          "model": "Other",
+          "totalTokens": 3960,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "gemini-3.5-flash",
+              "totalTokens": 1100,
+              "costUsd": 0.0024
+            },
+            {
+              "model": "gpt-oss-120b",
+              "totalTokens": 550,
+              "costUsd": 0.000105
+            },
+            {
+              "model": "gemini-3.5-flash-lite-tiered-high",
+              "totalTokens": 1100,
+              "costUsd": null
+            },
+            {
+              "model": "gemini-99-unreleased",
+              "totalTokens": 770,
+              "costUsd": null
+            },
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "gemini-3.5-flash-lite-tiered-high",
+      "gemini-99-unreleased"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 20900,
+      "estimatedCostUsd": 0.04,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-1",
+      "tokens": 2750,
+      "estimatedCostUsd": 0.002505,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-2",
+      "tokens": 1210,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.00032,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed",
+    "gemini-3.5-flash-lite-tiered-high",
+    "gemini-99-unreleased"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 990,
+          "pricedTokens": 990,
+          "estimatedCostUsd": 0.0002898,
+          "costEstimated": true
+        },
+        "ollama/llama3": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "totally-unknown-model": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        }
+      },
+      "tokens": 1100,
+      "pricedTokens": 990,
+      "estimatedCostUsd": 0.0002898,
+      "costEstimated": true,
+      "estimateComplete": false
+    }
+  }
+}
+== claude contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1650,
+    "estimatedCostUsd": 0.00675,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1650,
+          "costUsd": 0.00675
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 1650,
+      "estimatedCostUsd": 0.00675,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== codex contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1760,
+    "estimatedCostUsd": 0.0128,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 1760,
+          "costUsd": 0.0128
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 1650,
+      "estimatedCostUsd": 0.012,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.0008,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== grok contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 880,
+    "estimatedCostUsd": 0.0002,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "grok-4",
+          "totalTokens": 880,
+          "costUsd": 0.0002
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 880,
+      "estimatedCostUsd": 0.0002,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== kimi contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.00051,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "kimi-k2",
+          "totalTokens": 660,
+          "costUsd": 0.00051
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00051,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== zai contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.000384,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 660,
+          "costUsd": 0.000384
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.000384,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== minimax contributed=false
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": []
+}
+"#;
     }
 }
