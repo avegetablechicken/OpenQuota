@@ -154,25 +154,11 @@ fn fold(
 /// The clients folded into `card_id`, in order: every client except the one the Card reads
 /// itself.
 fn fold_order<'a>(clients: &[&'a dyn HomeClient], card_id: &str) -> Vec<&'a dyn HomeClient> {
-    let mut order = clients
+    clients
         .iter()
         .copied()
         .filter(|client| client.native_card() != Some(card_id))
-        .collect::<Vec<_>>();
-    // TEMPORARY, until Fold-in order is unified: Antigravity folds Gemini CLI before Kimi Code.
-    if card_id == "antigravity" {
-        let kimi = order.iter().position(|client| client.name() == "Kimi Code");
-        let gemini = order
-            .iter()
-            .position(|client| client.name() == "Gemini CLI");
-        if let (Some(kimi), Some(gemini)) = (kimi, gemini) {
-            if kimi < gemini {
-                let client = order.remove(gemini);
-                order.insert(kimi, client);
-            }
-        }
-    }
-    order
+        .collect()
 }
 
 /// Names the Card's own logs, if any, and the contributing clients.
@@ -567,8 +553,7 @@ mod tests {
         Card { id, name: id }
     }
 
-    /// Which clients each Card folds in, and in what order. Antigravity still folds Gemini CLI
-    /// before Kimi Code.
+    /// Which clients each Card folds in, and in what order: the same order on every Card.
     #[test]
     fn each_card_folds_in_every_client_but_the_one_it_reads_itself() {
         let all = [
@@ -587,7 +572,7 @@ mod tests {
                 .iter()
                 .map(|client| client.name())
                 .collect::<Vec<_>>();
-            let mut expected = all
+            let expected = all
                 .iter()
                 .copied()
                 .filter(|name| match card_id {
@@ -598,18 +583,6 @@ mod tests {
                     _ => true,
                 })
                 .collect::<Vec<_>>();
-            if card_id == "antigravity" {
-                expected = vec![
-                    "pi/oh-my-pi",
-                    "Claude Code",
-                    "Codex CLI",
-                    "Grok CLI",
-                    "Gemini CLI",
-                    "Kimi Code",
-                    "OpenCode",
-                    "ZCode",
-                ];
-            }
             assert_eq!(order, expected, "{card_id}");
         }
     }
