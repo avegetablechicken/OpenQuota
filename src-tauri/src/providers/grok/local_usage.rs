@@ -105,7 +105,7 @@ impl LogFormat for GrokLogs {
     /// Grok writes one log, so an unreadable log leaves nothing to show.
     const UNREADABLE_FAILS: bool = true;
 
-    fn parse(content: &str, _context: &()) -> Vec<TokenEvent> {
+    fn parse(content: &str) -> Vec<TokenEvent> {
         parse_jsonl(content)
     }
 

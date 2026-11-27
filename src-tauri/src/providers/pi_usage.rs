@@ -115,8 +115,9 @@ impl LogFormat for PiLogs {
     const PROVIDER_ID: &'static str = "pi";
     const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
 
-    fn parse(content: &str, source: &PiUsageSource) -> Vec<PiUsageEvent> {
-        parse_jsonl(content, *source)
+    /// `attach` sets each event's real client.
+    fn parse(content: &str) -> Vec<PiUsageEvent> {
+        parse_jsonl(content, PiUsageSource::Pi)
     }
 
     fn timestamp(event: &PiUsageEvent) -> DateTime<Utc> {

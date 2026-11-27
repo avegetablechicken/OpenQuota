@@ -44,9 +44,9 @@ pub(crate) trait LogFormat {
     /// A file that cannot be read fails the whole load instead of being skipped.
     const UNREADABLE_FAILS: bool = false;
 
-    // TEMPORARY: `parse` sees the file's context until Kimi applies its fallback model in
-    // `attach`; the persistent cache does not know the context.
-    fn parse(content: &str, context: &Self::Context) -> Vec<Self::Event>;
+    /// Reads one file. The persistent cache keeps the result per file, so it must depend on the
+    /// file's content alone; anything else belongs in `attach`.
+    fn parse(content: &str) -> Vec<Self::Event>;
     fn timestamp(event: &Self::Event) -> DateTime<Utc>;
     /// Applies the file's context to an event loaded from it.
     fn attach(_event: &mut Self::Event, _context: &Self::Context) {}
@@ -138,13 +138,7 @@ fn load_files<F: LogFormat>(
     let mut events = Vec::new();
     let mut complete = true;
     for (path, _, context) in &key.files {
-        match load_file(
-            storage,
-            F::PROVIDER_ID,
-            path,
-            F::SCHEMA_VERSION,
-            |content| F::parse(content, context),
-        )? {
+        match load_file(storage, F::PROVIDER_ID, path, F::SCHEMA_VERSION, F::parse)? {
             FileEvents::Loaded(parsed) => events.extend(
                 parsed
                     .into_iter()
@@ -525,7 +519,7 @@ mod tests {
         const PROVIDER_ID: &'static str = "test";
         const SCHEMA_VERSION: u8 = 1;
 
-        fn parse(content: &str, _context: &u8) -> Vec<Line> {
+        fn parse(content: &str) -> Vec<Line> {
             PARSES.with(|count| count.set(count.get() + 1));
             content
                 .lines()
@@ -564,8 +558,8 @@ mod tests {
         const SCHEMA_VERSION: u8 = 1;
         const UNREADABLE_FAILS: bool = true;
 
-        fn parse(content: &str, context: &u8) -> Vec<Line> {
-            Lines::parse(content, context)
+        fn parse(content: &str) -> Vec<Line> {
+            Lines::parse(content)
         }
 
         fn timestamp(event: &Line) -> DateTime<Utc> {
@@ -653,8 +647,8 @@ mod tests {
             type Context = u8;
             const PROVIDER_ID: &'static str = "test";
             const SCHEMA_VERSION: u8 = 2;
-            fn parse(content: &str, context: &u8) -> Vec<Line> {
-                Lines::parse(content, context)
+            fn parse(content: &str) -> Vec<Line> {
+                Lines::parse(content)
             }
             fn timestamp(event: &Line) -> DateTime<Utc> {
                 event.at

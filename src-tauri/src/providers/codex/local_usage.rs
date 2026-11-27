@@ -105,7 +105,7 @@ impl LogFormat for CodexLogs {
     const PROVIDER_ID: &'static str = "codex";
     const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
 
-    fn parse(content: &str, _context: &()) -> Vec<TokenEvent> {
+    fn parse(content: &str) -> Vec<TokenEvent> {
         parse_jsonl(content)
     }
 

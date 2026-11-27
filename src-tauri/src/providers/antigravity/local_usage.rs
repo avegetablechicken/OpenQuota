@@ -72,7 +72,7 @@ impl LogFormat for AntigravityLogs {
     const PROVIDER_ID: &'static str = "antigravity";
     const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
 
-    fn parse(content: &str, _context: &()) -> Vec<AntigravityTokenEvent> {
+    fn parse(content: &str) -> Vec<AntigravityTokenEvent> {
         parse_jsonl(content)
     }
 

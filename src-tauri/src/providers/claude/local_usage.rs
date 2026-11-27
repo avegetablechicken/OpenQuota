@@ -58,7 +58,7 @@ impl LogFormat for ClaudeLogs {
     const PROVIDER_ID: &'static str = "claude";
     const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
 
-    fn parse(content: &str, _context: &()) -> Vec<ClaudeTokenEvent> {
+    fn parse(content: &str) -> Vec<ClaudeTokenEvent> {
         parse_jsonl(content)
     }
 

@@ -137,7 +137,7 @@ impl LogFormat for GeminiCliLogs {
     const PROVIDER_ID: &'static str = "gemini-cli";
     const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
 
-    fn parse(content: &str, _context: &()) -> Vec<GeminiCliTokenEvent> {
+    fn parse(content: &str) -> Vec<GeminiCliTokenEvent> {
         parse_chat_file(content)
     }
 

@@ -20,7 +20,7 @@ use crate::{
     storage::Storage,
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 1;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct KimiTokenEvent {
@@ -119,12 +119,21 @@ impl LogFormat for KimiLogs {
     const PROVIDER_ID: &'static str = "kimi";
     const SCHEMA_VERSION: u8 = LOG_CACHE_SCHEMA_VERSION;
 
-    fn parse(content: &str, fallback_model: &Option<String>) -> Vec<KimiTokenEvent> {
-        parse_jsonl(content, fallback_model.as_deref())
+    fn parse(content: &str) -> Vec<KimiTokenEvent> {
+        parse_jsonl(content)
     }
 
     fn timestamp(event: &KimiTokenEvent) -> DateTime<Utc> {
         event.timestamp
+    }
+
+    /// An event that names no model, not even through its request, gets the default model.
+    fn attach(event: &mut KimiTokenEvent, fallback_model: &Option<String>) {
+        if event.model.is_none() {
+            event.model = fallback_model
+                .as_deref()
+                .map(|model| normalize_kimi_model(model, event.provider.as_deref()));
+        }
     }
 
     fn deduplicate(events: Vec<KimiTokenEvent>) -> Vec<KimiTokenEvent> {
@@ -292,7 +301,7 @@ impl LastRequestContext {
     }
 }
 
-fn parse_jsonl(content: &str, fallback_model: Option<&str>) -> Vec<KimiTokenEvent> {
+fn parse_jsonl(content: &str) -> Vec<KimiTokenEvent> {
     let mut events = Vec::new();
     let mut last_request = LastRequestContext::default();
 
@@ -321,14 +330,14 @@ fn parse_jsonl(content: &str, fallback_model: Option<&str>) -> Vec<KimiTokenEven
                 continue;
             }
             if event_type == "usage.record" {
-                if let Some(event) = parse_usage_record(map, &last_request, fallback_model) {
+                if let Some(event) = parse_usage_record(map, &last_request) {
                     events.push(event);
                 }
                 continue;
             }
         }
 
-        if let Some(event) = parse_legacy_status_update(map, &last_request, fallback_model) {
+        if let Some(event) = parse_legacy_status_update(map, &last_request) {
             events.push(event);
         }
     }
@@ -339,7 +348,6 @@ fn parse_jsonl(content: &str, fallback_model: Option<&str>) -> Vec<KimiTokenEven
 fn parse_usage_record(
     map: &Map<String, Value>,
     last_request: &LastRequestContext,
-    fallback_model: Option<&str>,
 ) -> Option<KimiTokenEvent> {
     if let Some(scope) = map.get("usageScope").and_then(Value::as_str) {
         let normalized_scope = scope.trim().to_ascii_lowercase();
@@ -352,8 +360,7 @@ fn parse_usage_record(
     let (input, cache_write, cache_read, output) = extract_token_counts(usage)?;
     let raw_model = non_empty_str(map.get("model"))
         .or_else(|| last_request.model_alias.clone())
-        .or_else(|| last_request.model.clone())
-        .or_else(|| fallback_model.map(str::to_owned));
+        .or_else(|| last_request.model.clone());
     let provider = non_empty_str(map.get("provider"))
         .or_else(|| last_request.provider_for(raw_model.as_deref()));
     let model = raw_model
@@ -374,7 +381,6 @@ fn parse_usage_record(
 fn parse_legacy_status_update(
     map: &Map<String, Value>,
     last_request: &LastRequestContext,
-    fallback_model: Option<&str>,
 ) -> Option<KimiTokenEvent> {
     let message = map.get("message").and_then(Value::as_object).unwrap_or(map);
     if message.get("type").and_then(Value::as_str) != Some("StatusUpdate") {
@@ -395,8 +401,7 @@ fn parse_legacy_status_update(
     let raw_model = non_empty_str(payload.get("model"))
         .or_else(|| non_empty_str(message.get("model")))
         .or_else(|| last_request.model_alias.clone())
-        .or_else(|| last_request.model.clone())
-        .or_else(|| fallback_model.map(str::to_owned));
+        .or_else(|| last_request.model.clone());
     let provider = non_empty_str(payload.get("provider"))
         .or_else(|| last_request.provider_for(raw_model.as_deref()));
     let model = raw_model
@@ -602,10 +607,11 @@ mod tests {
 
     use super::{
         aggregate_into, kimi_roots, normalize_kimi_model, parse_jsonl, read_default_model,
-        scan_roots_into, KimiTokenEvent,
+        scan_roots_into, KimiLogs, KimiTokenEvent,
     };
     use crate::{
-        pricing::test_bundled_pricing, providers::card_usage::DailyUsageAccumulator,
+        pricing::test_bundled_pricing,
+        providers::{card_usage::DailyUsageAccumulator, log_usage::LogFormat},
         storage::Storage,
     };
 
@@ -710,7 +716,7 @@ mod tests {
             "kimi-code/k3",
             [2_000, 500, 20_000, 0],
         );
-        let parsed = parse_jsonl(&modern, None);
+        let parsed = parse_jsonl(&modern);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].model.as_deref(), Some("kimi-k3"));
         assert_eq!(parsed[0].input, 2_000);
@@ -719,7 +725,12 @@ mod tests {
         assert_eq!(parsed[0].cache_write, 0);
 
         let legacy = legacy_kimi_wire(now.timestamp() as f64 + 0.5, None, [1_000, 250, 5_000, 100]);
-        let parsed_legacy = parse_jsonl(&legacy, Some("moonshot-cn/kimi-k2.7-code"));
+        let mut parsed_legacy = parse_jsonl(&legacy);
+        assert_eq!(parsed_legacy[0].model, None);
+        KimiLogs::attach(
+            &mut parsed_legacy[0],
+            &Some("moonshot-cn/kimi-k2.7-code".to_owned()),
+        );
         assert_eq!(parsed_legacy.len(), 1);
         assert_eq!(parsed_legacy[0].model.as_deref(), Some("kimi-k2.7-code"));
         assert_eq!(parsed_legacy[0].pricing_tokens().total_tokens(), 6_350);
@@ -924,6 +935,43 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_default_model_reaches_cached_events_that_name_no_model() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("openquota.db")).unwrap();
+        let pricing = test_bundled_pricing();
+        let now = Utc.with_ymd_and_hms(2026, 7, 23, 12, 0, 0).unwrap();
+        let root = dir.path().join(".kimi");
+        let wire = root
+            .join("sessions")
+            .join("hash")
+            .join("11111111-2222-3333-4444-555555555555")
+            .join("wire.jsonl");
+        fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        fs::write(
+            &wire,
+            legacy_kimi_wire(now.timestamp() as f64, None, [1_000, 0, 0, 0]),
+        )
+        .unwrap();
+        let config = root.join("config.toml");
+        let roots = [root];
+        let tokens_on = |card: &str| {
+            let mut accumulator = DailyUsageAccumulator::default();
+            scan_roots_into(&storage, &roots, now, &pricing, card, &mut accumulator).unwrap();
+            accumulator
+                .build(now, "test")
+                .today
+                .map_or(0, |today| today.tokens)
+        };
+
+        fs::write(&config, "default_model = \"moonshot-cn/kimi-k2.7-code\"\n").unwrap();
+        assert_eq!(tokens_on("kimi"), 1_000);
+        assert_eq!(tokens_on("claude"), 0);
+
+        fs::write(&config, "default_model = \"claude-sonnet-4-6\"\n").unwrap();
+        assert_eq!(tokens_on("claude"), 1_000);
+    }
+
+    #[test]
     fn ses_prefixed_sessions_deduplicate_against_legacy_kimi_root() {
         let dir = tempdir().unwrap();
         let storage = Storage::open(&dir.path().join("openquota.db")).unwrap();
@@ -1065,7 +1113,7 @@ mod tests {
             legacy_kimi_wire(1_784_800_003.0, Some("kimi-k3"), [30, 3, 0, 0]),
         ]
         .join("\n");
-        let providers = parse_jsonl(&content, None)
+        let providers = parse_jsonl(&content)
             .into_iter()
             .map(|event| (event.input, event.provider))
             .collect::<Vec<_>>();
