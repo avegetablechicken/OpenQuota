@@ -9,7 +9,7 @@ import type { MetricDefinition, MetricPolicy, ProviderSnapshot } from './types';
 
 afterEach(() => cleanup());
 
-function policy(track: 'subscription' | 'claude', visible: string[]): MetricPolicy {
+function policy(track: MetricPolicy['track'], visible: string[]): MetricPolicy {
   const ids = visible.map((suffix) => `sub2api.${suffix}`);
   return { track, visibleMetricIds: ids, starrableMetricIds: ids, maxStars: 2 };
 }
@@ -17,6 +17,8 @@ function policy(track: 'subscription' | 'claude', visible: string[]): MetricPoli
 const policies = {
   subscription: policy('subscription', ['weekly', 'daily']),
   claude: policy('claude', ['session', 'weekly', 'sonnet']),
+  // A Track not yet read hides what no administrator Track reports, such as Daily.
+  unknown: policy(null, ['session', 'spark', 'weekly', 'sonnet']),
 };
 
 function dashboard(source: keyof typeof policies = 'subscription', pins = ['session', 'spark']) {
@@ -64,7 +66,7 @@ function dashboard(source: keyof typeof policies = 'subscription', pins = ['sess
   ];
   const snapshot: ProviderSnapshot = {
     providerId: 'sub2api',
-    upstreamProviderId: source === 'subscription' ? 'codex' : source,
+    upstreamProviderId: source === 'claude' ? 'claude' : 'codex',
     plan: 'Plan',
     quotas: [
       {
@@ -192,4 +194,10 @@ it.each(['subscription', 'claude'] as const)('shares only supported %s metrics',
   expect(labels).not.toContain('spark');
   expect(labels).toContain('weekly');
   expect(labels).toContain(source === 'subscription' ? 'daily' : 'sonnet');
+});
+
+it('hides what no administrator track reports while the track is unknown', () => {
+  dashboard('unknown');
+  expect(screen.queryByRole('group', { name: 'daily options' })).not.toBeInTheDocument();
+  expect(screen.getByRole('group', { name: 'weekly options' })).toBeInTheDocument();
 });

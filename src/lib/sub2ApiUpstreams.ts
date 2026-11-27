@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { policyShows } from './metricPolicy';
 import type { MetricPolicy, ProviderSnapshot, Sub2ApiSource, Sub2ApiUpstream } from './types';
 
 export const sub2ApiSnapshotContext = Symbol('Sub2API snapshot');
@@ -84,8 +85,7 @@ export function showSub2ApiMetric(
   subscription = isSub2ApiSubscription(snapshot),
 ) {
   // Retain saved layout preferences, but omit metrics unavailable on this Track.
-  // TEMPORARY: while the Track is unknown, the Dashboard and share card hide nothing.
-  if (policy?.track && !policy.visibleMetricIds.includes(metricId)) return false;
+  if (!policyShows(policy, metricId)) return false;
   if (metricId !== `${snapshot.providerId}.monthly` || !subscription) return true;
   return snapshot.quotas.some((window) => window.id === 'monthly' && (window.limitValue ?? 0) > 0);
 }
