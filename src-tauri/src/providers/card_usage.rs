@@ -123,8 +123,7 @@ pub(super) enum LabelMode {
 /// Routed usage. Own-series and Routed usage are priced under the Card they land on, Others under
 /// the home Card.
 ///
-/// Returns whether any observation landed on `target_card`'s own series, which is what decides
-/// whether a client is named in the Card's source note. Others usage does not count.
+/// Returns where the observations landed on `target_card`.
 pub(super) fn record<'a>(
     observations: impl IntoIterator<Item = UsageObservation<'a>>,
     home_card: &str,
@@ -133,13 +132,13 @@ pub(super) fn record<'a>(
     pricing: &ModelPricing,
     policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
-) -> bool {
+) -> Landed {
     let since = now
         .with_timezone(&Local)
         .date_naive()
         .checked_sub_days(Days::new(policy.window_start_days_ago))
         .unwrap_or(NaiveDate::MIN);
-    let mut landed = false;
+    let mut landed = Landed::default();
     for observation in observations {
         let date = observation.timestamp.with_timezone(&Local).date_naive();
         if date < since || observation.timestamp > now {
@@ -158,16 +157,38 @@ pub(super) fn record<'a>(
                     true,
                     observation.model.unwrap_or("Unattributed"),
                 );
+                landed.others = true;
             }
             continue;
         }
-        landed |= if target_card == home_card {
-            record_home(observation, date, home_card, pricing, policy, accumulator)
+        if target_card == home_card {
+            match record_home(observation, date, home_card, pricing, policy, accumulator) {
+                Some(Bucket::OwnSeries) => landed.own_series = true,
+                Some(Bucket::Others) => landed.others = true,
+                None => {}
+            }
         } else {
-            record_routed(observation, date, target_card, pricing, policy, accumulator)
-        };
+            landed.own_series |=
+                record_routed(observation, date, target_card, pricing, policy, accumulator);
+        }
     }
     landed
+}
+
+/// Where a batch of observations landed on the target Card.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Landed {
+    /// Some observation was added to the Card's own series. This decides whether a client is
+    /// named in the Card's source note.
+    pub own_series: bool,
+    /// Some observation was given to the Card's Others. Others drops usage with no tokens and no
+    /// cost, so this can be true while Others stays empty.
+    pub others: bool,
+}
+
+enum Bucket {
+    OwnSeries,
+    Others,
 }
 
 fn record_home(
@@ -177,7 +198,7 @@ fn record_home(
     pricing: &ModelPricing,
     policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
-) -> bool {
+) -> Option<Bucket> {
     let Some(model) = observation.model else {
         return add_own_series(
             observation,
@@ -187,7 +208,8 @@ fn record_home(
             pricing,
             policy,
             accumulator,
-        );
+        )
+        .then_some(Bucket::OwnSeries);
     };
     match native_log_disposition(home_card, model) {
         LocalModelDisposition::Home => add_own_series(
@@ -198,8 +220,9 @@ fn record_home(
             pricing,
             policy,
             accumulator,
-        ),
-        LocalModelDisposition::RoutedTo(_) => false,
+        )
+        .then_some(Bucket::OwnSeries),
+        LocalModelDisposition::RoutedTo(_) => None,
         LocalModelDisposition::Other => {
             let cost = observation
                 .recorded_cost
@@ -211,7 +234,7 @@ fn record_home(
                 observation.recorded_cost.is_none(),
                 model,
             );
-            false
+            Some(Bucket::Others)
         }
     }
 }
@@ -396,9 +419,9 @@ mod tests {
     ];
 
     /// Home Cards of the Home clients migrated onto this module, with the policy their native
-    /// loop uses. Gemini CLI's home Card is antigravity, under the same policy as kimi's except
-    /// for its labels and local runtime detection.
-    const HOMES: [(&str, TransitionalPolicy); 6] = [
+    /// loop uses. Gemini CLI's home Card is antigravity. pi's events can have any home Card,
+    /// chosen at parse, so pi appears once per Card.
+    const HOMES: [(&str, TransitionalPolicy); 13] = [
         (
             "claude",
             TransitionalPolicy {
@@ -450,6 +473,69 @@ mod tests {
                 window_start_days_ago: 29,
                 zero_token_guard: true,
                 label: LabelMode::FamilyWithVariant,
+                local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "claude",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+                label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "codex",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+                label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "antigravity",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+                label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "grok",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+                label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "kimi",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+                label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "minimax",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+                label: LabelMode::RawModel,
+                local_runtime: LocalRuntimeMode::ModelSlug,
+            },
+        ),
+        (
+            "zai",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+                label: LabelMode::RawModel,
                 local_runtime: LocalRuntimeMode::ModelSlug,
             },
         ),

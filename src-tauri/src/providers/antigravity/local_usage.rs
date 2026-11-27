@@ -629,6 +629,7 @@ fn aggregate_routed_into(
         },
         accumulator,
     )
+    .own_series
 }
 
 fn observation(event: &AntigravityTokenEvent) -> UsageObservation<'_> {

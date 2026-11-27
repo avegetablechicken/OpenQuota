@@ -578,6 +578,7 @@ fn aggregate_into(
         },
         accumulator,
     )
+    .own_series
 }
 
 fn observation(event: &KimiTokenEvent) -> UsageObservation<'_> {

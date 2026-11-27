@@ -644,6 +644,7 @@ fn aggregate_routed_into(
         },
         accumulator,
     )
+    .own_series
 }
 
 fn observation(event: &ClaudeTokenEvent) -> UsageObservation<'_> {

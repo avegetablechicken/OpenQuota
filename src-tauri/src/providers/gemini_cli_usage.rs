@@ -441,6 +441,7 @@ fn aggregate_into(
         },
         accumulator,
     )
+    .own_series
 }
 
 fn unsigned_u64(value: Option<&Value>) -> Option<u64> {

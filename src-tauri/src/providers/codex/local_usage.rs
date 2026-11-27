@@ -719,6 +719,7 @@ fn aggregate_routed_into(
         },
         accumulator,
     )
+    .own_series
 }
 
 /// Skips events Codex wrote more than once, keeping the first.

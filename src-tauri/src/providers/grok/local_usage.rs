@@ -477,6 +477,7 @@ fn aggregate_routed_into(
         },
         accumulator,
     )
+    .own_series
 }
 
 /// Grok counts reasoning tokens as output and reports cached prompt tokens inside the prompt.
