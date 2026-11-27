@@ -3038,6 +3038,7 @@ dependencies = [
  "flate2",
  "fontdue",
  "gdk",
+ "gtk",
  "ipnet",
  "libc",
  "native-tls",

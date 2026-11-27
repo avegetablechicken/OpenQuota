@@ -19,7 +19,7 @@ use tauri_plugin_positioner::{Position, WindowExt};
 use crate::{
     desktop_integration::DesktopIntegration,
     models::{ThemePreference, WindowMode},
-    popup::PopupDismissGuard,
+    popup::{DismissAction, PopupDismissGuard},
     settings::SettingsService,
     storage::Storage,
 };
@@ -1010,22 +1010,52 @@ fn schedule_outside_click_dismiss(window: Window) {
     let app = window.app_handle().clone();
     let token = app.state::<PopupDismissGuard>().token();
 
+    #[cfg(target_os = "linux")]
+    {
+        // WebKit <select> menus and GTK menus take focus with a GTK grab.
+        // Wait for that grab to end instead of hiding the panel underneath it.
+        // Keep the original token so a tray click still cancels this dismissal.
+        let _ = app.run_on_main_thread(move || {
+            gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+                if dismiss_after_focus_loss(&window, token, gtk::grab_get_current().is_some()) {
+                    gtk::glib::ControlFlow::Continue
+                } else {
+                    gtk::glib::ControlFlow::Break
+                }
+            });
+        });
+    }
+
+    #[cfg(not(target_os = "linux"))]
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(100));
-        let app_for_dismiss = app.clone();
         let _ = app.run_on_main_thread(move || {
-            let guard = app_for_dismiss.state::<PopupDismissGuard>();
-            let still_unfocused = window.is_focused().is_ok_and(|focused| !focused);
-
-            if guard.is_current(token) && still_unfocused {
-                if let Some(session) = window.app_handle().try_state::<Arc<PanelResizeSession>>() {
-                    session.finish(current_logical_height(&window));
-                }
-                let _ = window.set_resizable(false);
-                hide_main_native_window(&window);
-            }
+            dismiss_after_focus_loss(&window, token, false);
         });
     });
+}
+
+// Returns true only while a native menu is keeping the pending dismissal alive.
+fn dismiss_after_focus_loss(window: &Window, token: u64, menu_open: bool) -> bool {
+    let app = window.app_handle();
+    let action = app.state::<PopupDismissGuard>().action(
+        token,
+        window.is_focused().is_ok_and(|focused| !focused),
+        app.state::<DesktopIntegration>().is_floating(),
+        menu_open,
+    );
+    match action {
+        DismissAction::Cancel => false,
+        DismissAction::WaitForMenu => true,
+        DismissAction::Hide => {
+            if let Some(session) = app.try_state::<Arc<PanelResizeSession>>() {
+                session.finish(current_logical_height(window));
+            }
+            let _ = window.set_resizable(false);
+            hide_main_native_window(window);
+            false
+        }
+    }
 }
 
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
