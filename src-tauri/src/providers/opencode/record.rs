@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 use crate::{
-    pricing::{ModelPricing, ServiceTier, TokenBreakdown},
+    pricing::{HistoricalRates, ModelPricing, ServiceTier, TokenBreakdown},
     providers::model_scope::{
         card_for_model, is_local_runtime_provider, model_belongs_to_card, normalize_provider_model,
     },
@@ -337,35 +337,30 @@ fn estimate_cost(
     }
     let mapped_provider = usage_card(provider_id, model);
     let provider = mapped_provider.unwrap_or(provider_id);
-    let historical = pricing
-        .historical_rates(
+    let history = |provider| {
+        pricing.historical_rates(
             provider,
             model,
             timestamp,
             ServiceTier::Standard,
             tokens.prompt_tokens(),
         )
-        .or_else(|| {
-            (mapped_provider.is_none() && provider != "opencode")
-                .then(|| {
-                    pricing.historical_rates(
-                        "opencode",
-                        model,
-                        timestamp,
-                        ServiceTier::Standard,
-                        tokens.prompt_tokens(),
-                    )
-                })
-                .flatten()
-        });
-    let cost = if let Some(rates) = historical {
-        rates?.cost_dollars(tokens, true)
-    } else {
-        pricing
+    };
+    let mut historical = history(provider);
+    if historical == HistoricalRates::Untracked
+        && mapped_provider.is_none()
+        && provider != "opencode"
+    {
+        historical = history("opencode");
+    }
+    let cost = match historical {
+        HistoricalRates::Priced(rates) => rates.cost_dollars(tokens, true),
+        HistoricalRates::Unpriced => return None,
+        HistoricalRates::Untracked => pricing
             .estimated_cost_dollars(model, tokens, true)
             .or_else(|| {
                 pricing.estimated_cost_dollars(&format!("{provider_id}/{model}"), tokens, true)
-            })?
+            })?,
     };
     Some(cost).filter(|cost| cost.is_finite() && *cost >= 0.0)
 }

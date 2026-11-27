@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 #[cfg(test)]
 use crate::models::UsageHistory;
 use crate::{
-    pricing::{ModelPricing, ServiceTier, TokenBreakdown},
+    pricing::{HistoricalRates, ModelPricing, ServiceTier, TokenBreakdown},
     providers::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, UsageObservation},
@@ -310,9 +310,8 @@ fn resolve_rate_model<'a>(
         .as_deref()
         .map(|variant| format!("{}-{variant}", event.model));
     let has_variant_rate = variant_model.as_deref().is_some_and(|model| {
-        pricing
-            .historical_rates(provider, model, event.timestamp, ServiceTier::Standard, 0)
-            .is_some()
+        pricing.historical_rates(provider, model, event.timestamp, ServiceTier::Standard, 0)
+            != HistoricalRates::Untracked
             || pricing.resolve(model).is_some()
     });
     if has_variant_rate {

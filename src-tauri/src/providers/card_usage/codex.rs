@@ -2,7 +2,7 @@
 //! from ChatGPT-plan history, and Codex models get Codex's priority multipliers, long-context
 //! rates and cache rules.
 
-use crate::pricing::{ModelPricing, ModelRates, ServiceTier, TokenBreakdown};
+use crate::pricing::{HistoricalRates, ModelPricing, ModelRates, ServiceTier, TokenBreakdown};
 
 use super::UsageObservation;
 
@@ -22,28 +22,33 @@ pub(super) fn estimate(
         if !chatgpt_plan {
             return None;
         }
-        return pricing
-            .historical_rates(
-                "codex-chatgpt",
-                model,
-                observation.timestamp,
-                ServiceTier::Standard,
-                tokens.prompt_tokens(),
-            )?
-            .map(|rates| rates.cost_dollars(tokens, true));
+        // ChatGPT-plan auto-review has no catalog price to fall back on.
+        return match pricing.historical_rates(
+            "codex-chatgpt",
+            model,
+            observation.timestamp,
+            ServiceTier::Standard,
+            tokens.prompt_tokens(),
+        ) {
+            HistoricalRates::Priced(rates) => Some(rates.cost_dollars(tokens, true)),
+            HistoricalRates::Unpriced | HistoricalRates::Untracked => None,
+        };
     }
     let tier = observation.tier;
     if tier == ServiceTier::Unknown {
         return None;
     }
-    if let Some(rates) = pricing.historical_rates(
+    match pricing.historical_rates(
         "codex",
         model,
         observation.timestamp,
         tier,
         tokens.prompt_tokens(),
     ) {
-        return Some(rates?.cost_dollars(tokens, true));
+        HistoricalRates::Priced(rates) => return Some(rates.cost_dollars(tokens, true)),
+        HistoricalRates::Unpriced => return None,
+        // Untracked models fall back to catalog rates under Codex's own rules below.
+        HistoricalRates::Untracked => {}
     }
     if !matches!(tier, ServiceTier::Standard | ServiceTier::Fast) {
         return None;

@@ -415,24 +415,15 @@ fn estimate_from_card_rates(
     model: &str,
     observation: &UsageObservation<'_>,
 ) -> Option<f64> {
-    let tier = observation.tier;
-    if tier == ServiceTier::Unknown {
-        return None;
-    }
     let tokens = observation.tokens;
-    match pricing.historical_rates(
+    let rates = pricing.rates_at(
         card,
         model,
         observation.timestamp,
-        tier,
+        observation.tier,
         tokens.prompt_tokens(),
-    ) {
-        Some(rates) => rates.map(|rates| rates.cost_dollars(tokens, true)),
-        None if matches!(tier, ServiceTier::Standard | ServiceTier::Fast) => {
-            pricing.estimated_cost_dollars(model, tokens, true)
-        }
-        None => None,
-    }
+    )?;
+    Some(rates.cost_dollars(tokens, true))
 }
 
 /// Helpers for the characterization tests each scanner keeps while it migrates.

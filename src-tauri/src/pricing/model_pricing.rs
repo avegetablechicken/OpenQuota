@@ -9,6 +9,18 @@ pub struct ModelPricing {
     memo: Mutex<HashMap<String, Option<ModelRates>>>,
 }
 
+/// What a provider's dated price history says about a model at one moment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum HistoricalRates {
+    /// The history does not track the model, so ordinary catalog rates may still price it.
+    Untracked,
+    /// The history tracks the model but has no price at that moment and tier. A Local runtime
+    /// model is here too: it is never priced.
+    Unpriced,
+    /// The rates in effect at that moment.
+    Priced(ModelRates),
+}
+
 /// Models named for a Local runtime (`ollama/*`) are free, even when named after a cloud model.
 pub fn is_local_runtime_model(model: &str) -> bool {
     model
@@ -56,8 +68,34 @@ impl ModelPricing {
         resolved
     }
 
-    /// An empty match for a tracked model means its price is unknown on this date.
-    /// An untracked model can still be estimated from the ordinary catalog.
+    /// Rates for `model` under `provider` at `at`: the provider's price history when it tracks
+    /// the model, otherwise the ordinary catalog for the Standard and Fast tiers. An Unknown tier
+    /// and a Local runtime model are never priced.
+    pub(crate) fn rates_at(
+        &self,
+        provider: &str,
+        model: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        tier: ServiceTier,
+        prompt: u64,
+    ) -> Option<ModelRates> {
+        if tier == ServiceTier::Unknown {
+            return None;
+        }
+        match self.historical_rates(provider, model, at, tier, prompt) {
+            HistoricalRates::Priced(rates) => Some(rates),
+            HistoricalRates::Unpriced => None,
+            HistoricalRates::Untracked
+                if matches!(tier, ServiceTier::Standard | ServiceTier::Fast) =>
+            {
+                self.resolve(model)
+            }
+            HistoricalRates::Untracked => None,
+        }
+    }
+
+    /// What `provider`'s price history says about `model` at `at`, without the catalog fallback.
+    /// For callers whose fallback differs from `rates_at`'s.
     pub(crate) fn historical_rates(
         &self,
         provider: &str,
@@ -65,10 +103,10 @@ impl ModelPricing {
         at: chrono::DateTime<chrono::Utc>,
         tier: ServiceTier,
         prompt: u64,
-    ) -> Option<Option<ModelRates>> {
+    ) -> HistoricalRates {
         let normalized = model.trim().to_ascii_lowercase();
         if is_local_runtime_model(&normalized) {
-            return Some(None);
+            return HistoricalRates::Unpriced;
         }
         // Foreign models in native logs use upstream API-equivalent pricing. A reseller export
         // keeps its own provider scope.
@@ -82,7 +120,9 @@ impl ModelPricing {
             }
             _ => provider,
         };
-        let models = self.supplement.history.get(provider)?;
+        let Some(models) = self.supplement.history.get(provider) else {
+            return HistoricalRates::Untracked;
+        };
         let name = match (provider, normalized.split_once('/')) {
             ("codex", Some(("openai" | "openai-codex", id)))
             | ("claude", Some(("anthropic", id)))
@@ -131,7 +171,7 @@ impl ModelPricing {
                 .get(super::history::strip_snapshot(base))
                 .map(|rows| (rows, suffix_fast))
         };
-        let (rows, suffix_fast) = lookup(name)
+        let Some((rows, suffix_fast)) = lookup(name)
             .or_else(|| self.supplement.canonical_name(name).and_then(lookup))
             .or_else(|| self.supplement.canonical_name(&normalized).and_then(lookup))
             .or_else(|| {
@@ -141,13 +181,19 @@ impl ModelPricing {
                             .or_else(|| self.supplement.canonical_name(&cand).and_then(lookup))
                     })
                 })?
-            })?;
+            })
+        else {
+            return HistoricalRates::Untracked;
+        };
         let tier = if suffix_fast && tier == ServiceTier::Standard {
             ServiceTier::Fast
         } else {
             tier
         };
-        Some(super::history::active(rows, at).and_then(|row| row.rates(tier, prompt, at)))
+        match super::history::active(rows, at).and_then(|row| row.rates(tier, prompt, at)) {
+            Some(rates) => HistoricalRates::Priced(rates),
+            None => HistoricalRates::Unpriced,
+        }
     }
 
     pub fn estimated_cost_at(
@@ -163,10 +209,10 @@ impl ModelPricing {
         } else {
             ServiceTier::Standard
         };
-        match self.historical_rates(provider, model, at, tier, tokens.prompt_tokens()) {
-            Some(rates) => Some(rates?.cost_dollars(tokens, apply_long_context_rates)),
-            None => self.estimated_cost_dollars(model, tokens, apply_long_context_rates),
-        }
+        Some(
+            self.rates_at(provider, model, at, tier, tokens.prompt_tokens())?
+                .cost_dollars(tokens, apply_long_context_rates),
+        )
     }
 
     pub fn estimated_cost_dollars(
@@ -500,7 +546,7 @@ fn gemini_candidates(model: &str) -> Vec<String> {
 mod tests {
     use std::collections::HashMap;
 
-    use super::ModelPricing;
+    use super::{HistoricalRates, ModelPricing};
     use crate::pricing::{ModelRates, PricingCatalog, PricingSupplement, TokenBreakdown};
 
     fn rates(input: f64, output: f64) -> ModelRates {
@@ -710,26 +756,78 @@ mod tests {
         let at = chrono::DateTime::parse_from_rfc3339("2026-11-20T12:00:00Z")
             .unwrap()
             .to_utc();
-        assert!(bundled
-            .historical_rates(
+        assert!(matches!(
+            bundled.historical_rates(
                 "antigravity",
                 "deepseek-flash",
                 at,
                 crate::pricing::ServiceTier::Standard,
                 0
-            )
-            .flatten()
-            .is_some());
-        assert!(bundled
-            .historical_rates(
+            ),
+            HistoricalRates::Priced(_)
+        ));
+        assert!(matches!(
+            bundled.historical_rates(
                 "opencode",
                 "openrouter/deepseek-flash",
                 at,
                 crate::pricing::ServiceTier::Standard,
                 0
-            )
-            .flatten()
-            .is_some());
+            ),
+            HistoricalRates::Priced(_)
+        ));
+    }
+
+    #[test]
+    fn historical_rates_tell_untracked_models_from_unpriced_dates() {
+        use chrono::{TimeZone, Utc};
+
+        use crate::pricing::ServiceTier;
+
+        let bundled = crate::pricing::test_bundled_pricing();
+        let before_k31 = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        let k31 = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+        let history =
+            |model, at| bundled.historical_rates("kimi", model, at, ServiceTier::Standard, 0);
+        assert!(matches!(
+            history("kimi-code/k3.1-pro", k31),
+            HistoricalRates::Priced(_)
+        ));
+        assert_eq!(
+            history("kimi-code/k3.1-pro", before_k31),
+            HistoricalRates::Unpriced
+        );
+        assert_eq!(history("mystery-model", k31), HistoricalRates::Untracked);
+        assert_eq!(
+            history("ollama/kimi-code/k3.1-pro", k31),
+            HistoricalRates::Unpriced
+        );
+
+        // `rates_at` settles the fallback: an untracked model takes catalog rates for the
+        // Standard and Fast tiers only, and an unpriced date never does.
+        let catalog = bundled.resolve("claude-sonnet-4-6").unwrap();
+        assert_eq!(
+            bundled.historical_rates("kimi", "claude-sonnet-4-6", k31, ServiceTier::Standard, 0),
+            HistoricalRates::Untracked
+        );
+        assert_eq!(
+            bundled.rates_at("kimi", "claude-sonnet-4-6", k31, ServiceTier::Standard, 0),
+            Some(catalog)
+        );
+        assert_eq!(
+            bundled.rates_at("kimi", "claude-sonnet-4-6", k31, ServiceTier::Unknown, 0),
+            None
+        );
+        assert_eq!(
+            bundled.rates_at(
+                "kimi",
+                "kimi-code/k3.1-pro",
+                before_k31,
+                ServiceTier::Standard,
+                0
+            ),
+            None
+        );
     }
 
     #[test]
