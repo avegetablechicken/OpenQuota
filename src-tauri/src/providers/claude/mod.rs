@@ -159,8 +159,17 @@ pub enum ClaudeError {
     AccountStore(#[from] crate::storage::StorageError),
 }
 
+/// Reads this device's local usage history for a refresh.
+type LocalUsageScan = fn(
+    &Storage,
+    chrono::DateTime<Utc>,
+    &ModelPricing,
+) -> Result<crate::models::UsageHistory, ClaudeError>;
+
 pub struct ClaudeProvider {
     credential_scope: ClaudeCredentialScope,
+    /// `scan_local_usage` outside tests, which read the logs under the real home directory.
+    local_usage_scan: LocalUsageScan,
     account_identity: Option<String>,
     storage: Arc<Storage>,
     pricing: Arc<PricingStore>,
@@ -189,6 +198,7 @@ impl ClaudeProvider {
         Self {
             account_identity: accounts::identity_for_scope(&credential_scope),
             credential_scope,
+            local_usage_scan: scan_local_usage,
             storage,
             pricing,
             client,
@@ -302,7 +312,7 @@ impl ClaudeProvider {
                 .map(crate::providers::CacheIdentity::Resolved)
                 .unwrap_or(crate::providers::CacheIdentity::Unresolved),
             "Claude",
-            || scan_local_usage(&self.storage, now, pricing),
+            || (self.local_usage_scan)(&self.storage, now, pricing),
             &mut warnings,
         );
 
@@ -711,6 +721,13 @@ mod tests {
         .unwrap();
     }
 
+    /// Keeps a refresh off the local logs under the real home directory, whose scan on a
+    /// machine with Claude Code history takes long enough to outlast the tests' timeouts.
+    fn without_local_usage(mut provider: ClaudeProvider) -> ClaudeProvider {
+        provider.local_usage_scan = |_, _, _| Ok(Default::default());
+        provider
+    }
+
     #[test]
     fn rate_limit_notice_distinguishes_empty_and_stale_live_usage() {
         let empty = rate_limit_notice(301, false);
@@ -807,12 +824,12 @@ mod tests {
             path: account_root.clone(),
             keychain_literal: account_root.to_string_lossy().into_owned(),
         };
-        let provider = Arc::new(ClaudeProvider::with_scope(
+        let provider = Arc::new(without_local_usage(ClaudeProvider::with_scope(
             credential_scope,
             storage,
             pricing,
             ClaudeClient::new().unwrap(),
-        ));
+        )));
         let config = ClaudeOAuthConfig {
             usage_url: format!("{base}/usage"),
             refresh_url: format!("{base}/token"),
@@ -848,7 +865,7 @@ mod tests {
     ) -> Arc<ClaudeProvider> {
         let storage = Arc::new(Storage::open(&directory.join("openquota.db")).unwrap());
         let pricing = Arc::new(PricingStore::new(directory.join("pricing")).unwrap());
-        Arc::new(ClaudeProvider::with_scope(
+        Arc::new(without_local_usage(ClaudeProvider::with_scope(
             ClaudeCredentialScope::ConfigDir {
                 path: account_root.to_path_buf(),
                 keychain_literal: account_root.to_string_lossy().into_owned(),
@@ -856,7 +873,7 @@ mod tests {
             storage,
             pricing,
             ClaudeClient::new().unwrap(),
-        ))
+        )))
     }
 
     fn expired_login(account_root: &std::path::Path) -> std::path::PathBuf {
