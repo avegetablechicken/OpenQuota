@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -51,12 +51,7 @@ pub(crate) fn scan_routed_usage_into(
     let home = home_directory();
     let configured_home = crate::provider_environment::value("CODEX_HOME");
     let homes = codex_homes(configured_home.as_deref().map(OsStr::new), &home);
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let events = scan_codex_events(storage, &homes, since_date)?;
+    let events = scan_codex_events(storage, &homes, now)?;
     Ok(aggregate_routed_into(
         &events,
         now,
@@ -74,12 +69,7 @@ pub fn scan_local_usage(
     let home = home_directory();
     let configured_home = crate::provider_environment::value("CODEX_HOME");
     let homes = codex_homes(configured_home.as_deref().map(OsStr::new), &home);
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let events = scan_codex_events(storage, &homes, since_date)?;
+    let events = scan_codex_events(storage, &homes, now)?;
 
     home_clients::card_history(
         &home_clients::CLIENTS,
@@ -120,16 +110,15 @@ static LOGS: LocalLogs<CodexLogs> = LocalLogs::new();
 fn scan_codex_events(
     storage: &Storage,
     homes: &[PathBuf],
-    since_date: NaiveDate,
+    now: DateTime<Utc>,
 ) -> Result<std::sync::Arc<Vec<TokenEvent>>, CodexError> {
     let files = discover_session_files(homes)
         .into_iter()
         .map(|path| (path, ()));
-    LOGS.load(storage, since_date, files)
-        .map_err(|error| match error {
-            LogCacheError::Storage(_) => CodexError::Storage,
-            LogCacheError::Encode(_) | LogCacheError::Unreadable => CodexError::LocalUsage,
-        })
+    LOGS.load(storage, now, files).map_err(|error| match error {
+        LogCacheError::Storage(_) => CodexError::Storage,
+        LogCacheError::Encode(_) | LogCacheError::Unreadable => CodexError::LocalUsage,
+    })
 }
 
 fn codex_homes(configured_home: Option<&OsStr>, home: &Path) -> Vec<PathBuf> {
@@ -625,7 +614,7 @@ impl TokenEvent {
 mod tests {
     use std::{collections::HashMap, fs, io, path::Path};
 
-    use chrono::{NaiveDate, TimeZone, Utc};
+    use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
     use super::{
@@ -940,9 +929,9 @@ mod tests {
         )
         .unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
-        let since = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
 
-        let initial = scan_codex_events(&storage, std::slice::from_ref(&home), since).unwrap();
+        let initial = scan_codex_events(&storage, std::slice::from_ref(&home), now).unwrap();
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0].tier, ServiceTier::Standard);
 
@@ -957,7 +946,7 @@ mod tests {
         )
         .unwrap();
 
-        let refreshed = scan_codex_events(&storage, &[home], since).unwrap();
+        let refreshed = scan_codex_events(&storage, &[home], now).unwrap();
         assert_eq!(refreshed.len(), 2);
         assert_eq!(refreshed.iter().map(|event| event.total).sum::<u64>(), 195);
         assert!(refreshed
@@ -994,7 +983,7 @@ mod tests {
         let events = scan_codex_events(
             &storage,
             &[home],
-            NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            Utc.with_ymd_and_hms(2026, 3, 10, 12, 0, 0).unwrap(),
         )
         .unwrap();
 

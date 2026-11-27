@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -101,7 +101,7 @@ fn scan_directories_into(
             .into_iter()
             .map(|path| (path, *source))
     });
-    let events = LOGS.load(storage, NaiveDate::MIN, files)?;
+    let events = LOGS.load(storage, now, files)?;
 
     Ok(aggregate_into(&events, card_id, now, pricing, accumulator))
 }

@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -75,10 +75,10 @@ static LOGS: LocalLogs<ClaudeLogs> = LocalLogs::new();
 
 fn load_local_events(
     storage: &Storage,
-    since_date: NaiveDate,
+    now: DateTime<Utc>,
 ) -> Result<std::sync::Arc<Vec<ClaudeTokenEvent>>, ClaudeError> {
     let files = discover_files().into_iter().map(|path| (path, ()));
-    LOGS.load(storage, since_date, files)
+    LOGS.load(storage, now, files)
         .map_err(|_| ClaudeError::LocalUsage)
 }
 
@@ -89,12 +89,7 @@ pub(crate) fn scan_routed_usage_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, ClaudeError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let events = load_local_events(storage, since_date)?;
+    let events = load_local_events(storage, now)?;
     Ok(aggregate_routed_into(
         &events,
         now,
@@ -109,12 +104,7 @@ pub fn scan_local_usage(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
 ) -> Result<UsageHistory, ClaudeError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let events = load_local_events(storage, since_date)?;
+    let events = load_local_events(storage, now)?;
     home_clients::card_history(
         &home_clients::CLIENTS,
         &FoldContext {

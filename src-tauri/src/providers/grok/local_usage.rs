@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -64,7 +64,7 @@ pub(crate) fn scan_routed_usage_into(
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, GrokError> {
     let path = default_log_path();
-    let events = load_events(storage, &path)?;
+    let events = load_events(storage, &path, now)?;
     Ok(aggregate_routed_into(
         &events,
         now,
@@ -119,17 +119,17 @@ static LOGS: LocalLogs<GrokLogs> = LocalLogs::new();
 fn load_events(
     storage: &Storage,
     path: &Path,
+    now: DateTime<Utc>,
 ) -> Result<std::sync::Arc<Vec<TokenEvent>>, GrokError> {
     // No log yet means no usage; anything else at the path must be a readable log.
     let files = match fs::metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         _ => Some((path.to_path_buf(), ())),
     };
-    LOGS.load(storage, NaiveDate::MIN, files)
-        .map_err(|error| match error {
-            LogCacheError::Storage(_) => GrokError::Storage,
-            LogCacheError::Encode(_) | LogCacheError::Unreadable => GrokError::LocalUsage,
-        })
+    LOGS.load(storage, now, files).map_err(|error| match error {
+        LogCacheError::Storage(_) => GrokError::Storage,
+        LogCacheError::Encode(_) | LogCacheError::Unreadable => GrokError::LocalUsage,
+    })
 }
 
 fn scan_path(
@@ -139,7 +139,7 @@ fn scan_path(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
 ) -> Result<UsageHistory, GrokError> {
-    let events = load_events(storage, path)?;
+    let events = load_events(storage, path, now)?;
 
     home_clients::card_history(
         clients,

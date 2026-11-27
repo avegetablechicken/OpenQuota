@@ -108,7 +108,7 @@ impl<'a> UsageObservation<'a> {
 pub(super) const SCAN_WINDOW_DAYS: u64 = 30;
 
 /// First day of the Scan window that ends on `today`.
-fn scan_window_start(today: NaiveDate) -> NaiveDate {
+pub(super) fn scan_window_start(today: NaiveDate) -> NaiveDate {
     today
         .checked_sub_days(Days::new(SCAN_WINDOW_DAYS - 1))
         .unwrap_or(NaiveDate::MIN)

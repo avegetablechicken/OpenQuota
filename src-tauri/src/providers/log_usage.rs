@@ -9,6 +9,7 @@ use std::{
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+use super::card_usage::scan_window_start;
 use crate::{
     models::UsageHistory,
     storage::{Storage, StorageError},
@@ -87,13 +88,13 @@ impl<F: LogFormat> LocalLogs<F> {
         }
     }
 
-    /// The events in `files` dated on or after `since_date`, deduplicated by the format. A
-    /// repeated path is read once. A failed load, or one that skipped an unreadable file, is not
-    /// remembered, so the next refresh retries it.
+    /// The events in `files` dated within the Scan window that ends on `now`'s day, deduplicated
+    /// by the format. A repeated path is read once. A failed load, or one that skipped an
+    /// unreadable file, is not remembered, so the next refresh retries it.
     pub fn load(
         &self,
         storage: &Storage,
-        since_date: NaiveDate,
+        now: DateTime<Utc>,
         files: impl IntoIterator<Item = (PathBuf, F::Context)>,
     ) -> Result<Arc<Vec<F::Event>>, LogCacheError> {
         let mut seen = HashSet::new();
@@ -109,7 +110,7 @@ impl<F: LogFormat> LocalLogs<F> {
             .collect();
         let key = LoadKey {
             storage: std::ptr::from_ref(storage) as usize,
-            since_date,
+            since_date: scan_window_start(now.with_timezone(&Local).date_naive()),
             files,
         };
         // Every card shares the remembered events, so a hit copies nothing.
@@ -369,7 +370,7 @@ fn has_timezone(value: &str) -> bool {
 mod tests {
     use std::{cell::Cell, fs, path::PathBuf, sync::Arc};
 
-    use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use serde::{Deserialize, Serialize};
     use tempfile::tempdir;
 
@@ -567,8 +568,13 @@ mod tests {
         }
     }
 
-    const EARLY: &str = "2026-07-01T12:00:00Z";
+    /// Before the Scan window that ends on `now()`'s day.
+    const EARLY: &str = "2026-06-01T12:00:00Z";
     const LATE: &str = "2026-07-20T12:00:00Z";
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, 20, 18, 0, 0).unwrap()
+    }
 
     fn texts(events: &[Line]) -> Vec<&str> {
         events.iter().map(|event| event.text.as_str()).collect()
@@ -614,26 +620,26 @@ mod tests {
         let before = parses();
 
         let loaded = logs
-            .load(&fixture.storage, NaiveDate::MIN, [(first.clone(), 0)])
+            .load(&fixture.storage, now(), [(first.clone(), 0)])
             .unwrap();
         assert_eq!(texts(&loaded), ["a"]);
         // A hit shares the remembered events instead of copying them.
         let reused = logs
-            .load(&fixture.storage, NaiveDate::MIN, [(first.clone(), 0)])
+            .load(&fixture.storage, now(), [(first.clone(), 0)])
             .unwrap();
         assert!(Arc::ptr_eq(&loaded, &reused));
         assert_eq!(parses(), before + 1);
 
         // A new memo still reads the unchanged file from the persistent cache.
         let fresh = LocalLogs::<Lines>::new()
-            .load(&fixture.storage, NaiveDate::MIN, [(first.clone(), 0)])
+            .load(&fixture.storage, now(), [(first.clone(), 0)])
             .unwrap();
         assert_eq!(texts(&fresh), ["a"]);
         assert_eq!(parses(), before + 1);
 
         fs::write(&first, format!("{LATE} bc")).unwrap();
         let changed = logs
-            .load(&fixture.storage, NaiveDate::MIN, [(first.clone(), 0)])
+            .load(&fixture.storage, now(), [(first.clone(), 0)])
             .unwrap();
         assert_eq!(texts(&changed), ["bc"]);
         assert_eq!(parses(), before + 2);
@@ -658,10 +664,10 @@ mod tests {
         let path = fixture.file("session.jsonl", format!("{LATE} a").as_bytes());
         let before = parses();
         LocalLogs::<Lines>::new()
-            .load(&fixture.storage, NaiveDate::MIN, [(path.clone(), 0)])
+            .load(&fixture.storage, now(), [(path.clone(), 0)])
             .unwrap();
         LocalLogs::<LinesV2>::new()
-            .load(&fixture.storage, NaiveDate::MIN, [(path, 0)])
+            .load(&fixture.storage, now(), [(path, 0)])
             .unwrap();
         assert_eq!(parses(), before + 2);
     }
@@ -676,7 +682,7 @@ mod tests {
         let loaded = logs
             .load(
                 &fixture.storage,
-                NaiveDate::MIN,
+                now(),
                 [(first.clone(), 1), (second.clone(), 2)],
             )
             .unwrap();
@@ -685,22 +691,21 @@ mod tests {
             [1, 2]
         );
         let moved = logs
-            .load(&fixture.storage, NaiveDate::MIN, [(first, 1), (second, 3)])
+            .load(&fixture.storage, now(), [(first, 1), (second, 3)])
             .unwrap();
         assert!(!Arc::ptr_eq(&loaded, &moved));
         assert_eq!(moved[1].tag, 3);
     }
 
     #[test]
-    fn the_load_keeps_the_window_reads_a_repeated_path_once_and_deduplicates() {
+    fn the_load_keeps_the_scan_window_reads_a_repeated_path_once_and_deduplicates() {
         let fixture = Fixture::new();
         let path = fixture.file(
             "session.jsonl",
             format!("{EARLY} old\n{LATE} new\n{LATE} new").as_bytes(),
         );
-        let since = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
         let loaded = LocalLogs::<Lines>::new()
-            .load(&fixture.storage, since, [(path.clone(), 0), (path, 0)])
+            .load(&fixture.storage, now(), [(path.clone(), 0), (path, 0)])
             .unwrap();
         assert_eq!(texts(&loaded), ["new"]);
     }
@@ -713,13 +718,13 @@ mod tests {
         let logs = LocalLogs::<Lines>::new();
         logs.load(
             &fixture.storage,
-            NaiveDate::MIN,
+            now(),
             [(kept.clone(), 0), (gone.clone(), 0)],
         )
         .unwrap();
         assert!(fixture.cached("test", &gone).is_some());
 
-        logs.load(&fixture.storage, NaiveDate::MIN, [(kept.clone(), 0)])
+        logs.load(&fixture.storage, now(), [(kept.clone(), 0)])
             .unwrap();
         assert!(fixture.cached("test", &gone).is_none());
         assert!(fixture.cached("test", &kept).is_some());
@@ -744,9 +749,7 @@ mod tests {
         let files = || [(good.clone(), 0), (bad.clone(), 0)];
         let logs = LocalLogs::<Lines>::new();
 
-        let skipped = logs
-            .load(&fixture.storage, NaiveDate::MIN, files())
-            .unwrap();
+        let skipped = logs.load(&fixture.storage, now(), files()).unwrap();
         assert_eq!(texts(&skipped), ["a"]);
         assert_eq!(
             fixture
@@ -761,19 +764,13 @@ mod tests {
             None
         );
         // Nothing changed on disk, but a load that skipped a file is not remembered.
-        let retried = logs
-            .load(&fixture.storage, NaiveDate::MIN, files())
-            .unwrap();
+        let retried = logs.load(&fixture.storage, now(), files()).unwrap();
         assert!(!Arc::ptr_eq(&skipped, &retried));
 
         fs::write(&bad, format!("{LATE} b")).unwrap();
-        let recovered = logs
-            .load(&fixture.storage, NaiveDate::MIN, files())
-            .unwrap();
+        let recovered = logs.load(&fixture.storage, now(), files()).unwrap();
         assert_eq!(texts(&recovered), ["a", "b"]);
-        let remembered = logs
-            .load(&fixture.storage, NaiveDate::MIN, files())
-            .unwrap();
+        let remembered = logs.load(&fixture.storage, now(), files()).unwrap();
         assert!(Arc::ptr_eq(&recovered, &remembered));
     }
 
@@ -784,12 +781,12 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let logs = LocalLogs::<StrictLines>::new();
         assert!(matches!(
-            logs.load(&fixture.storage, NaiveDate::MIN, [(directory, 0)]),
+            logs.load(&fixture.storage, now(), [(directory, 0)]),
             Err(LogCacheError::Unreadable)
         ));
         let missing = fixture.directory.path().join("missing.jsonl");
         assert!(logs
-            .load(&fixture.storage, NaiveDate::MIN, [(missing, 0)])
+            .load(&fixture.storage, now(), [(missing, 0)])
             .unwrap()
             .is_empty());
     }

@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use walkdir::WalkDir;
@@ -101,12 +101,7 @@ fn scan_roots_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, LogCacheError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let events = load_local_events(storage, roots, since_date)?;
+    let events = load_local_events(storage, roots, now)?;
     Ok(aggregate_into(&events, now, pricing, card_id, accumulator))
 }
 
@@ -146,7 +141,7 @@ static LOGS: LocalLogs<KimiLogs> = LocalLogs::new();
 fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
-    since_date: NaiveDate,
+    now: DateTime<Utc>,
 ) -> Result<std::sync::Arc<Vec<KimiTokenEvent>>, LogCacheError> {
     let mut default_models = HashMap::<PathBuf, Option<String>>::new();
     let files = discover_wire_files(roots)
@@ -159,7 +154,7 @@ fn load_local_events(
             (path, fallback_model)
         })
         .collect::<Vec<_>>();
-    LOGS.load(storage, since_date, files)
+    LOGS.load(storage, now, files)
 }
 
 fn deduplicate(events: Vec<KimiTokenEvent>) -> Vec<KimiTokenEvent> {

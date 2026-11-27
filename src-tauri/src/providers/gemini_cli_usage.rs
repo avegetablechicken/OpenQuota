@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use walkdir::WalkDir;
@@ -120,12 +120,7 @@ fn scan_tmp_directories_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, LogCacheError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let events = load_local_events(storage, tmp_dirs, since_date)?;
+    let events = load_local_events(storage, tmp_dirs, now)?;
     Ok(aggregate_into(&events, now, pricing, card_id, accumulator))
 }
 
@@ -155,12 +150,12 @@ static LOGS: LocalLogs<GeminiCliLogs> = LocalLogs::new();
 fn load_local_events(
     storage: &Storage,
     tmp_dirs: &[PathBuf],
-    since_date: NaiveDate,
+    now: DateTime<Utc>,
 ) -> Result<std::sync::Arc<Vec<GeminiCliTokenEvent>>, LogCacheError> {
     let files = discover_chat_files(tmp_dirs)
         .into_iter()
         .map(|path| (path, ()));
-    LOGS.load(storage, since_date, files)
+    LOGS.load(storage, now, files)
 }
 
 fn discover_chat_files(tmp_dirs: &[PathBuf]) -> Vec<PathBuf> {

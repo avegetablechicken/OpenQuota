@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -90,12 +90,12 @@ static LOGS: LocalLogs<AntigravityLogs> = LocalLogs::new();
 fn load_local_events(
     storage: &Storage,
     roots: &[PathBuf],
-    since_date: NaiveDate,
+    now: DateTime<Utc>,
 ) -> Result<std::sync::Arc<Vec<AntigravityTokenEvent>>, AntigravityError> {
     let files = discover_transcript_files(roots)
         .into_iter()
         .map(|path| (path, ()));
-    LOGS.load(storage, since_date, files)
+    LOGS.load(storage, now, files)
         .map_err(|_| AntigravityError::LocalUsage)
 }
 
@@ -136,12 +136,7 @@ fn scan_routed_roots_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, AntigravityError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let events = load_local_events(storage, roots, since_date)?;
+    let events = load_local_events(storage, roots, now)?;
     Ok(aggregate_routed_into(
         &events,
         now,
@@ -167,12 +162,7 @@ fn scan_roots(
     pricing: &ModelPricing,
     clients: &[&dyn HomeClient],
 ) -> Result<UsageHistory, AntigravityError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let events = load_local_events(storage, roots, since_date)?;
+    let events = load_local_events(storage, roots, now)?;
 
     home_clients::card_history(
         clients,
