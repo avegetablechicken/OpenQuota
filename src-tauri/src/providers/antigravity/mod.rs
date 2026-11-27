@@ -141,6 +141,12 @@ pub enum AntigravityError {
     LocalUsage,
 }
 
+impl From<crate::providers::home_clients::FoldInUnavailable> for AntigravityError {
+    fn from(_: crate::providers::home_clients::FoldInUnavailable) -> Self {
+        Self::LocalUsage
+    }
+}
+
 pub struct AntigravityProvider {
     client: AntigravityClient,
     access_token_cache: AccessTokenCache,

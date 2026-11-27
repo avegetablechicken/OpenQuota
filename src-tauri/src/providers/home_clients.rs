@@ -81,15 +81,16 @@ pub(crate) static CLIENTS: [&dyn HomeClient; 9] = [
     &ZCode,
 ];
 
-/// No Home client could be read and none contributed, so the Card has no fresh history.
+/// Neither the Card's own logs nor any Home client contributed, and some client could not be
+/// read, so the Card has no fresh history.
 #[derive(Debug, thiserror::Error)]
 #[error("local usage sources unavailable")]
 pub(crate) struct FoldInUnavailable;
 
-/// The history of a Card that reads its own logs: `scan_native` adds them, named `native_source`
-/// in the source note, then every other client is folded in. A failing native scan fails the
-/// Card before anything is folded in.
-pub(crate) fn card_history<E>(
+/// The history of a Card that reads its own logs: `scan_native` adds them and says whether any
+/// landed, named `native_source` in the source note, then every other client is folded in. A
+/// failing native scan fails the Card before anything is folded in.
+pub(crate) fn card_history<E: From<FoldInUnavailable>>(
     clients: &[&dyn HomeClient],
     context: &FoldContext<'_>,
     card: Card<'_>,
@@ -97,25 +98,43 @@ pub(crate) fn card_history<E>(
     scan_native: impl FnOnce(&mut DailyUsageAccumulator) -> Result<bool, E>,
 ) -> Result<UsageHistory, E> {
     let mut accumulator = DailyUsageAccumulator::default();
-    scan_native(&mut accumulator)?;
-    let folded = fold(clients, context, card, &mut accumulator);
-    let source_note = source_note(Some(native_source), &folded.sources);
-    Ok(accumulator.build(context.now, &source_note))
+    let native_contributed = scan_native(&mut accumulator)?;
+    Ok(history(
+        clients,
+        context,
+        card,
+        Some(native_source),
+        native_contributed,
+        accumulator,
+    )?)
 }
 
-/// The history of a Card without logs of its own, from every Home client. It fails when no
-/// client contributed and at least one could not be read.
+/// The history of a Card without logs of its own, from every Home client.
 pub(crate) fn folded_history(
     clients: &[&dyn HomeClient],
     context: &FoldContext<'_>,
     card: Card<'_>,
 ) -> Result<UsageHistory, FoldInUnavailable> {
-    let mut accumulator = DailyUsageAccumulator::default();
+    let accumulator = DailyUsageAccumulator::default();
+    history(clients, context, card, None, false, accumulator)
+}
+
+/// Folds every other client into `accumulator`. The Card fails when nothing contributed, its own
+/// logs included, and at least one client could not be read: its cached history is then shown
+/// rather than an empty one. Otherwise a failing client is only logged.
+fn history(
+    clients: &[&dyn HomeClient],
+    context: &FoldContext<'_>,
+    card: Card<'_>,
+    native_source: Option<&str>,
+    native_contributed: bool,
+    mut accumulator: DailyUsageAccumulator,
+) -> Result<UsageHistory, FoldInUnavailable> {
     let folded = fold(clients, context, card, &mut accumulator);
-    if folded.sources.is_empty() && folded.failed {
+    if !native_contributed && folded.sources.is_empty() && folded.failed {
         return Err(FoldInUnavailable);
     }
-    let source_note = source_note(None, &folded.sources);
+    let source_note = source_note(native_source, &folded.sources);
     Ok(accumulator.build(context.now, &source_note))
 }
 
@@ -479,7 +498,7 @@ mod tests {
 
     use super::{
         card_history, fold_order, folded_history, source_note, Card, DailyUsageAccumulator,
-        FoldContext, FoldError, HomeClient, CLIENTS, DEFAULT_SOURCE_NOTE,
+        FoldContext, FoldError, FoldInUnavailable, HomeClient, CLIENTS, DEFAULT_SOURCE_NOTE,
     };
     use crate::{pricing::test_bundled_pricing, storage::Storage};
 
@@ -627,7 +646,7 @@ mod tests {
             let other = Fake::new("pi/oh-my-pi", Some(vec![]));
             let clients: [&dyn HomeClient; 2] = [&own, &other];
             card_history(&clients, context, card("codex"), "Codex logs", |_| {
-                Ok::<_, ()>(true)
+                Ok::<_, FoldInUnavailable>(true)
             })
             .unwrap();
             folded_history(&clients, context, card("zai")).unwrap();
@@ -636,16 +655,24 @@ mod tests {
         });
     }
 
-    /// A Card that reads its own logs only logs a failing client.
+    /// A Card fails over a failing client only when nothing contributed, its own logs included.
     #[test]
-    fn a_failing_client_does_not_fail_a_card_with_its_own_logs() {
+    fn a_failing_client_fails_a_card_only_when_nothing_contributed() {
         with_context(|context| {
-            let failing = Fake::new("pi/oh-my-pi", None);
-            let clients: [&dyn HomeClient; 1] = [&failing];
-            let history = card_history(&clients, context, card("codex"), "Codex logs", |_| {
-                Ok::<_, ()>(false)
-            });
-            assert!(history.is_ok());
+            for (native, other, expected_ok) in [
+                (true, None, true),
+                (false, None, false),
+                (false, Some(vec!["pi"]), true),
+                (false, Some(vec![]), false),
+            ] {
+                let failing = Fake::new("ZCode", None);
+                let other = Fake::new("pi/oh-my-pi", other.clone());
+                let clients: [&dyn HomeClient; 2] = [&other, &failing];
+                let history = card_history(&clients, context, card("codex"), "Codex logs", |_| {
+                    Ok::<_, FoldInUnavailable>(native)
+                });
+                assert_eq!(history.is_ok(), expected_ok, "native {native}");
+            }
         });
     }
 
@@ -655,11 +682,20 @@ mod tests {
             let other = Fake::new("pi/oh-my-pi", Some(vec!["pi"]));
             let clients: [&dyn HomeClient; 1] = [&other];
             let history = card_history(&clients, context, card("codex"), "Codex logs", |_| {
-                Err::<bool, _>("unreadable")
+                Err::<bool, _>(NativeFailed)
             });
-            assert_eq!(history.unwrap_err(), "unreadable");
+            assert!(matches!(history, Err(NativeFailed)));
             assert!(other.asked().is_empty());
         });
+    }
+
+    #[derive(Debug)]
+    struct NativeFailed;
+
+    impl From<FoldInUnavailable> for NativeFailed {
+        fn from(_: FoldInUnavailable) -> Self {
+            unreachable!("only the native scan fails here")
+        }
     }
 
     /// Without logs of its own, a Card fails only when nothing contributed and a client failed.

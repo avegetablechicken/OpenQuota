@@ -159,6 +159,12 @@ pub enum ClaudeError {
     AccountStore(#[from] crate::storage::StorageError),
 }
 
+impl From<crate::providers::home_clients::FoldInUnavailable> for ClaudeError {
+    fn from(_: crate::providers::home_clients::FoldInUnavailable) -> Self {
+        Self::LocalUsage
+    }
+}
+
 /// Reads this device's local usage history for a refresh.
 type LocalUsageScan = fn(
     &Storage,

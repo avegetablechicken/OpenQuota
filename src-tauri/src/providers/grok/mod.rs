@@ -104,6 +104,12 @@ pub(crate) enum GrokError {
     Storage,
 }
 
+impl From<crate::providers::home_clients::FoldInUnavailable> for GrokError {
+    fn from(_: crate::providers::home_clients::FoldInUnavailable) -> Self {
+        Self::LocalUsage
+    }
+}
+
 impl From<crate::storage::StorageError> for GrokError {
     fn from(_: crate::storage::StorageError) -> Self {
         Self::Storage

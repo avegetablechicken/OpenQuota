@@ -165,6 +165,12 @@ pub enum CodexError {
     Storage,
 }
 
+impl From<crate::providers::home_clients::FoldInUnavailable> for CodexError {
+    fn from(_: crate::providers::home_clients::FoldInUnavailable) -> Self {
+        Self::LocalUsage
+    }
+}
+
 impl From<crate::storage::StorageError> for CodexError {
     fn from(_: crate::storage::StorageError) -> Self {
         Self::Storage
