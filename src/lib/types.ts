@@ -213,6 +213,11 @@ export interface Sub2ApiConfigState {
   providerSource?: Sub2ApiUpstream | null;
 }
 
+/** A saved, cleared or removed connection; the warning says provider status could not follow. */
+export interface Sub2ApiConfigOutcome extends Sub2ApiConfigState {
+  warning?: string;
+}
+
 export type Sub2ApiUpstream = 'codex' | 'claude' | 'antigravity' | 'grok';
 
 export interface Sub2ApiConfigInput {

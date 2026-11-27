@@ -48,14 +48,6 @@ pub(crate) struct TemplateHandoff {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OnSettingsError {
-    /// Log it and carry on; [`Committed::settings_saved`] reports it.
-    Warn,
-    /// Fail the command.
-    Fail,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Timing {
     /// The command returns after the refresh.
     Wait,
@@ -69,21 +61,24 @@ pub(crate) struct Policy {
     pub action: &'static str,
     /// The error when the store step could not run at all.
     pub store_failure: &'static str,
-    pub on_settings_error: OnSettingsError,
     pub clear_cached_usage: bool,
     pub timing: Timing,
 }
 
 pub(crate) struct Committed<T> {
     pub value: T,
-    /// False when the store succeeded but the settings could not follow it.
-    pub settings_saved: bool,
+    /// False when the store succeeded but the settings or cached usage could not follow it. The
+    /// change is not undone: the command reports it as a warning.
+    pub completed: bool,
     /// The refresh, when it runs in the background.
     #[cfg_attr(not(test), allow(dead_code))]
     pub background: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 /// Stores a credential change and brings settings, cached usage and the app in line with it.
+///
+/// Only a failed store fails the change. Once the credential is stored, a step that cannot follow
+/// is logged and reported through [`Committed::completed`], and the rest still runs.
 ///
 /// The store step runs under the credential lock; the settings change runs under the command lock
 /// too. Both are released before the refresh, which runs when the provider is enabled after the
@@ -110,21 +105,27 @@ where
 
     let command_guard = settings.lock_command_mutation().await;
     let change = plan(&value, &settings.get());
-    let settings_saved = match change_settings(app.as_ref(), provider_id, change).await {
-        Ok(()) => true,
-        Err(error) if policy.on_settings_error == OnSettingsError::Warn => {
-            crate::app_warn!(
-                "auth",
-                "provider state after {} could not be reconciled for {provider_id}: {error}",
-                policy.action
-            );
-            false
-        }
-        Err(error) => return Err(error),
-    };
+    let mut completed = true;
+    if let Err(error) = change_settings(app.as_ref(), provider_id, change).await {
+        crate::app_warn!(
+            "auth",
+            "provider state after {} could not be reconciled for {provider_id}: {error}",
+            policy.action
+        );
+        completed = false;
+    }
     if policy.clear_cached_usage {
-        app.clear_cached_usage(provider_id)?;
-        app.usage_changed();
+        match app.clear_cached_usage(provider_id) {
+            Ok(()) => app.usage_changed(),
+            Err(error) => {
+                crate::app_warn!(
+                    "auth",
+                    "cached usage after {} could not be cleared for {provider_id}: {error}",
+                    policy.action
+                );
+                completed = false;
+            }
+        }
     }
     let enabled = settings
         .get()
@@ -148,7 +149,7 @@ where
     }
     Ok(Committed {
         value,
-        settings_saved,
+        completed,
         background,
     })
 }
@@ -305,6 +306,7 @@ mod tests {
     struct Recorder {
         settings: SettingsService,
         events: Mutex<Vec<Event>>,
+        fail_clear: Mutex<bool>,
     }
 
     impl Recorder {
@@ -327,6 +329,9 @@ mod tests {
         }
 
         fn clear_cached_usage(&self, _: &str) -> Result<(), String> {
+            if *self.fail_clear.lock().unwrap() {
+                return Err("The cache is unavailable.".to_owned());
+            }
             self.push(Cleared);
             Ok(())
         }
@@ -356,6 +361,7 @@ mod tests {
         let recorder = Recorder {
             settings,
             events: Mutex::new(Vec::new()),
+            fail_clear: Mutex::new(false),
         };
         (std::sync::Arc::new(recorder), directory)
     }
@@ -381,7 +387,7 @@ mod tests {
             if let Some(background) = committed.background {
                 background.await.unwrap();
             }
-            Ok(committed.settings_saved)
+            Ok(committed.completed)
         });
         let events = app.events.lock().unwrap().clone();
         let enabled_after = app.settings.get().providers[0].enabled;
@@ -473,26 +479,74 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_error_warns_for_api_keys_and_fails_sub2api_changes() {
+    fn a_change_whose_settings_cannot_follow_still_finishes_and_reports_it() {
         // No settings exist for an unknown provider, so the settings cannot follow the store.
         // Nothing is enabled, so nothing is refreshed.
-        for policy in [SAVE_API_KEY, DELETE_API_KEY] {
-            let (result, events, _) = run(policy, "unknown", true, || reconcile(true, true));
-            assert_eq!(result, Ok(false), "{}", policy.action);
-            assert_eq!(events, [Finish], "{}", policy.action);
-        }
-        for (policy, change) in [
+        let cases: [Case; 5] = [
             (
-                SAVE_SUB2API,
-                (|| reconcile(true, true)) as fn() -> SettingsChange,
+                "save key",
+                SAVE_API_KEY,
+                true,
+                || reconcile(true, true),
+                &[Finish],
             ),
-            (CLEAR_SUB2API, || reconcile(false, true)),
-            (DELETE_SUB2API, || SettingsChange::Remove),
-        ] {
-            let (result, events, _) = run(policy, "unknown", true, change);
-            assert!(result.is_err(), "{}", policy.action);
-            assert_eq!(events, [], "{}", policy.action);
+            (
+                "delete key",
+                DELETE_API_KEY,
+                true,
+                || reconcile(false, false),
+                &[Finish],
+            ),
+            (
+                "save Sub2API",
+                SAVE_SUB2API,
+                true,
+                || reconcile(true, true),
+                &[Cleared, Usage, Finish],
+            ),
+            (
+                "clear Sub2API",
+                CLEAR_SUB2API,
+                true,
+                || reconcile(false, true),
+                &[Cleared, Usage, Finish],
+            ),
+            (
+                "delete Sub2API",
+                DELETE_SUB2API,
+                true,
+                || SettingsChange::Remove,
+                &[Cleared, Usage, Finish],
+            ),
+        ];
+        for (name, policy, enabled, change, expected) in cases {
+            let (result, events, _) = run(policy, "unknown", enabled, change);
+            assert_eq!(result, Ok(false), "{name}");
+            assert_eq!(events, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn a_change_whose_cached_usage_cannot_be_cleared_still_refreshes_and_reports_it() {
+        let (app, _directory) = recorder(true);
+        *app.fail_clear.lock().unwrap() = true;
+        let completed = tauri::async_runtime::block_on(async {
+            let committed = commit(
+                &app,
+                "codex",
+                CLEAR_SUB2API,
+                || Ok(()),
+                |_, _| reconcile(false, true),
+            )
+            .await
+            .unwrap();
+            committed.completed
+        });
+        assert!(!completed);
+        assert_eq!(
+            *app.events.lock().unwrap(),
+            [Settings, Refresh, Usage, Finish]
+        );
     }
 
     #[test]

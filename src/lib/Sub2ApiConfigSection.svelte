@@ -22,6 +22,7 @@
   } from './sub2ApiUpstreams';
   import type {
     Sub2ApiMode,
+    Sub2ApiConfigOutcome,
     Sub2ApiConfigState,
     Sub2ApiConfigInput,
     Sub2ApiUpstream,
@@ -29,7 +30,8 @@
 
   interface Props {
     providerId: string;
-    onRemove?: () => void;
+    /** Called once the item is removed, with a warning when provider status could not follow. */
+    onRemove?: (warning?: string) => void;
     children?: Snippet;
   }
 
@@ -87,6 +89,14 @@
   let confirmingClear = $state(false);
   let confirmingItemRemoval = $state(false);
   let error = $state<string | null>(null);
+  /** Set when a change was stored but provider status could not follow it. */
+  let notice = $state<string | null>(null);
+
+  /** Keeps a change's warning apart from the connection it describes. */
+  function accept({ warning, ...state }: Sub2ApiConfigOutcome) {
+    notice = warning ?? null;
+    return state;
+  }
   let providerError = $state<string | null>(null);
   let resolvingProvider = $state(false);
   let providerResolution = 0;
@@ -338,6 +348,7 @@
     };
     saving = true;
     error = null;
+    notice = null;
     connectionState = optimisticState;
     syncRememberedEndpoint(optimisticState);
     resetEditor(optimisticState);
@@ -345,7 +356,7 @@
     await tick();
     toggleButton?.focus();
     try {
-      connectionState = await saveSub2ApiConfig(providerId, submitted);
+      connectionState = accept(await saveSub2ApiConfig(providerId, submitted));
       syncRememberedEndpoint(connectionState);
       resetEditor(connectionState);
     } catch (cause) {
@@ -374,8 +385,9 @@
     if (saving) return;
     saving = true;
     error = null;
+    notice = null;
     try {
-      connectionState = await clearSub2ApiConfig(providerId);
+      connectionState = accept(await clearSub2ApiConfig(providerId));
       syncRememberedEndpoint(connectionState);
       resetEditor(connectionState);
       await tick();
@@ -391,13 +403,15 @@
     if (saving) return;
     saving = true;
     error = null;
+    notice = null;
     try {
-      connectionState = await deleteSub2ApiConfig(providerId);
+      connectionState = accept(await deleteSub2ApiConfig(providerId));
       forgetSub2ApiEndpoint(providerId);
       resetEditor(connectionState);
       confirmingItemRemoval = false;
       open = false;
-      onRemove();
+      // The removed item's section usually closes, so the warning goes to whoever shows the next screen.
+      onRemove(notice ?? undefined);
     } catch (cause) {
       error = errorMessage(cause, 'The Sub2API item could not be removed.');
     } finally {
@@ -487,6 +501,8 @@
 
       {#if !open && error}
         <div class="config-error summary-error" role="alert">{error}</div>
+      {:else if !open && notice}
+        <div class="config-note summary-error" role="status">{notice}</div>
       {/if}
       {#if open}
         <div class="sub2api-config-editor">
@@ -695,7 +711,8 @@
               </div>
             </div>
           {/if}
-          {#if error}<div class="config-error" role="alert">{error}</div>{/if}
+          {#if error}<div class="config-error" role="alert">{error}</div>
+          {:else if notice}<div class="config-note" role="status">{notice}</div>{/if}
         </div>
       {/if}
     </div>

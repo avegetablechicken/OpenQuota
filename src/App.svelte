@@ -1121,7 +1121,10 @@
                 onNameChange={saveSettings}
                 onReorderStart={beginCustomizationGesture}
                 onReorderEnd={endCustomizationGesture}
-                onProviderRemoved={() => navigate('customize')}
+                onProviderRemoved={(warning) => {
+                  navigate('customize');
+                  if (warning) settingsError = warning;
+                }}
                 onContentMorph={beginContentMorph}
                 {reducedMotion}
               />

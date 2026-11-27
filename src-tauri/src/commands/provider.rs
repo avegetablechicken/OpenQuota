@@ -6,14 +6,15 @@ use zeroize::Zeroizing;
 
 use crate::{
     commands::credential_change::{
-        self, OnSettingsError, Policy, SettingsChange, TauriApp, TemplateHandoff, Timing,
+        self, Policy, SettingsChange, TauriApp, TemplateHandoff, Timing,
     },
     models::{ApiKeyMutationOutcome, ApiKeyStatus, ProviderApiKeyState, ProviderLink},
     pacing::NotificationEvaluator,
     providers::{
         sub2api::{
             claude_provider_base_url, codex_provider_base_url, metric_template, track_provider_id,
-            Sub2ApiConfigInput, Sub2ApiConfigSaveOutcome, Sub2ApiConfigState, Sub2ApiProviders,
+            Sub2ApiConfigInput, Sub2ApiConfigOutcome, Sub2ApiConfigSaveOutcome, Sub2ApiConfigState,
+            Sub2ApiProviders,
         },
         ProviderRegistry, UsageProvider,
     },
@@ -147,6 +148,21 @@ fn incomplete_mutation_warning(action: &str) -> String {
     )
 }
 
+fn sub2api_outcome(
+    state: Sub2ApiConfigState,
+    completed: bool,
+    action: &str,
+) -> Sub2ApiConfigOutcome {
+    Sub2ApiConfigOutcome {
+        state,
+        warning: (!completed).then(|| {
+            format!(
+                "The Sub2API connection was {action}, but OpenQuota could not finish updating provider status. Restart OpenQuota or try again."
+            )
+        }),
+    }
+}
+
 #[tauri::command]
 pub async fn get_provider_api_key_state(
     registry: State<'_, Arc<ProviderRegistry>>,
@@ -158,7 +174,6 @@ pub async fn get_provider_api_key_state(
 pub(crate) const SAVE_API_KEY: Policy = Policy {
     action: "API key save",
     store_failure: "The API key could not be saved.",
-    on_settings_error: OnSettingsError::Warn,
     clear_cached_usage: false,
     timing: Timing::Wait,
 };
@@ -166,7 +181,6 @@ pub(crate) const SAVE_API_KEY: Policy = Policy {
 pub(crate) const DELETE_API_KEY: Policy = Policy {
     action: "API key removal",
     store_failure: "The API key could not be removed.",
-    on_settings_error: OnSettingsError::Warn,
     clear_cached_usage: false,
     timing: Timing::Wait,
 };
@@ -174,7 +188,6 @@ pub(crate) const DELETE_API_KEY: Policy = Policy {
 pub(crate) const SAVE_SUB2API: Policy = Policy {
     action: "Sub2API save",
     store_failure: "The Sub2API connection could not be saved.",
-    on_settings_error: OnSettingsError::Fail,
     clear_cached_usage: true,
     timing: Timing::Background,
 };
@@ -182,7 +195,6 @@ pub(crate) const SAVE_SUB2API: Policy = Policy {
 pub(crate) const CLEAR_SUB2API: Policy = Policy {
     action: "Sub2API clear",
     store_failure: "The Sub2API connection could not be cleared.",
-    on_settings_error: OnSettingsError::Fail,
     clear_cached_usage: true,
     timing: Timing::Wait,
 };
@@ -190,7 +202,6 @@ pub(crate) const CLEAR_SUB2API: Policy = Policy {
 pub(crate) const DELETE_SUB2API: Policy = Policy {
     action: "Sub2API removal",
     store_failure: "The Sub2API connection could not be removed.",
-    on_settings_error: OnSettingsError::Fail,
     clear_cached_usage: true,
     timing: Timing::Wait,
 };
@@ -239,7 +250,7 @@ pub async fn save_provider_api_key(
     crate::app_info!("auth", "API key saved for {provider_id}");
     Ok(ApiKeyMutationOutcome {
         state: applied.state,
-        warning: (applied.status_uncertain || !committed.settings_saved)
+        warning: (applied.status_uncertain || !committed.completed)
             .then(|| incomplete_mutation_warning("saved securely")),
     })
 }
@@ -286,7 +297,7 @@ pub async fn delete_provider_api_key(
     crate::app_info!("auth", "saved API key removed for {provider_id}");
     Ok(ApiKeyMutationOutcome {
         state: applied.state,
-        warning: (applied.status_uncertain || !committed.settings_saved)
+        warning: (applied.status_uncertain || !committed.completed)
             .then(|| incomplete_mutation_warning("removed")),
     })
 }
@@ -330,7 +341,7 @@ pub async fn save_sub2api_config(
     notifications: State<'_, Arc<NotificationEvaluator>>,
     provider_id: String,
     config: Sub2ApiConfigInput,
-) -> Result<Sub2ApiConfigState, String> {
+) -> Result<Sub2ApiConfigOutcome, String> {
     let provider = providers
         .provider(&provider_id)
         .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
@@ -381,7 +392,11 @@ pub async fn save_sub2api_config(
     )
     .await?;
     crate::app_info!("auth", "Sub2API connection saved");
-    Ok(committed.value.state)
+    Ok(sub2api_outcome(
+        committed.value.state,
+        committed.completed,
+        "saved",
+    ))
 }
 
 #[tauri::command]
@@ -392,7 +407,7 @@ pub async fn clear_sub2api_config(
     settings: State<'_, Arc<SettingsService>>,
     notifications: State<'_, Arc<NotificationEvaluator>>,
     provider_id: String,
-) -> Result<Sub2ApiConfigState, String> {
+) -> Result<Sub2ApiConfigOutcome, String> {
     let provider = providers
         .provider(&provider_id)
         .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
@@ -410,7 +425,11 @@ pub async fn clear_sub2api_config(
     )
     .await?;
     crate::app_info!("auth", "Sub2API connection cleared");
-    Ok(committed.value)
+    Ok(sub2api_outcome(
+        committed.value,
+        committed.completed,
+        "cleared",
+    ))
 }
 
 #[tauri::command]
@@ -421,7 +440,7 @@ pub async fn delete_sub2api_config(
     settings: State<'_, Arc<SettingsService>>,
     notifications: State<'_, Arc<NotificationEvaluator>>,
     provider_id: String,
-) -> Result<Sub2ApiConfigState, String> {
+) -> Result<Sub2ApiConfigOutcome, String> {
     let provider = providers
         .provider(&provider_id)
         .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
@@ -435,7 +454,11 @@ pub async fn delete_sub2api_config(
     )
     .await?;
     crate::app_info!("auth", "Sub2API connection removed");
-    Ok(committed.value)
+    Ok(sub2api_outcome(
+        committed.value,
+        committed.completed,
+        "removed",
+    ))
 }
 
 #[cfg(test)]

@@ -499,6 +499,17 @@ pub struct Sub2ApiConfigState {
     pub upstream: Sub2ApiUpstream,
 }
 
+/// A saved, cleared or removed connection, and a warning when OpenQuota could not finish
+/// bringing provider status in line with it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Sub2ApiConfigOutcome {
+    #[serde(flatten)]
+    pub state: Sub2ApiConfigState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Sub2ApiUpstream {

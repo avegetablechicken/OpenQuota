@@ -9,6 +9,7 @@ import type {
   ResetClaimOutcome,
   SettingsViewState,
   Sub2ApiConfigInput,
+  Sub2ApiConfigOutcome,
   Sub2ApiConfigState,
   UpdateProgress,
   UpdateStatus,
@@ -73,15 +74,15 @@ export function resolveSub2ApiClaudeProvider(provider: string) {
 }
 
 export function saveSub2ApiConfig(providerId: string, config: Sub2ApiConfigInput) {
-  return invoke<Sub2ApiConfigState>('save_sub2api_config', { providerId, config });
+  return invoke<Sub2ApiConfigOutcome>('save_sub2api_config', { providerId, config });
 }
 
 export function clearSub2ApiConfig(providerId: string) {
-  return invoke<Sub2ApiConfigState>('clear_sub2api_config', { providerId });
+  return invoke<Sub2ApiConfigOutcome>('clear_sub2api_config', { providerId });
 }
 
 export function deleteSub2ApiConfig(providerId: string) {
-  return invoke<Sub2ApiConfigState>('delete_sub2api_config', { providerId });
+  return invoke<Sub2ApiConfigOutcome>('delete_sub2api_config', { providerId });
 }
 
 export function getAppSettings() {

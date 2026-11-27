@@ -30,7 +30,7 @@
     onNameChange: (settings: AppSettings) => void;
     onReorderStart: () => void;
     onReorderEnd: (moved: boolean, cancelled?: boolean) => void;
-    onProviderRemoved?: () => void;
+    onProviderRemoved?: (warning?: string) => void;
     onContentMorph?: () => void;
     reducedMotion: boolean;
   }

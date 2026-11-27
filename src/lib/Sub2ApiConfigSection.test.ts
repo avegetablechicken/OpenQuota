@@ -976,6 +976,44 @@ describe('Sub2ApiConfigSection', () => {
     expect(statusDot()).toHaveClass('missing');
   });
 
+  it('shows a cleared connection whose provider status could not follow, with a warning', async () => {
+    const warning =
+      'The Sub2API connection was cleared, but OpenQuota could not finish updating provider status. Restart OpenQuota or try again.';
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === 'get_sub2api_config_state') {
+        return Promise.resolve({
+          configured: true,
+          baseUrl: 'https://sub2api.example.com',
+          codexProvider: '',
+          customBaseUrl: true,
+          email: 'admin@example.com',
+          upstream: 'codex',
+        });
+      }
+      if (command === 'clear_sub2api_config') {
+        return Promise.resolve({
+          configured: false,
+          baseUrl: '',
+          codexProvider: '',
+          customBaseUrl: false,
+          email: '',
+          upstream: 'codex',
+          warning,
+        });
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`));
+    });
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@2' });
+    await screen.findByText('admin@example.com');
+    await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear connection' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+
+    expect(await screen.findByText(warning)).toHaveAttribute('role', 'status');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(statusDot()).toHaveClass('missing');
+  });
+
   it('deletes an item from the separate bottom action row', async () => {
     const onRemove = vi.fn();
     render(Sub2ApiConfigSection, { providerId: 'sub2api@3', onRemove });
@@ -993,6 +1031,33 @@ describe('Sub2ApiConfigSection', () => {
       }),
     );
     expect(onRemove).toHaveBeenCalledOnce();
+    expect(onRemove).toHaveBeenCalledWith(undefined);
+  });
+
+  it('hands a removal warning to the next screen', async () => {
+    const warning =
+      'The Sub2API connection was removed, but OpenQuota could not finish updating provider status. Restart OpenQuota or try again.';
+    const defaultInvoke = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) =>
+      command === 'delete_sub2api_config'
+        ? Promise.resolve({
+            configured: false,
+            baseUrl: '',
+            codexProvider: '',
+            customBaseUrl: false,
+            email: '',
+            upstream: 'codex',
+            warning,
+          })
+        : defaultInvoke(command, args),
+    );
+    const onRemove = vi.fn();
+    render(Sub2ApiConfigSection, { providerId: 'sub2api@3', onRemove });
+    await screen.findByRole('region', { name: 'Connection' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete Account' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => expect(onRemove).toHaveBeenCalledWith(warning));
   });
 
   it('disables Upstream and Track selectors while saving and re-enables on settle', async () => {
