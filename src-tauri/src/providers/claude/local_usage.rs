@@ -1079,12 +1079,15 @@ mod tests {
     /// Pins the output of claude's per-event policy, so moving it into `card_usage` cannot
     /// change what any Card shows. Dates are rewritten as `today-N` to stay timezone-neutral.
     mod characterization {
-        use chrono::{DateTime, Days, Duration, Local, TimeZone, Utc};
+        use chrono::{DateTime, Duration, TimeZone, Utc};
 
         use super::super::{aggregate, aggregate_routed_into, ClaudeTokenEvent};
         use crate::{
-            models::UsageHistory, pricing::test_bundled_pricing,
-            providers::daily_usage::DailyUsageAccumulator,
+            pricing::test_bundled_pricing,
+            providers::{
+                card_usage::test_support::{assert_pinned, relative_json},
+                daily_usage::DailyUsageAccumulator,
+            },
         };
 
         fn now() -> DateTime<Utc> {
@@ -1154,16 +1157,6 @@ mod tests {
             ]
         }
 
-        fn relative_json(history: &UsageHistory) -> String {
-            let mut json = serde_json::to_string_pretty(history).unwrap();
-            let today = now().with_timezone(&Local).date_naive();
-            for offset in 0..=40 {
-                let date = today.checked_sub_days(Days::new(offset)).unwrap();
-                json = json.replace(&format!("\"{date}\""), &format!("\"today-{offset}\""));
-            }
-            json
-        }
-
         fn routed(card_id: &str, events: &[ClaudeTokenEvent]) -> (bool, String) {
             let mut accumulator = DailyUsageAccumulator::default();
             let contributed = aggregate_routed_into(
@@ -1175,20 +1168,14 @@ mod tests {
             );
             (
                 contributed,
-                relative_json(&accumulator.build(now(), "test")),
+                relative_json(&accumulator.build(now(), "test"), now()),
             )
-        }
-
-        fn assert_pinned(name: &str, actual: &str, expected: &str) {
-            if actual.trim() != expected.trim() {
-                panic!("{name} changed. Actual output:\n{actual}");
-            }
         }
 
         #[test]
         fn native_card_output_is_pinned() {
             let history = aggregate(&events(), now(), &test_bundled_pricing());
-            assert_pinned("native", &relative_json(&history), NATIVE);
+            assert_pinned("native", &relative_json(&history, now()), NATIVE);
         }
 
         #[test]
@@ -1211,7 +1198,7 @@ mod tests {
             );
             assert_pinned(
                 "native today-30",
-                &relative_json(&native),
+                &relative_json(&native, now()),
                 NATIVE_TODAY_MINUS_30,
             );
             let (contributed, _) = routed("codex", &[event(30, Some("gpt-5.5"), 100, 10, None)]);

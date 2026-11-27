@@ -12,19 +12,19 @@ use walkdir::WalkDir;
 
 use crate::{
     models::UsageHistory,
-    pricing::{ModelPricing, ModelRates, ServiceTier, TokenBreakdown},
+    pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     storage::Storage,
 };
 
 use super::CodexError;
 use crate::providers::{
-    antigravity, claude,
+    antigravity,
+    card_usage::{self, PriceSource, TransitionalPolicy, UsageObservation},
+    claude,
     daily_usage::DailyUsageAccumulator,
     gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo, LogCacheError},
-    model_scope::{
-        card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
-    },
+    model_scope::format_source_note,
     opencode, pi_usage,
     zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
@@ -680,58 +680,18 @@ fn aggregate_into(
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
 ) {
-    let today = now.with_timezone(&Local).date_naive();
-    let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
-    let mut seen = HashSet::new();
-
-    for event in events {
-        let key = (
-            event.timestamp,
-            event.model.clone(),
-            event.input,
-            event.cached,
-            event.output,
-            event.reasoning,
-            event.total,
-            event.chatgpt_plan,
-            event.tier,
-            event.cache_write,
-            event.cache_write_12h,
-        );
-        if !seen.insert(key) {
-            continue;
-        }
-        let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since || event.timestamp > now {
-            continue;
-        }
-        let model = event.model.trim();
-        if model.is_empty() {
-            if event.total > 0 {
-                accumulator.add_unpriced(date, event.total, "Unattributed");
-            }
-            continue;
-        }
-        match native_log_disposition("codex", model) {
-            LocalModelDisposition::Home => {}
-            LocalModelDisposition::RoutedTo(_) => continue,
-            LocalModelDisposition::Other => {
-                accumulator.add_other(
-                    date,
-                    event.total,
-                    estimate_cost(event, pricing),
-                    true,
-                    model,
-                );
-                continue;
-            }
-        }
-        if let Some(cost) = estimate_cost(event, pricing) {
-            accumulator.add(date, event.total, cost, model);
-        } else if event.total > 0 || model.eq_ignore_ascii_case("codex-auto-review") {
-            accumulator.add_unpriced(date, event.total, model);
-        }
-    }
+    card_usage::record(
+        unique(events).map(observation),
+        "codex",
+        "codex",
+        now,
+        pricing,
+        TransitionalPolicy {
+            window_start_days_ago: 30,
+            zero_token_guard: false,
+        },
+        accumulator,
+    );
 }
 
 fn aggregate_routed_into(
@@ -741,15 +701,27 @@ fn aggregate_routed_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
-    let today = now.with_timezone(&Local).date_naive();
-    let since = today.checked_sub_days(Days::new(29)).unwrap_or(today);
-    let mut seen = HashSet::new();
-    let mut contributed = false;
+    card_usage::record(
+        unique(events).map(observation),
+        "codex",
+        card_id,
+        now,
+        pricing,
+        TransitionalPolicy {
+            window_start_days_ago: 29,
+            zero_token_guard: true,
+        },
+        accumulator,
+    )
+}
 
-    for event in events {
-        let key = (
+/// Skips events Codex wrote more than once, keeping the first.
+fn unique(events: &[TokenEvent]) -> impl Iterator<Item = &TokenEvent> {
+    let mut seen = HashSet::new();
+    events.iter().filter(move |event| {
+        seen.insert((
             event.timestamp,
-            event.model.clone(),
+            event.model.as_str(),
             event.input,
             event.cached,
             event.output,
@@ -759,101 +731,33 @@ fn aggregate_routed_into(
             event.tier,
             event.cache_write,
             event.cache_write_12h,
-        );
-        if !seen.insert(key) {
-            continue;
-        }
-        let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since || event.timestamp > now {
-            continue;
-        }
-        let model = event.model.trim();
-        if model.is_empty() || card_for_model(model) != Some(card_id) {
-            continue;
-        }
-        let tokens = TokenBreakdown {
-            is_fast: event.tier == ServiceTier::Fast,
-            ..event.pricing_tokens()
-        };
-        let cost = if event.tier == ServiceTier::Unknown {
-            None
-        } else if let Some(rates) = pricing.historical_rates(
-            card_id,
-            model,
-            event.timestamp,
-            event.tier,
-            tokens.prompt_tokens(),
-        ) {
-            rates.map(|rates| rates.cost_dollars(tokens, true))
-        } else if matches!(event.tier, ServiceTier::Standard | ServiceTier::Fast) {
-            pricing.estimated_cost_dollars(model, tokens, true)
-        } else {
-            None
-        };
-        if let Some(cost) = cost {
-            if event.total > 0 || cost > 0.0 {
-                accumulator.add(date, event.total, cost, model);
-                contributed = true;
-            }
-        } else if event.total > 0 {
-            accumulator.add_unpriced(date, event.total, model);
-            contributed = true;
-        }
-    }
-    contributed
+        ))
+    })
 }
 
+fn observation(event: &TokenEvent) -> UsageObservation<'_> {
+    UsageObservation {
+        total_tokens: event.total,
+        tier: event.tier,
+        keep_when_empty: event.model.trim().eq_ignore_ascii_case("codex-auto-review"),
+        price_source: PriceSource::CodexLogs {
+            chatgpt_plan: event.chatgpt_plan,
+        },
+        ..UsageObservation::new(
+            event.timestamp,
+            Some(&event.model),
+            TokenBreakdown {
+                is_fast: event.tier == ServiceTier::Fast,
+                ..event.pricing_tokens()
+            },
+            None,
+        )
+    }
+}
+
+#[cfg(test)]
 fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
-    let display_model = event.model.trim();
-    if display_model.is_empty() {
-        return None;
-    }
-    let normalized_model = display_model.to_ascii_lowercase();
-    let model = normalized_model.as_str();
-    if model == "codex-auto-review" {
-        if !event.chatgpt_plan {
-            return None;
-        }
-        let tokens = event.pricing_tokens();
-        return pricing
-            .historical_rates(
-                "codex-chatgpt",
-                model,
-                event.timestamp,
-                ServiceTier::Standard,
-                tokens.prompt_tokens(),
-            )?
-            .map(|rates| rates.cost_dollars(tokens, true));
-    }
-    if event.tier == ServiceTier::Unknown {
-        return None;
-    }
-    let tokens = event.pricing_tokens();
-    if let Some(rates) = pricing.historical_rates(
-        "codex",
-        model,
-        event.timestamp,
-        event.tier,
-        tokens.prompt_tokens(),
-    ) {
-        return Some(rates?.cost_dollars(tokens, true));
-    }
-    if !matches!(event.tier, ServiceTier::Standard | ServiceTier::Fast) {
-        return None;
-    }
-    let canonical = pricing.supplement.canonical_name(model).unwrap_or(model);
-    let fast_base = canonical
-        .strip_suffix("-fast")
-        .filter(|base| !base.is_empty());
-    let rate_model = fast_base.unwrap_or(canonical);
-    let base_rates = pricing.resolve(rate_model);
-    let rates = base_rates.or_else(|| pricing.resolve(model))?;
-    let applies_fast_tier = if fast_base.is_some() {
-        base_rates.is_some()
-    } else {
-        event.tier == ServiceTier::Fast
-    };
-    Some(codex_cost(rates, event, rate_model, applies_fast_tier))
+    card_usage::estimate_on_home_card(pricing, "codex", &observation(event))
 }
 
 impl TokenEvent {
@@ -872,76 +776,6 @@ impl TokenEvent {
     }
 }
 
-fn codex_cost(mut rates: ModelRates, event: &TokenEvent, model: &str, fast_tier: bool) -> f64 {
-    if let Some((input, output, cache_read)) = codex_long_context_rates(model) {
-        rates.input_above_200k_per_million = Some(input);
-        rates.output_above_200k_per_million = Some(output);
-        rates.cache_read_above_200k_per_million = Some(cache_read);
-        rates.long_context_threshold_tokens = 272_000;
-    }
-    if codex_model_has_no_cache_discount(model) || !rates.cache_read_is_explicit {
-        rates.cache_read_per_million = rates.input_per_million;
-        rates.cache_read_above_200k_per_million = rates.input_above_200k_per_million;
-    }
-    rates.fast_multiplier = codex_priority_multiplier(model, rates);
-    rates.cost_dollars(
-        TokenBreakdown {
-            is_fast: fast_tier,
-            ..event.pricing_tokens()
-        },
-        true,
-    )
-}
-
-fn codex_priority_multiplier(model: &str, rates: ModelRates) -> f64 {
-    match dated_base_model(model) {
-        "gpt-5.5" | "gpt-5.5-pro" => 2.5,
-        "gpt-5.4" | "gpt-5.4-pro" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => 2.0,
-        _ if rates.fast_multiplier == 1.0 => 2.0,
-        _ => rates.fast_multiplier,
-    }
-}
-
-fn codex_model_has_no_cache_discount(model: &str) -> bool {
-    matches!(dated_base_model(model), "gpt-5.4-pro" | "gpt-5.5-pro")
-}
-
-fn codex_long_context_rates(model: &str) -> Option<(f64, f64, f64)> {
-    match dated_base_model(model) {
-        "gpt-5.4" => Some((5.0, 22.5, 0.5)),
-        "gpt-5.4-pro" => Some((60.0, 270.0, 60.0)),
-        "gpt-5.5" => Some((10.0, 45.0, 1.0)),
-        "gpt-5.5-pro" => Some((60.0, 270.0, 60.0)),
-        "gpt-5.6-sol" => Some((10.0, 45.0, 1.0)),
-        "gpt-5.6-terra" => Some((4.0, 18.0, 0.4)),
-        "gpt-5.6-luna" => Some((0.4, 1.8, 0.04)),
-        _ => None,
-    }
-}
-
-fn dated_base_model(model: &str) -> &str {
-    let bytes = model.as_bytes();
-    if bytes.len() >= 11 {
-        let suffix = &bytes[bytes.len() - 11..];
-        if suffix[0] == b'-'
-            && suffix[1..5].iter().all(u8::is_ascii_digit)
-            && suffix[5] == b'-'
-            && suffix[6..8].iter().all(u8::is_ascii_digit)
-            && suffix[8] == b'-'
-            && suffix[9..11].iter().all(u8::is_ascii_digit)
-        {
-            return &model[..model.len() - 11];
-        }
-    }
-    if bytes.len() >= 9 {
-        let suffix = &bytes[bytes.len() - 9..];
-        if suffix[0] == b'-' && suffix[1..].iter().all(u8::is_ascii_digit) {
-            return &model[..model.len() - 9];
-        }
-    }
-    model
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, fs, io, path::Path};
@@ -950,14 +784,14 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        aggregate, codex_homes, codex_long_context_rates, codex_priority_multiplier,
-        discover_session_files, estimate_cost, parse_jsonl, scan_codex_events, ServiceTier,
-        TokenEvent,
+        aggregate, codex_homes, discover_session_files, estimate_cost, parse_jsonl,
+        scan_codex_events, ServiceTier, TokenEvent,
     };
     use crate::{
         pricing::{
             test_bundled_pricing, ModelPricing, ModelRates, PricingCatalog, PricingSupplement,
         },
+        providers::card_usage::codex::{codex_long_context_rates, codex_priority_multiplier},
         providers::log_usage::LogFileFingerprint,
         providers::model_scope::model_belongs_to_card,
         storage::Storage,
@@ -1727,5 +1561,519 @@ mod tests {
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(0.6));
+    }
+
+    /// Pins the output of codex's per-event policy, so moving it into `card_usage` cannot change
+    /// what any Card shows.
+    mod characterization {
+        use chrono::{DateTime, Duration, TimeZone, Utc};
+
+        use super::super::{aggregate, aggregate_routed_into, ServiceTier, TokenEvent};
+        use crate::{
+            pricing::test_bundled_pricing,
+            providers::{
+                card_usage::test_support::{assert_pinned, relative_json},
+                daily_usage::DailyUsageAccumulator,
+            },
+        };
+
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap()
+        }
+
+        fn event(
+            days_ago: i64,
+            model: &str,
+            input: u64,
+            output: u64,
+            tier: ServiceTier,
+        ) -> TokenEvent {
+            TokenEvent {
+                timestamp: now() - Duration::days(days_ago),
+                model: model.to_owned(),
+                input,
+                cached: 0,
+                output,
+                reasoning: 0,
+                total: input + output,
+                tier,
+                chatgpt_plan: false,
+                cache_write: 0,
+                cache_write_12h: 0,
+            }
+        }
+
+        fn events() -> Vec<TokenEvent> {
+            use ServiceTier::{Fast, Flex, Standard, UltraFast, Unknown};
+            let mut cached = event(0, "gpt-5.5", 10_000, 500, Standard);
+            cached.cached = 6_000;
+            cached.cache_write = 2_000;
+            cached.cache_write_12h = 500;
+            cached.reasoning = 300;
+            cached.total = 10_800;
+            let mut long_context = event(1, "gpt-5.5", 300_000, 2_000, Standard);
+            long_context.cached = 100_000;
+            let mut plan_review = event(2, "codex-auto-review", 1_000, 100, Standard);
+            plan_review.chatgpt_plan = true;
+            let mut empty_review = event(2, "codex-auto-review", 0, 0, Standard);
+            empty_review.total = 0;
+            let mut zero_total = event(5, "gpt-5.5", 0, 0, Standard);
+            zero_total.total = 0;
+            let mut routed_zero_total = event(5, "claude-sonnet-4-5", 1_000, 0, Standard);
+            routed_zero_total.total = 0;
+            let mut future = event(0, "gpt-5.5", 9_999, 9_999, Standard);
+            future.timestamp = now() + Duration::hours(1);
+            let duplicate = event(0, "gpt-5.4", 1_200, 120, Standard);
+            vec![
+                // Home models across tiers, cache splits and long context.
+                cached,
+                event(0, "gpt-5.5", 2_000, 200, Fast),
+                event(0, "gpt-5.5", 2_000, 200, UltraFast),
+                event(0, "gpt-5.5", 2_000, 200, Flex),
+                event(0, "gpt-5.5", 2_000, 200, Unknown),
+                event(1, "gpt-5.5-fast", 1_000, 100, Standard),
+                event(1, "gpt-5.4-pro", 1_000, 100, Standard),
+                event(1, "gpt-5.3-codex", 1_000, 100, Fast),
+                event(1, "gpt-5.5-2026-04-23", 1_000, 100, Standard),
+                long_context,
+                duplicate.clone(),
+                duplicate,
+                // Auto-review with and without a ChatGPT plan, and an empty one kept for its label.
+                plan_review,
+                event(2, "codex-auto-review", 1_000, 100, Standard),
+                empty_review,
+                // A codex-family model without a price, and a missing model.
+                event(2, "gpt-9-unreleased", 700, 70, Standard),
+                event(2, "  ", 400, 40, Standard),
+                // Routed to other Cards, across tiers.
+                event(3, "claude-sonnet-4-5", 1_500, 150, Standard),
+                event(3, "claude-opus-4-6", 1_500, 150, Fast),
+                event(3, "claude-opus-4-6", 1_500, 150, Flex),
+                event(3, "claude-opus-4-6", 1_500, 150, Unknown),
+                event(3, "gemini-3-pro", 800, 80, Standard),
+                event(3, "glm-4.6", 600, 60, Standard),
+                event(3, "kimi-k2", 600, 60, Standard),
+                // Others: priced, unpriced, local runtime, and gpt-oss.
+                event(4, "deepseek-chat", 900, 90, Standard),
+                event(4, "totally-unknown-model", 50, 5, Standard),
+                event(4, "ollama/llama3", 50, 5, Standard),
+                event(4, "gpt-oss-120b", 500, 50, Fast),
+                // Zero reported totals: native has no guard on the priced path.
+                zero_total,
+                routed_zero_total,
+                // Window edges.
+                event(29, "gpt-5.5", 100, 10, Standard),
+                event(29, "claude-sonnet-4-5", 100, 10, Standard),
+                event(30, "gpt-5.5", 100, 10, Standard),
+                event(30, "claude-sonnet-4-5", 100, 10, Standard),
+                event(30, "deepseek-chat", 100, 10, Standard),
+                future,
+            ]
+        }
+
+        #[test]
+        fn native_card_output_is_pinned() {
+            let history = aggregate(&events(), now(), &test_bundled_pricing());
+            assert_pinned("native", &relative_json(&history, now()), NATIVE);
+        }
+
+        #[test]
+        fn routed_output_is_pinned_per_card() {
+            let actual = ["claude", "antigravity", "zai", "kimi", "grok", "minimax"]
+                .map(|card_id| {
+                    let mut accumulator = DailyUsageAccumulator::default();
+                    let contributed = aggregate_routed_into(
+                        &events(),
+                        now(),
+                        &test_bundled_pricing(),
+                        card_id,
+                        &mut accumulator,
+                    );
+                    let json = relative_json(&accumulator.build(now(), "test"), now());
+                    format!("== {card_id} contributed={contributed}\n{json}")
+                })
+                .join("\n");
+            assert_pinned("routed", &actual, ROUTED);
+        }
+
+        const NATIVE: &str = r#"
+{
+  "today": {
+    "tokens": 20920,
+    "estimatedCostUsd": 0.09455,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.4",
+          "totalTokens": 1320,
+          "costUsd": 0.0048
+        },
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 19600,
+          "costUsd": null
+        }
+      ],
+      "sourceNote": "From your Codex logs (estimated)"
+    },
+    "unknownModels": [
+      "gpt-5.5"
+    ]
+  },
+  "yesterday": {
+    "tokens": 306400,
+    "estimatedCostUsd": 2.2723,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 302000,
+          "costUsd": 2.19
+        },
+        {
+          "model": "Other",
+          "totalTokens": 4400,
+          "costUsd": 0.08230000000000001,
+          "variants": [
+            {
+              "model": "gpt-5.4-pro",
+              "totalTokens": 1100,
+              "costUsd": 0.048
+            },
+            {
+              "model": "gpt-5.5-fast",
+              "totalTokens": 1100,
+              "costUsd": 0.02
+            },
+            {
+              "model": "gpt-5.5-2026-04-23",
+              "totalTokens": 1100,
+              "costUsd": 0.008
+            },
+            {
+              "model": "gpt-5.3-codex",
+              "totalTokens": 1100,
+              "costUsd": 0.0063
+            }
+          ]
+        }
+      ],
+      "sourceNote": "From your Codex logs (estimated)"
+    },
+    "unknownModels": []
+  },
+  "last30Days": {
+    "tokens": 330840,
+    "estimatedCostUsd": 2.36765,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 321710,
+          "costUsd": null
+        },
+        {
+          "model": "Other",
+          "totalTokens": 9130,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "gpt-5.4-pro",
+              "totalTokens": 1100,
+              "costUsd": 0.048
+            },
+            {
+              "model": "gpt-5.5-fast",
+              "totalTokens": 1100,
+              "costUsd": 0.02
+            },
+            {
+              "model": "gpt-5.5-2026-04-23",
+              "totalTokens": 1100,
+              "costUsd": 0.008
+            },
+            {
+              "model": "gpt-5.3-codex",
+              "totalTokens": 1100,
+              "costUsd": 0.0063
+            },
+            {
+              "model": "gpt-5.4",
+              "totalTokens": 1320,
+              "costUsd": 0.0048
+            },
+            {
+              "model": "codex-auto-review",
+              "totalTokens": 2200,
+              "costUsd": null
+            },
+            {
+              "model": "gpt-9-unreleased",
+              "totalTokens": 770,
+              "costUsd": null
+            },
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "From your Codex logs (estimated)"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "codex-auto-review",
+      "gpt-5.5",
+      "gpt-9-unreleased"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 20920,
+      "estimatedCostUsd": 0.09455,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-1",
+      "tokens": 306400,
+      "estimatedCostUsd": 2.2723,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-2",
+      "tokens": 3410,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-5",
+      "tokens": 0,
+      "estimatedCostUsd": 0.0,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.0008,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed",
+    "codex-auto-review",
+    "gpt-5.5",
+    "gpt-9-unreleased"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 990,
+          "pricedTokens": 990,
+          "estimatedCostUsd": 0.0002898,
+          "costEstimated": true
+        },
+        "gpt-oss-120b": {
+          "tokens": 550,
+          "pricedTokens": 550,
+          "estimatedCostUsd": 0.00021,
+          "costEstimated": true
+        },
+        "ollama/llama3": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "totally-unknown-model": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        }
+      },
+      "tokens": 1650,
+      "pricedTokens": 1540,
+      "estimatedCostUsd": 0.0004998,
+      "costEstimated": true,
+      "estimateComplete": false
+    }
+  }
+}
+"#;
+        const ROUTED: &str = r#"
+== claude contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 6710,
+    "estimatedCostUsd": 0.021449999999999997,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1760,
+          "costUsd": 0.0102
+        },
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 4950,
+          "costUsd": null
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "claude-opus-4-6"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 6600,
+      "estimatedCostUsd": 0.018,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-5",
+      "tokens": 0,
+      "estimatedCostUsd": 0.003,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.00045,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "claude-opus-4-6"
+  ]
+}
+== antigravity contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 880,
+    "estimatedCostUsd": 0.00256,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro",
+          "totalTokens": 880,
+          "costUsd": 0.00256
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 880,
+      "estimatedCostUsd": 0.00256,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== zai contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.000384,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 660,
+          "costUsd": 0.000384
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.000384,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== kimi contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.00051,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "kimi-k2",
+          "totalTokens": 660,
+          "costUsd": 0.00051
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00051,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== grok contributed=false
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": []
+}
+== minimax contributed=false
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": []
+}
+"#;
     }
 }

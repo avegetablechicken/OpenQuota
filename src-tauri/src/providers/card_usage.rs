@@ -8,12 +8,14 @@
 
 use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
-use crate::pricing::{ModelPricing, TokenBreakdown};
+use crate::pricing::{ModelPricing, ServiceTier, TokenBreakdown};
 
 use super::{
     daily_usage::DailyUsageAccumulator,
     model_scope::{card_for_model, native_log_disposition, LocalModelDisposition},
 };
+
+pub(super) mod codex;
 
 /// One request's usage as read from a Home client's logs, before it is placed on any Card.
 #[derive(Debug, Clone, Copy)]
@@ -21,13 +23,33 @@ pub(super) struct UsageObservation<'a> {
     pub timestamp: DateTime<Utc>,
     /// Trimmed model name; `None` when the log has no usable name (Unattributed usage).
     pub model: Option<&'a str>,
+    /// Token breakdown used for pricing.
     pub tokens: TokenBreakdown,
+    /// Tokens counted on the Card. Usually the breakdown's total; some clients report their own.
+    pub total_tokens: u64,
+    pub tier: ServiceTier,
     /// Dollar cost the Home client wrote into its logs. A recorded $0 is still recorded.
     pub recorded_cost: Option<f64>,
+    /// Keep the observation even with no tokens and no cost, so its model's label stays visible.
+    pub keep_when_empty: bool,
+    /// How usage priced under its home Card is estimated.
+    pub price_source: PriceSource,
+}
+
+/// How an observation is estimated when it is priced under its home Card. Routed usage is
+/// always estimated from the receiving Card's rates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PriceSource {
+    /// The Card's rates for the observation's tier.
+    CardRates,
+    /// Codex's own logs: ChatGPT-plan auto-review rates and Codex's priority, long-context and
+    /// cache rules.
+    CodexLogs { chatgpt_plan: bool },
 }
 
 impl<'a> UsageObservation<'a> {
-    /// Trims `model` and treats an empty name as missing.
+    /// Trims `model` and treats an empty name as missing. Counts the breakdown's total, takes the
+    /// tier from `tokens.is_fast`, and prices from the Card's rates.
     pub fn new(
         timestamp: DateTime<Utc>,
         model: Option<&'a str>,
@@ -38,7 +60,15 @@ impl<'a> UsageObservation<'a> {
             timestamp,
             model: model.map(str::trim).filter(|name| !name.is_empty()),
             tokens,
+            total_tokens: tokens.total_tokens(),
+            tier: if tokens.is_fast {
+                ServiceTier::Fast
+            } else {
+                ServiceTier::Standard
+            },
             recorded_cost,
+            keep_when_empty: false,
+            price_source: PriceSource::CardRates,
         }
     }
 }
@@ -51,7 +81,7 @@ pub(super) struct TransitionalPolicy {
     /// First counted day, as days before today. The unified Scan window is the last 30 days
     /// including today (29); some loops still start a day earlier (30).
     pub window_start_days_ago: u64,
-    /// Drop observations with no tokens and no Recorded cost above zero.
+    /// Drop observations with no tokens and no cost above zero.
     pub zero_token_guard: bool,
 }
 
@@ -103,20 +133,34 @@ fn record_home(
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
     let Some(model) = observation.model else {
-        return add_own_series(observation, date, home_card, pricing, policy, accumulator);
+        return add_own_series(
+            observation,
+            date,
+            home_card,
+            true,
+            pricing,
+            policy,
+            accumulator,
+        );
     };
     match native_log_disposition(home_card, model) {
-        LocalModelDisposition::Home => {
-            add_own_series(observation, date, home_card, pricing, policy, accumulator)
-        }
+        LocalModelDisposition::Home => add_own_series(
+            observation,
+            date,
+            home_card,
+            true,
+            pricing,
+            policy,
+            accumulator,
+        ),
         LocalModelDisposition::RoutedTo(_) => false,
         LocalModelDisposition::Other => {
             let cost = observation
                 .recorded_cost
-                .or_else(|| estimate(pricing, home_card, model, &observation));
+                .or_else(|| estimate(pricing, home_card, true, model, &observation));
             accumulator.add_other(
                 date,
-                observation.tokens.total_tokens(),
+                observation.total_tokens,
                 cost,
                 observation.recorded_cost.is_none(),
                 model,
@@ -135,38 +179,47 @@ fn record_routed(
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
     match observation.model {
-        Some(model) if card_for_model(model) == Some(target_card) => {
-            add_own_series(observation, date, target_card, pricing, policy, accumulator)
-        }
+        Some(model) if card_for_model(model) == Some(target_card) => add_own_series(
+            observation,
+            date,
+            target_card,
+            false,
+            pricing,
+            policy,
+            accumulator,
+        ),
         _ => false,
     }
 }
 
-/// Adds to the Card's own series, priced under `card`.
+/// Adds to the Card's own series, priced under `card`. `home` says whether `card` is the
+/// observation's home Card.
 fn add_own_series(
     observation: UsageObservation<'_>,
     date: NaiveDate,
     card: &str,
+    home: bool,
     pricing: &ModelPricing,
     policy: TransitionalPolicy,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
-    let tokens = observation.tokens.total_tokens();
-    if policy.zero_token_guard
-        && tokens == 0
-        && observation.recorded_cost.is_none_or(|cost| cost <= 0.0)
-    {
+    let tokens = observation.total_tokens;
+    let estimated = match observation.recorded_cost {
+        Some(_) => None,
+        None => observation
+            .model
+            .and_then(|model| estimate(pricing, card, home, model, &observation)),
+    };
+    let cost = observation.recorded_cost.or(estimated);
+    if policy.zero_token_guard && tokens == 0 && cost.is_none_or(|cost| cost <= 0.0) {
         return false;
     }
     let label = observation.model.unwrap_or("Unattributed");
     if let Some(exact) = observation.recorded_cost {
         accumulator.add_exact(date, tokens, exact, label);
-    } else if let Some(cost) = observation
-        .model
-        .and_then(|model| estimate(pricing, card, model, &observation))
-    {
+    } else if let Some(cost) = estimated {
         accumulator.add(date, tokens, cost, label);
-    } else if tokens > 0 {
+    } else if tokens > 0 || observation.keep_when_empty {
         accumulator.add_unpriced(date, tokens, label);
     } else {
         return false;
@@ -174,13 +227,86 @@ fn add_own_series(
     true
 }
 
+/// Estimates `observation`'s cost under `card`. `home` says whether `card` is its home Card.
 fn estimate(
+    pricing: &ModelPricing,
+    card: &str,
+    home: bool,
+    model: &str,
+    observation: &UsageObservation<'_>,
+) -> Option<f64> {
+    match observation.price_source {
+        PriceSource::CodexLogs { chatgpt_plan } if home => {
+            codex::estimate(pricing, model, chatgpt_plan, observation)
+        }
+        _ => estimate_from_card_rates(pricing, card, model, observation),
+    }
+}
+
+/// Estimates `observation` as if priced under its home Card `home_card`, for tests of a
+/// scanner's pricing.
+#[cfg(test)]
+pub(super) fn estimate_on_home_card(
+    pricing: &ModelPricing,
+    home_card: &str,
+    observation: &UsageObservation<'_>,
+) -> Option<f64> {
+    estimate(pricing, home_card, true, observation.model?, observation)
+}
+
+/// Prices from `card`'s historical rates for the tier, falling back to current catalog rates
+/// for the Standard and Fast tiers. An Unknown tier is never priced.
+fn estimate_from_card_rates(
     pricing: &ModelPricing,
     card: &str,
     model: &str,
     observation: &UsageObservation<'_>,
 ) -> Option<f64> {
-    pricing.estimated_cost_at(card, model, observation.timestamp, observation.tokens, true)
+    let tier = observation.tier;
+    if tier == ServiceTier::Unknown {
+        return None;
+    }
+    let tokens = observation.tokens;
+    match pricing.historical_rates(
+        card,
+        model,
+        observation.timestamp,
+        tier,
+        tokens.prompt_tokens(),
+    ) {
+        Some(rates) => rates.map(|rates| rates.cost_dollars(tokens, true)),
+        None if matches!(tier, ServiceTier::Standard | ServiceTier::Fast) => {
+            pricing.estimated_cost_dollars(model, tokens, true)
+        }
+        None => None,
+    }
+}
+
+/// Helpers for the characterization tests each scanner keeps while it migrates.
+#[cfg(test)]
+pub(super) mod test_support {
+    use chrono::{DateTime, Days, Local, Utc};
+
+    use crate::models::UsageHistory;
+
+    /// Serializes `history` with its dates rewritten as `today-N`, so pinned output does not
+    /// depend on the machine's timezone.
+    pub fn relative_json(history: &UsageHistory, now: DateTime<Utc>) -> String {
+        let mut json = serde_json::to_string_pretty(history).unwrap();
+        let today = now.with_timezone(&Local).date_naive();
+        for offset in 0..=40 {
+            let date = today.checked_sub_days(Days::new(offset)).unwrap();
+            json = json.replace(&format!("\"{date}\""), &format!("\"today-{offset}\""));
+        }
+        json
+    }
+
+    /// Panics with the actual output, so a new baseline can be read off a failing run.
+    pub fn assert_pinned(name: &str, actual: &str, expected: &str) {
+        if actual.trim() != expected.trim() {
+            panic!("{name} changed. Actual output:\n{actual}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -205,13 +331,22 @@ mod tests {
     ];
 
     /// Home clients migrated onto this module, with the policy their native loop uses.
-    const HOMES: [(&str, TransitionalPolicy); 1] = [(
-        "claude",
-        TransitionalPolicy {
-            window_start_days_ago: 30,
-            zero_token_guard: false,
-        },
-    )];
+    const HOMES: [(&str, TransitionalPolicy); 2] = [
+        (
+            "claude",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+            },
+        ),
+        (
+            "codex",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: false,
+            },
+        ),
+    ];
 
     const ROUTED: TransitionalPolicy = TransitionalPolicy {
         window_start_days_ago: 29,
