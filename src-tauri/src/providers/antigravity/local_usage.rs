@@ -16,13 +16,12 @@ use crate::{
 
 use super::AntigravityError;
 use crate::providers::{
+    card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
     claude, codex,
     daily_usage::DailyUsageAccumulator,
     gemini_cli_usage, grok, kimi,
     log_usage::{load_or_parse_log, parse_log_timestamp, LoadedEventsMemo},
-    model_scope::{
-        card_for_model, format_source_note, native_log_disposition, LocalModelDisposition,
-    },
+    model_scope::format_source_note,
     opencode, pi_usage,
     zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
 };
@@ -587,78 +586,25 @@ fn integer(value: Option<&Value>) -> Option<u64> {
     }
 }
 
-fn add_priced_event(
-    accumulator: &mut DailyUsageAccumulator,
-    date: NaiveDate,
-    event: &AntigravityTokenEvent,
-    model_name: &str,
-    provider: &str,
-    pricing: &ModelPricing,
-) {
-    let total = event.total_tokens();
-    let tokens = event.pricing_tokens();
-    if let Some(cost) =
-        pricing.estimated_cost_at(provider, model_name, event.timestamp, tokens, true)
-    {
-        let family = pricing.display_family(model_name);
-        if family != model_name {
-            accumulator.add_variant(date, total, cost, &family, model_name);
-        } else {
-            accumulator.add(date, total, cost, &family);
-        }
-    } else {
-        accumulator.add_unpriced(date, total, model_name);
-    }
-}
-
 fn aggregate_into(
     events: &[AntigravityTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
 ) {
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-
-    for event in events {
-        let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since || event.timestamp > now {
-            continue;
-        }
-        let total = event.total_tokens();
-        if total == 0 {
-            continue;
-        }
-        let model_name = event
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty());
-
-        let Some(model_name) = model_name else {
-            accumulator.add_unpriced(date, total, "Unattributed");
-            continue;
-        };
-        match native_log_disposition("antigravity", model_name) {
-            LocalModelDisposition::Home => {
-                add_priced_event(accumulator, date, event, model_name, "antigravity", pricing);
-            }
-            LocalModelDisposition::RoutedTo(_) => continue,
-            LocalModelDisposition::Other => {
-                let cost = pricing.estimated_cost_at(
-                    "antigravity",
-                    model_name,
-                    event.timestamp,
-                    event.pricing_tokens(),
-                    true,
-                );
-                accumulator.add_other(date, total, cost, true, model_name);
-            }
-        }
-    }
+    card_usage::record(
+        events.iter().map(observation),
+        "antigravity",
+        "antigravity",
+        now,
+        pricing,
+        TransitionalPolicy {
+            window_start_days_ago: 30,
+            zero_token_guard: true,
+            label: LabelMode::FamilyWithVariant,
+        },
+        accumulator,
+    );
 }
 
 fn aggregate_routed_into(
@@ -668,34 +614,28 @@ fn aggregate_routed_into(
     card_id: &str,
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
-    let since = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(29))
-        .unwrap_or(NaiveDate::MIN);
-    let mut contributed = false;
+    card_usage::record(
+        events.iter().map(observation),
+        "antigravity",
+        card_id,
+        now,
+        pricing,
+        TransitionalPolicy {
+            window_start_days_ago: 29,
+            zero_token_guard: true,
+            label: LabelMode::FamilyWithVariant,
+        },
+        accumulator,
+    )
+}
 
-    for event in events {
-        let date = event.timestamp.with_timezone(&Local).date_naive();
-        if date < since || event.timestamp > now || event.total_tokens() == 0 {
-            continue;
-        }
-        let Some(model_name) = event
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        if card_for_model(model_name) != Some(card_id) {
-            continue;
-        }
-
-        add_priced_event(accumulator, date, event, model_name, card_id, pricing);
-        contributed = true;
-    }
-    contributed
+fn observation(event: &AntigravityTokenEvent) -> UsageObservation<'_> {
+    UsageObservation::new(
+        event.timestamp,
+        event.model.as_deref(),
+        event.pricing_tokens(),
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -948,5 +888,510 @@ mod tests {
         .unwrap();
         // shared_step (11_000) counted once + fork_step (15_500) = 26_500.
         assert_eq!(history.today.unwrap().tokens, 26_500);
+    }
+
+    /// Pins the output of antigravity's per-event policy, so moving it into `card_usage` cannot
+    /// change what any Card shows.
+    mod characterization {
+        use chrono::{DateTime, Duration, TimeZone, Utc};
+
+        use super::super::{aggregate_into, aggregate_routed_into, AntigravityTokenEvent};
+        use crate::{
+            pricing::test_bundled_pricing,
+            providers::{
+                card_usage::test_support::{assert_pinned, relative_json},
+                daily_usage::DailyUsageAccumulator,
+            },
+        };
+
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap()
+        }
+
+        fn event(
+            days_ago: i64,
+            model: Option<&str>,
+            input: u64,
+            output: u64,
+        ) -> AntigravityTokenEvent {
+            AntigravityTokenEvent {
+                timestamp: now() - Duration::days(days_ago),
+                step_index: None,
+                model: model.map(str::to_owned),
+                input,
+                cache_write: 0,
+                cache_read: 0,
+                output,
+            }
+        }
+
+        fn events() -> Vec<AntigravityTokenEvent> {
+            let mut cached = event(0, Some("gemini-3-pro-preview"), 10_000, 500);
+            cached.cache_write = 2_000;
+            cached.cache_read = 6_000;
+            let mut future = event(0, Some("gemini-3-pro"), 9_999, 9_999);
+            future.timestamp = now() + Duration::hours(1);
+            vec![
+                // Home models whose label is a family plus a variant, or the family itself.
+                cached,
+                event(0, Some("gemini-3-pro"), 2_000, 200),
+                event(0, Some("gemini-3.1-pro-high"), 2_000, 200),
+                event(1, Some("gemini-3.5-flash-lite-tiered-high"), 1_000, 100),
+                event(1, Some("gemini/gemini-3-pro-preview"), 1_000, 100),
+                event(1, Some("  gemini-3.5-flash  "), 1_000, 100),
+                // gpt-oss counts as Home on the antigravity Card.
+                event(1, Some("gpt-oss-120b"), 500, 50),
+                // A gemini-family model without a price, and a missing model.
+                event(2, Some("gemini-99-unreleased"), 700, 70),
+                event(2, None, 400, 40),
+                // Routed to other Cards.
+                event(3, Some("claude-sonnet-4-5"), 1_500, 150),
+                event(3, Some("claude-opus-4-6"), 1_500, 150),
+                event(3, Some("gpt-5.5"), 1_500, 150),
+                event(3, Some("grok-4"), 800, 80),
+                event(3, Some("glm-4.6"), 600, 60),
+                event(3, Some("kimi-k2"), 600, 60),
+                // Others: priced, unpriced, and local runtime.
+                event(4, Some("deepseek-chat"), 900, 90),
+                event(4, Some("totally-unknown-model"), 50, 5),
+                event(4, Some("ollama/llama3"), 50, 5),
+                // Zero tokens, guarded everywhere.
+                event(5, Some("gemini-3-pro"), 0, 0),
+                event(5, Some("deepseek-chat"), 0, 0),
+                event(5, Some("claude-sonnet-4-5"), 0, 0),
+                event(5, None, 0, 0),
+                // Window edges.
+                event(29, Some("gemini-3-pro"), 100, 10),
+                event(29, Some("claude-sonnet-4-5"), 100, 10),
+                event(30, Some("gemini-3-pro"), 100, 10),
+                event(30, Some("claude-sonnet-4-5"), 100, 10),
+                event(30, Some("deepseek-chat"), 100, 10),
+                future,
+            ]
+        }
+
+        #[test]
+        fn native_card_output_is_pinned() {
+            let mut accumulator = DailyUsageAccumulator::default();
+            aggregate_into(&events(), now(), &test_bundled_pricing(), &mut accumulator);
+            let history = accumulator.build(now(), "test");
+            assert_pinned("native", &relative_json(&history, now()), NATIVE);
+        }
+
+        #[test]
+        fn routed_output_is_pinned_per_card() {
+            let actual = ["claude", "codex", "grok", "zai", "kimi", "minimax"]
+                .map(|card_id| {
+                    let mut accumulator = DailyUsageAccumulator::default();
+                    let contributed = aggregate_routed_into(
+                        &events(),
+                        now(),
+                        &test_bundled_pricing(),
+                        card_id,
+                        &mut accumulator,
+                    );
+                    let json = relative_json(&accumulator.build(now(), "test"), now());
+                    format!("== {card_id} contributed={contributed}\n{json}")
+                })
+                .join("\n");
+            assert_pinned("routed", &actual, ROUTED);
+        }
+
+        const NATIVE: &str = r#"
+{
+  "today": {
+    "tokens": 22900,
+    "estimatedCostUsd": 0.044000000000000004,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 20700,
+          "costUsd": 0.0376,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 2200,
+              "costUsd": 0.0064
+            }
+          ]
+        },
+        {
+          "model": "gemini-3.1-pro-preview",
+          "totalTokens": 2200,
+          "costUsd": 0.0064,
+          "variants": [
+            {
+              "model": "gemini-3.1-pro-high",
+              "totalTokens": 2200,
+              "costUsd": 0.0064
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "yesterday": {
+    "tokens": 3850,
+    "estimatedCostUsd": 0.005705,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 1100,
+          "costUsd": 0.0032,
+          "variants": [
+            {
+              "model": "gemini/gemini-3-pro-preview",
+              "totalTokens": 1100,
+              "costUsd": 0.0032
+            }
+          ]
+        },
+        {
+          "model": "gemini-3.5-flash",
+          "totalTokens": 1100,
+          "costUsd": 0.0024
+        },
+        {
+          "model": "gpt-oss-120b",
+          "totalTokens": 550,
+          "costUsd": 0.000105
+        },
+        {
+          "model": "gemini-3.5-flash-lite-tiered-high",
+          "totalTokens": 1100,
+          "costUsd": null
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "gemini-3.5-flash-lite-tiered-high"
+    ]
+  },
+  "last30Days": {
+    "tokens": 28070,
+    "estimatedCostUsd": 0.05002500000000001,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 21910,
+          "costUsd": 0.041120000000000004,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 2310,
+              "costUsd": 0.00672
+            },
+            {
+              "model": "gemini/gemini-3-pro-preview",
+              "totalTokens": 1100,
+              "costUsd": 0.0032
+            }
+          ]
+        },
+        {
+          "model": "gemini-3.1-pro-preview",
+          "totalTokens": 2200,
+          "costUsd": 0.0064,
+          "variants": [
+            {
+              "model": "gemini-3.1-pro-high",
+              "totalTokens": 2200,
+              "costUsd": 0.0064
+            }
+          ]
+        },
+        {
+          "model": "Other",
+          "totalTokens": 3960,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "gemini-3.5-flash",
+              "totalTokens": 1100,
+              "costUsd": 0.0024
+            },
+            {
+              "model": "gpt-oss-120b",
+              "totalTokens": 550,
+              "costUsd": 0.000105
+            },
+            {
+              "model": "gemini-3.5-flash-lite-tiered-high",
+              "totalTokens": 1100,
+              "costUsd": null
+            },
+            {
+              "model": "gemini-99-unreleased",
+              "totalTokens": 770,
+              "costUsd": null
+            },
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "gemini-3.5-flash-lite-tiered-high",
+      "gemini-99-unreleased"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 22900,
+      "estimatedCostUsd": 0.044000000000000004,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-1",
+      "tokens": 3850,
+      "estimatedCostUsd": 0.005705,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-2",
+      "tokens": 1210,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.00032,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed",
+    "gemini-3.5-flash-lite-tiered-high",
+    "gemini-99-unreleased"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 990,
+          "pricedTokens": 990,
+          "estimatedCostUsd": 0.0002898,
+          "costEstimated": true
+        },
+        "ollama/llama3": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "totally-unknown-model": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        }
+      },
+      "tokens": 1100,
+      "pricedTokens": 990,
+      "estimatedCostUsd": 0.0002898,
+      "costEstimated": true,
+      "estimateComplete": false
+    }
+  }
+}
+"#;
+        const ROUTED: &str = r#"
+== claude contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 3410,
+    "estimatedCostUsd": 0.018449999999999998,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 1650,
+          "costUsd": 0.01125
+        },
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1760,
+          "costUsd": 0.0072
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 3300,
+      "estimatedCostUsd": 0.018,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.00045,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== codex contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 1650,
+    "estimatedCostUsd": 0.012,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 1650,
+          "costUsd": 0.012
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 1650,
+      "estimatedCostUsd": 0.012,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== grok contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 880,
+    "estimatedCostUsd": 0.0002,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "grok-4",
+          "totalTokens": 880,
+          "costUsd": 0.0002
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 880,
+      "estimatedCostUsd": 0.0002,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== zai contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.000384,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 660,
+          "costUsd": 0.000384
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.000384,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== kimi contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.00051,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "kimi-k2",
+          "totalTokens": 660,
+          "costUsd": 0.00051
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00051,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== minimax contributed=false
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": []
+}
+"#;
     }
 }

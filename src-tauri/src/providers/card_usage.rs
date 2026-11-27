@@ -83,6 +83,17 @@ pub(super) struct TransitionalPolicy {
     pub window_start_days_ago: u64,
     /// Drop observations with no tokens and no cost above zero.
     pub zero_token_guard: bool,
+    /// How priced usage on the Card's own series is labelled.
+    pub label: LabelMode,
+}
+
+/// TEMPORARY, see `TransitionalPolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LabelMode {
+    /// The model name as logged.
+    RawModel,
+    /// The model's display family, keeping the logged name as a variant when it differs.
+    FamilyWithVariant,
 }
 
 /// Records `observations` from `home_card`'s Home client onto `target_card`.
@@ -215,10 +226,25 @@ fn add_own_series(
         return false;
     }
     let label = observation.model.unwrap_or("Unattributed");
+    let family = match (policy.label, observation.model) {
+        (LabelMode::FamilyWithVariant, Some(model)) => Some(pricing.display_family(model)),
+        _ => None,
+    };
+    let variant = family.as_deref().filter(|family| *family != label);
     if let Some(exact) = observation.recorded_cost {
-        accumulator.add_exact(date, tokens, exact, label);
+        match (family.as_deref(), variant) {
+            (Some(family), Some(_)) => {
+                accumulator.add_exact_variant(date, tokens, exact, family, label)
+            }
+            (Some(family), None) => accumulator.add_exact(date, tokens, exact, family),
+            _ => accumulator.add_exact(date, tokens, exact, label),
+        }
     } else if let Some(cost) = estimated {
-        accumulator.add(date, tokens, cost, label);
+        match (family.as_deref(), variant) {
+            (Some(family), Some(_)) => accumulator.add_variant(date, tokens, cost, family, label),
+            (Some(family), None) => accumulator.add(date, tokens, cost, family),
+            _ => accumulator.add(date, tokens, cost, label),
+        }
     } else if tokens > 0 || observation.keep_when_empty {
         accumulator.add_unpriced(date, tokens, label);
     } else {
@@ -313,7 +339,7 @@ pub(super) mod test_support {
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
 
-    use super::{record, TransitionalPolicy, UsageObservation};
+    use super::{record, LabelMode, TransitionalPolicy, UsageObservation};
     use crate::{
         pricing::{test_bundled_pricing, ModelPricing, TokenBreakdown},
         providers::daily_usage::DailyUsageAccumulator,
@@ -331,12 +357,13 @@ mod tests {
     ];
 
     /// Home clients migrated onto this module, with the policy their native loop uses.
-    const HOMES: [(&str, TransitionalPolicy); 3] = [
+    const HOMES: [(&str, TransitionalPolicy); 4] = [
         (
             "claude",
             TransitionalPolicy {
                 window_start_days_ago: 30,
                 zero_token_guard: false,
+                label: LabelMode::RawModel,
             },
         ),
         (
@@ -344,6 +371,7 @@ mod tests {
             TransitionalPolicy {
                 window_start_days_ago: 30,
                 zero_token_guard: false,
+                label: LabelMode::RawModel,
             },
         ),
         (
@@ -351,6 +379,15 @@ mod tests {
             TransitionalPolicy {
                 window_start_days_ago: 30,
                 zero_token_guard: true,
+                label: LabelMode::RawModel,
+            },
+        ),
+        (
+            "antigravity",
+            TransitionalPolicy {
+                window_start_days_ago: 30,
+                zero_token_guard: true,
+                label: LabelMode::FamilyWithVariant,
             },
         ),
     ];
@@ -358,6 +395,7 @@ mod tests {
     const ROUTED: TransitionalPolicy = TransitionalPolicy {
         window_start_days_ago: 29,
         zero_token_guard: true,
+        label: LabelMode::RawModel,
     };
 
     const MODELS: [Option<&str>; 13] = [

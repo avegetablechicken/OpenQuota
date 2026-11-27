@@ -19,7 +19,7 @@ use crate::{
 use super::CodexError;
 use crate::providers::{
     antigravity,
-    card_usage::{self, PriceSource, TransitionalPolicy, UsageObservation},
+    card_usage::{self, LabelMode, PriceSource, TransitionalPolicy, UsageObservation},
     claude,
     daily_usage::DailyUsageAccumulator,
     gemini_cli_usage, grok, kimi,
@@ -689,6 +689,7 @@ fn aggregate_into(
         TransitionalPolicy {
             window_start_days_ago: 30,
             zero_token_guard: false,
+            label: LabelMode::RawModel,
         },
         accumulator,
     );
@@ -710,6 +711,7 @@ fn aggregate_routed_into(
         TransitionalPolicy {
             window_start_days_ago: 29,
             zero_token_guard: true,
+            label: LabelMode::RawModel,
         },
         accumulator,
     )

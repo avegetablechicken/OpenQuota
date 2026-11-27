@@ -18,7 +18,7 @@ use crate::{
 use super::ClaudeError;
 use crate::providers::{
     antigravity,
-    card_usage::{self, TransitionalPolicy, UsageObservation},
+    card_usage::{self, LabelMode, TransitionalPolicy, UsageObservation},
     codex,
     daily_usage::DailyUsageAccumulator,
     gemini_cli_usage, grok, kimi,
@@ -616,6 +616,7 @@ fn aggregate_into(
         TransitionalPolicy {
             window_start_days_ago: 30,
             zero_token_guard: false,
+            label: LabelMode::RawModel,
         },
         accumulator,
     );
@@ -637,6 +638,7 @@ fn aggregate_routed_into(
         TransitionalPolicy {
             window_start_days_ago: 29,
             zero_token_guard: true,
+            label: LabelMode::RawModel,
         },
         accumulator,
     )
