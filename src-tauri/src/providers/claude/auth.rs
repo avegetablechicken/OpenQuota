@@ -21,6 +21,13 @@ const DEFAULT_API_BASE: &str = "https://api.anthropic.com";
 const DEFAULT_REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const DEFAULT_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const NON_PROD_CLIENT_ID: &str = "22422756-60c9-4084-8eb7-27705fd5cf9a";
+/// The only `CLAUDE_CODE_CUSTOM_OAUTH_URL` values Claude Code accepts; it refuses to start with
+/// any other, so a login it saved was never sent anywhere else.
+const APPROVED_CUSTOM_OAUTH_URLS: &[&str] = &[
+    "https://beacon.claude-ai.staging.ant.dev",
+    "https://claude.fedstart.com",
+    "https://claude-staging.fedstart.com",
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -510,6 +517,12 @@ pub(super) fn oauth_config() -> Result<ClaudeOAuthConfig, ClaudeError> {
 fn oauth_config_from(
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<ClaudeOAuthConfig, ClaudeError> {
+    // Claude Code's refresh token and access token must not be sent to an unapproved host.
+    if env("CLAUDE_CODE_CUSTOM_OAUTH_URL")
+        .is_some_and(|custom| approved_custom_oauth_url(&custom).is_none())
+    {
+        return Err(ClaudeError::InvalidOAuthUrl);
+    }
     let (base, refresh_url, default_client_id, _) = resolved_oauth_settings_from(&env);
     let usage_url = format!("{base}/api/oauth/usage");
     validate_http_url(&usage_url)?;
@@ -556,12 +569,23 @@ fn resolved_oauth_settings_from(
         client_id = NON_PROD_CLIENT_ID.into();
         suffix = "-staging-oauth";
     }
-    if let Some(custom) = env("CLAUDE_CODE_CUSTOM_OAUTH_URL") {
-        base = custom.trim_end_matches('/').to_owned();
+    if let Some(custom) = env("CLAUDE_CODE_CUSTOM_OAUTH_URL")
+        .as_deref()
+        .and_then(approved_custom_oauth_url)
+    {
+        base = custom.to_owned();
         refresh = format!("{base}/v1/oauth/token");
         suffix = "-custom-oauth";
     }
     (base, refresh, client_id, suffix)
+}
+
+fn approved_custom_oauth_url(value: &str) -> Option<&'static str> {
+    let value = value.trim_end_matches('/');
+    APPROVED_CUSTOM_OAUTH_URLS
+        .iter()
+        .copied()
+        .find(|approved| *approved == value)
 }
 
 fn validate_http_url(value: &str) -> Result<(), ClaudeError> {
@@ -754,12 +778,21 @@ mod tests {
             }
         };
         let custom = resolve(&[
-            ("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://oauth.example/"),
+            (
+                "CLAUDE_CODE_CUSTOM_OAUTH_URL",
+                "https://claude.fedstart.com/",
+            ),
             ("CLAUDE_CODE_OAUTH_CLIENT_ID", "custom-client"),
         ]);
         let config = super::oauth_config_from(&custom).unwrap();
-        assert_eq!(config.usage_url, "https://oauth.example/api/oauth/usage");
-        assert_eq!(config.refresh_url, "https://oauth.example/v1/oauth/token");
+        assert_eq!(
+            config.usage_url,
+            "https://claude.fedstart.com/api/oauth/usage"
+        );
+        assert_eq!(
+            config.refresh_url,
+            "https://claude.fedstart.com/v1/oauth/token"
+        );
         assert_eq!(config.client_id, "custom-client");
         assert_eq!(
             super::resolved_oauth_settings_from(&custom).3,
@@ -799,11 +832,24 @@ mod tests {
             assert_eq!(super::resolved_oauth_settings_from(&disabled).3, "");
         }
 
-        let invalid = resolve(&[("CLAUDE_CODE_CUSTOM_OAUTH_URL", "not a url")]);
-        assert!(matches!(
-            super::oauth_config_from(&invalid),
-            Err(ClaudeError::InvalidOAuthUrl)
-        ));
+        // Like Claude Code, only approved custom endpoints receive its tokens.
+        for value in [
+            "not a url",
+            "http://example.test",
+            "https://oauth.example",
+            "http://claude.fedstart.com",
+            "https://claude.fedstart.com.example.test",
+        ] {
+            let invalid = resolve(&[("CLAUDE_CODE_CUSTOM_OAUTH_URL", value)]);
+            assert!(
+                matches!(
+                    super::oauth_config_from(&invalid),
+                    Err(ClaudeError::InvalidOAuthUrl)
+                ),
+                "{value}"
+            );
+            assert_eq!(super::resolved_oauth_settings_from(&invalid).3, "");
+        }
     }
 
     #[test]

@@ -50,7 +50,9 @@ Explicit proxies bypass loopback destinations (`localhost`, `127.0.0.0/8`, and `
 
 Subscription queries and token refreshes follow Claude Code's OAuth environment variables:
 `CLAUDE_CODE_CUSTOM_OAUTH_URL`, `CLAUDE_CODE_OAUTH_CLIENT_ID`, and the `USER_TYPE=ant` local or
-staging switches (`USE_LOCAL_OAUTH`, `CLAUDE_LOCAL_OAUTH_API_BASE`, `USE_STAGING_OAUTH`). On macOS,
+staging switches (`USE_LOCAL_OAUTH`, `CLAUDE_LOCAL_OAUTH_API_BASE`, `USE_STAGING_OAUTH`). As in
+Claude Code, `CLAUDE_CODE_CUSTOM_OAUTH_URL` must be one of Claude Code's approved endpoints; any other
+value is reported as an invalid OAuth URL and no token is sent. On macOS,
 the matching Claude Code keychain namespace is used, including for `CLAUDE_CONFIG_DIR`. These
 variables come from the process environment; on macOS and Linux, all except
 `CLAUDE_CODE_OAUTH_CLIENT_ID` also fall back to the login-shell snapshot saved by a previous
