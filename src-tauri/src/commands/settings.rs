@@ -634,6 +634,8 @@ pub(crate) struct SettingsWatch {
     seen: Mutex<(u64, BTreeMap<String, MetricPolicyView>)>,
 }
 
+static SETTINGS_WATCH_EMIT_LOCK: Mutex<()> = Mutex::new(());
+
 impl SettingsWatch {
     pub(crate) fn new(service: &SettingsService) -> Self {
         Self {
@@ -658,6 +660,11 @@ impl SettingsWatch {
         if *seen != now {
             *seen = now;
             drop(seen);
+            // Serialize building and emitting so concurrent track discoveries cannot deliver
+            // an older policy snapshot after a newer one at the same settings revision.
+            let _emit_guard = SETTINGS_WATCH_EMIT_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = app.emit("settings-state", settings_view_state(app, service));
         }
     }

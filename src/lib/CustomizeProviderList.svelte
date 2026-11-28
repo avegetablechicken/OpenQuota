@@ -10,6 +10,7 @@
   import { pointerReorder } from './pointerReorder';
   import { policyShows } from './metricPolicy';
   import {
+    forgetSub2ApiEndpoint,
     rememberSub2ApiEndpoint,
     sub2ApiEndpoints,
     sub2ApiUpstreamLabel,
@@ -113,12 +114,17 @@
   }
   onMount(() => {
     for (const provider of visibleProviders) {
-      if (!catalog.supportsConnectionConfiguration(provider.id) || $sub2ApiEndpoints[provider.id]) {
-        continue;
-      }
+      if (!catalog.supportsConnectionConfiguration(provider.id)) continue;
+      // Read the saved connection when either the backend Track (e.g. a legacy marker
+      // on a disabled slot) or the cached endpoint label is still missing.
+      const hasTrack = Boolean(
+        $sub2ApiUpstreams[provider.id] ?? metricPolicies[provider.id]?.track,
+      );
+      if (hasTrack && $sub2ApiEndpoints[provider.id]) continue;
       void getSub2ApiConfigState(provider.id)
         .then((state) => {
           if (state.configured) rememberSub2ApiEndpoint(provider.id, state.baseUrl);
+          else forgetSub2ApiEndpoint(provider.id);
         })
         .catch(() => undefined);
     }

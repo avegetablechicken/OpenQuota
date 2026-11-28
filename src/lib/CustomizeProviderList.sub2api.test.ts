@@ -1,8 +1,14 @@
-import { cleanup, render, screen, within } from '@testing-library/svelte';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomizeProviderList from './CustomizeProviderList.svelte';
 import { ProviderCatalogIndex } from './metrics';
-import { forgetSub2ApiEndpoint, syncSub2ApiTracks } from './sub2ApiUpstreams';
+import {
+  forgetSub2ApiEndpoint,
+  rememberSub2ApiEndpoint,
+  sub2ApiEndpoints,
+  syncSub2ApiTracks,
+} from './sub2ApiUpstreams';
 import type { AppSettings, MetricPolicy, ProviderCatalog } from './types';
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -80,6 +86,7 @@ const claudeRelays = { 'sub2api@2': policy('claude'), 'sub2api@3': policy('claud
 
 describe('CustomizeProviderList Sub2API labels', () => {
   beforeEach(() => {
+    mocks.invoke.mockReset();
     forgetSub2ApiEndpoint('sub2api@2');
     syncSub2ApiTracks(claudeRelays);
     mocks.invoke.mockResolvedValue({
@@ -203,5 +210,77 @@ describe('CustomizeProviderList Sub2API labels', () => {
     expect(screen.getAllByText('Sub2API · Claude')).toHaveLength(2);
     expect(screen.queryByText(/Sub2API \d/)).not.toBeInTheDocument();
     expect(screen.queryByText('2 metrics')).not.toBeInTheDocument();
+  });
+
+  it('still reads a disabled connection when the endpoint is cached but its track is unknown', async () => {
+    rememberSub2ApiEndpoint('sub2api@2', 'https://192.0.2.8:6060/api/v1');
+    const unknownTrack = { 'sub2api@2': policy(null) };
+    syncSub2ApiTracks(unknownTrack);
+
+    render(CustomizeProviderList, {
+      settings: {
+        ...settings,
+        providers: settings.providers.map((provider) => ({ ...provider, enabled: false })),
+      },
+      catalog: new ProviderCatalogIndex(catalog),
+      metricPolicies: unknownTrack,
+      onOpen: vi.fn(),
+      onChange: vi.fn(),
+      onReorderStart: vi.fn(),
+      onReorderEnd: vi.fn(),
+      onSettings: vi.fn(),
+      reducedMotion: false,
+    });
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('get_sub2api_config_state', {
+        providerId: 'sub2api@2',
+      }),
+    );
+  });
+
+  it('skips reading a connection when both its track and endpoint are already known', () => {
+    rememberSub2ApiEndpoint('sub2api@2', 'https://192.0.2.8:6060/api/v1');
+
+    render(CustomizeProviderList, {
+      settings,
+      catalog: new ProviderCatalogIndex(catalog),
+      metricPolicies: claudeRelays,
+      onOpen: vi.fn(),
+      onChange: vi.fn(),
+      onReorderStart: vi.fn(),
+      onReorderEnd: vi.fn(),
+      onSettings: vi.fn(),
+      reducedMotion: false,
+    });
+
+    expect(screen.getByText('Claude relay · 192.0.2.8:6060')).toBeInTheDocument();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it('forgets a stale cached endpoint when the backend reports the connection is not configured', async () => {
+    rememberSub2ApiEndpoint('sub2api@2', 'https://192.0.2.8:6060/api/v1');
+    const unknownTrack = { 'sub2api@2': policy(null) };
+    syncSub2ApiTracks(unknownTrack);
+    mocks.invoke.mockResolvedValue({
+      configured: false,
+      baseUrl: '',
+      email: '',
+      upstream: 'codex',
+    });
+
+    render(CustomizeProviderList, {
+      settings,
+      catalog: new ProviderCatalogIndex(catalog),
+      metricPolicies: unknownTrack,
+      onOpen: vi.fn(),
+      onChange: vi.fn(),
+      onReorderStart: vi.fn(),
+      onReorderEnd: vi.fn(),
+      onSettings: vi.fn(),
+      reducedMotion: false,
+    });
+
+    await waitFor(() => expect(get(sub2ApiEndpoints)['sub2api@2']).toBeUndefined());
   });
 });
