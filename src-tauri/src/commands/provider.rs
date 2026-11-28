@@ -8,6 +8,7 @@ use crate::{
     commands::credential_change::{
         self, Policy, SettingsChange, TauriApp, TemplateHandoff, Timing,
     },
+    commands::settings::SettingsWatch,
     models::{ApiKeyMutationOutcome, ApiKeyStatus, ProviderApiKeyState, ProviderLink},
     pacing::NotificationEvaluator,
     providers::{
@@ -304,16 +305,22 @@ pub async fn delete_provider_api_key(
 
 #[tauri::command]
 pub async fn get_sub2api_config_state(
+    app: AppHandle,
     providers: State<'_, Arc<Sub2ApiProviders>>,
+    settings: State<'_, Arc<SettingsService>>,
     provider_id: String,
 ) -> Result<Sub2ApiConfigState, String> {
     let provider = providers
         .provider(&provider_id)
         .ok_or_else(|| "Unknown Sub2API provider.".to_owned())?;
-    tauri::async_runtime::spawn_blocking(move || provider.config_state())
+    // Reading a connection saved before Tracks were recorded learns its Track.
+    let watch = SettingsWatch::new(&settings);
+    let state = tauri::async_runtime::spawn_blocking(move || provider.config_state())
         .await
         .map_err(|_| "The Sub2API connection could not be read.".to_owned())?
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    watch.emit_if_changed(&app, &settings);
+    state
 }
 
 #[tauri::command]

@@ -1,9 +1,9 @@
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{
-    commands::settings::emit_settings_if_account_changed,
+    commands::settings::SettingsWatch,
     notifications::finish_refresh,
     pacing::NotificationEvaluator,
     providers::codex::reset_claim::{CodexResetClaimService, ResetClaimOutcome},
@@ -45,10 +45,10 @@ pub async fn claim_codex_reset_credit(
             .map_err(|_| "The reset claim could not be completed.".to_owned())?;
 
     if outcome != ResetClaimOutcome::Failed {
-        let observed_account_revision = AtomicU64::new(settings.account_revision());
+        let watch = SettingsWatch::new(&settings);
         service.refresh("codex", true).await;
         let state = service.state();
-        emit_settings_if_account_changed(&app, &settings, &observed_account_revision);
+        watch.emit_if_changed(&app, &settings);
         let _ = app.emit("usage-state", &state);
         finish_refresh(&app, &state, &settings, &notifications);
     }
@@ -62,14 +62,14 @@ pub async fn refresh_usage(
     settings: State<'_, Arc<SettingsService>>,
     notifications: State<'_, Arc<NotificationEvaluator>>,
 ) -> Result<UsageViewState, ()> {
-    let observed_account_revision = AtomicU64::new(settings.account_revision());
+    let watch = SettingsWatch::new(&settings);
     let state = service
         .refresh_all_with_progress(&settings.enabled_provider_ids(), true, |state| {
-            emit_settings_if_account_changed(&app, &settings, &observed_account_revision);
+            watch.emit_if_changed(&app, &settings);
             publish_refresh_progress(&app, &settings, state);
         })
         .await;
-    emit_settings_if_account_changed(&app, &settings, &observed_account_revision);
+    watch.emit_if_changed(&app, &settings);
     let _ = app.emit("usage-state", &state);
     finish_refresh(&app, &state, &settings, &notifications);
     Ok(state)
@@ -87,10 +87,10 @@ pub async fn refresh_provider_usage(
         return Err("Provider is not enabled.".to_owned());
     }
 
-    let observed_account_revision = AtomicU64::new(settings.account_revision());
+    let watch = SettingsWatch::new(&settings);
     service.refresh(&provider_id, true).await;
     let state = service.state();
-    emit_settings_if_account_changed(&app, &settings, &observed_account_revision);
+    watch.emit_if_changed(&app, &settings);
     let _ = app.emit("usage-state", &state);
     finish_refresh(&app, &state, &settings, &notifications);
     Ok(state)

@@ -1,9 +1,6 @@
 use std::{
-    collections::HashSet,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    collections::{BTreeMap, HashSet},
+    sync::{Arc, Mutex},
 };
 
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -15,7 +12,8 @@ use crate::{
     commands::usage::publish_refresh_progress,
     desktop_integration::DesktopIntegration,
     models::{
-        AppSettings, MenuBarStyle, SettingsViewState, UpdateFrequency, UsageDisplay, WindowMode,
+        AppSettings, MenuBarStyle, MetricPolicyView, SettingsViewState, UpdateFrequency,
+        UsageDisplay, WindowMode,
     },
     notifications::{finish_refresh, permission as notification_permission},
     pacing::NotificationEvaluator,
@@ -623,13 +621,38 @@ pub(crate) fn settings_view_state(app: &AppHandle, service: &SettingsService) ->
     state
 }
 
-pub(crate) fn emit_settings_if_account_changed(
-    app: &AppHandle,
-    service: &SettingsService,
-    observed_revision: &AtomicU64,
-) {
-    let revision = service.account_revision();
-    if observed_revision.swap(revision, Ordering::SeqCst) != revision {
-        let _ = app.emit("settings-state", settings_view_state(app, service));
+/// The settings a refresh or a credential read can change behind the frontend's back: the
+/// account revision, and each Card's metric policy, which changes when a Sub2API connection's
+/// Track is first read.
+pub(crate) struct SettingsWatch {
+    seen: Mutex<(u64, BTreeMap<String, MetricPolicyView>)>,
+}
+
+impl SettingsWatch {
+    pub(crate) fn new(service: &SettingsService) -> Self {
+        Self {
+            seen: Mutex::new(Self::observe(service)),
+        }
+    }
+
+    fn observe(service: &SettingsService) -> (u64, BTreeMap<String, MetricPolicyView>) {
+        (
+            service.account_revision(),
+            crate::metric_policy::views(service.registry()),
+        )
+    }
+
+    /// Sends the settings state when either has changed since the last look.
+    pub(crate) fn emit_if_changed(&self, app: &AppHandle, service: &SettingsService) {
+        let now = Self::observe(service);
+        let mut seen = self
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *seen != now {
+            *seen = now;
+            drop(seen);
+            let _ = app.emit("settings-state", settings_view_state(app, service));
+        }
     }
 }

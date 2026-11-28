@@ -1,12 +1,9 @@
-use std::{
-    sync::{atomic::AtomicU64, Arc},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use tauri::{AppHandle, Emitter};
 
 use crate::{
-    commands::{settings::emit_settings_if_account_changed, usage::publish_refresh_progress},
+    commands::{settings::SettingsWatch, usage::publish_refresh_progress},
     notifications::finish_refresh,
     pacing::NotificationEvaluator,
     policy::REFRESH_INTERVAL,
@@ -29,19 +26,15 @@ pub fn spawn(
             let provider_ids = settings.enabled_provider_ids();
             let mut interval = REFRESH_INTERVAL;
             if !provider_ids.is_empty() {
-                let observed_account_revision = AtomicU64::new(settings.account_revision());
+                let watch = SettingsWatch::new(&settings);
                 let state = service
                     .refresh_all_with_progress(&provider_ids, false, |state| {
-                        emit_settings_if_account_changed(
-                            &app,
-                            &settings,
-                            &observed_account_revision,
-                        );
+                        watch.emit_if_changed(&app, &settings);
                         publish_refresh_progress(&app, &settings, state);
                     })
                     .await;
                 interval = Duration::from_secs(state.refresh_interval_seconds);
-                emit_settings_if_account_changed(&app, &settings, &observed_account_revision);
+                watch.emit_if_changed(&app, &settings);
                 let _ = app.emit("usage-state", &state);
                 finish_refresh(&app, &state, &settings, &notifications);
             }
