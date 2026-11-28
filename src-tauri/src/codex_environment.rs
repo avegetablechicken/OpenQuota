@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 
 /// Read file overrides without modifying the process environment.
 /// File aliases take precedence over all process aliases, including empty values.
+/// CODEX_HOME resolves like the Codex auth and config lookups, so a GUI launch that
+/// restored it from the login-shell snapshot reads the same directory's .env.
 pub fn proxy_value(names: &[&str]) -> Option<String> {
-    let configured_home = std::env::var("CODEX_HOME").ok();
+    let configured_home = crate::provider_environment::value("CODEX_HOME");
     let directory = codex_home(configured_home.as_deref(), dirs::home_dir());
     resolve_value(
         directory
