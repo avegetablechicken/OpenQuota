@@ -75,7 +75,10 @@ fn client_builder_for_proxy(proxy: Option<&str>) -> Result<ClientBuilder, reqwes
 }
 
 type ClientFactory = dyn Fn(ClientBuilder) -> ClientBuilder + Send + Sync;
-type CachedClient = Option<(Option<String>, Client)>;
+type CachedClient = Option<(Option<String>, EnvironmentReads, Client)>;
+/// Proxy variables an environment-configured client was built from, so a changed
+/// value in the provider's config file rebuilds the client.
+type EnvironmentReads = Vec<(Vec<String>, Option<String>)>;
 
 #[derive(Clone)]
 pub struct ProviderClient {
@@ -130,29 +133,55 @@ impl ProviderClient {
             .cached
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some((previous, client)) = cached.as_ref() {
-            if previous == &proxy {
+        let environment = self.environment_reader(proxy.as_deref());
+        if let Some((previous, reads, client)) = cached.as_ref() {
+            let reads_unchanged = environment.as_ref().is_none_or(|read| {
+                reads.iter().all(|(names, value)| {
+                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                    read(&names) == *value
+                })
+            });
+            if previous == &proxy && reads_unchanged {
                 return Ok(client.clone());
             }
         }
-        let builder = if self.provider_id == "codex" && proxy.is_none() {
-            platform::configure_environment(
-                tls_client_builder(),
-                crate::codex_environment::proxy_value,
-            )
-        } else if let Some(path) = self
-            .claude_settings
-            .as_ref()
-            .filter(|_| proxy.is_none() && self.provider_id == "claude")
-        {
+        let reads = std::cell::RefCell::new(EnvironmentReads::new());
+        let builder = if let Some(read) = environment.as_ref() {
             platform::configure_environment(tls_client_builder(), |names| {
-                crate::providers::claude::config::proxy_value(path, names)
+                let value = read(names);
+                reads.borrow_mut().push((
+                    names.iter().map(|name| (*name).to_owned()).collect(),
+                    value.clone(),
+                ));
+                value
             })
         } else {
             client_builder_for_proxy(proxy.as_deref())?
         };
         let client = (self.configure)(builder).build()?;
-        *cached = Some((proxy, client.clone()));
+        *cached = Some((proxy, reads.into_inner(), client.clone()));
         Ok(client)
+    }
+
+    /// Codex and Claude read proxy variables from their own config files when no
+    /// per-provider override is set.
+    #[allow(clippy::type_complexity)]
+    fn environment_reader(
+        &self,
+        proxy: Option<&str>,
+    ) -> Option<Box<dyn Fn(&[&str]) -> Option<String> + '_>> {
+        if proxy.is_some() {
+            return None;
+        }
+        if self.provider_id == "codex" {
+            return Some(Box::new(crate::codex_environment::proxy_value));
+        }
+        let path = self
+            .claude_settings
+            .as_ref()
+            .filter(|_| self.provider_id == "claude")?;
+        Some(Box::new(|names| {
+            crate::providers::claude::config::proxy_value(path, names)
+        }))
     }
 }

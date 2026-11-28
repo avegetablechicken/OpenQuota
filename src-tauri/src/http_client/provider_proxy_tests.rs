@@ -151,6 +151,41 @@ fn codex_dotenv_proxy_does_not_affect_other_providers() {
 }
 
 #[test]
+fn claude_settings_proxy_change_rebuilds_the_cached_client() {
+    let directory = tempfile::tempdir().unwrap();
+    let settings = directory.path().join("settings.json");
+    let write_proxy = |proxy: &str| {
+        std::fs::write(
+            &settings,
+            serde_json::json!({"env": {
+                "HTTP_PROXY": proxy, "http_proxy": proxy, "NO_PROXY": "", "no_proxy": ""
+            }})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    let fetch = |client: &ProviderClient| {
+        client
+            .current_with_proxy(None)
+            .unwrap()
+            .get("http://unresolvable.invalid/usage")
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    write_proxy(&serve_once(200, &[], "first-proxy"));
+    let claude = ProviderClient::new("kimi", |builder| builder.timeout(Duration::from_secs(3)))
+        .unwrap()
+        .for_provider("claude")
+        .with_claude_settings(settings.clone());
+    assert_eq!(fetch(&claude), "first-proxy");
+
+    write_proxy(&serve_once(200, &[], "second-proxy"));
+    assert_eq!(fetch(&claude), "second-proxy");
+}
+
+#[test]
 fn exit_location_requires_a_real_ip_and_country_not_the_datacenter() {
     let result = parse_proxy_exit("ip=203.0.113.7\ncolo=NRT\nloc=US\n").unwrap();
     assert_eq!(result.ip, "203.0.113.7");
