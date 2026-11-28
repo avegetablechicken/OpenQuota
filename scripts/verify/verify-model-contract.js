@@ -3,7 +3,7 @@ import fs from 'node:fs';
 const root = new URL('../../', import.meta.url);
 const rustSource = [
   'src-tauri/src/models.rs',
-  'src-tauri/src/service.rs',
+  'src-tauri/src/service/mod.rs',
   'src-tauri/src/commands/bootstrap.rs',
   'src-tauri/src/providers/sub2api/config.rs',
 ]

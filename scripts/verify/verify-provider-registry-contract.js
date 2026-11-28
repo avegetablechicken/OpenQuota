@@ -2,8 +2,10 @@ import fs from 'node:fs';
 
 const root = new URL('../../', import.meta.url);
 const rustConsumers = [
-  'src-tauri/src/service.rs',
-  'src-tauri/src/settings.rs',
+  'src-tauri/src/service/mod.rs',
+  'src-tauri/src/service/snapshot.rs',
+  'src-tauri/src/settings/mod.rs',
+  'src-tauri/src/settings/normalize.rs',
   'src-tauri/src/tray_presentation.rs',
   'src-tauri/src/pacing.rs',
   'src-tauri/src/notifications.rs',
