@@ -158,9 +158,12 @@ fn map_models(
         let name = [model.get("modelName"), model.get("modelCode")]
             .into_iter()
             .flatten()
-            .find_map(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .find_map(|value| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
             .ok_or(ZaiError::InvalidResponse)?;
         let total_tokens = token_series(
             model
@@ -428,6 +431,29 @@ mod tests {
         assert_eq!(today.estimated_cost_usd, None);
         assert_eq!(today.model_breakdown.unwrap().models[0].model, "GLM-4.7");
         assert_eq!(mapped.credits, None);
+    }
+
+    #[test]
+    fn empty_model_name_falls_back_to_the_model_code() {
+        let mapped = map_legacy_usage(
+            &json!({
+                "success": true,
+                "data": {
+                    "x_time": ["2026-08-27 00:00"],
+                    "tokensUsage": [100],
+                    "modelDataList": [{
+                        "modelCode": "glm-4.7",
+                        "modelName": "",
+                        "tokensUsage": [100]
+                    }]
+                }
+            }),
+            now(),
+        )
+        .unwrap();
+
+        let today = mapped.history.today.unwrap();
+        assert_eq!(today.model_breakdown.unwrap().models[0].model, "glm-4.7");
     }
 
     #[test]
