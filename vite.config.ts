@@ -46,6 +46,7 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     css: true,
-    exclude: [...configDefaults.exclude, '.local/**'],
+    // Agent worktrees under .claude/ are separate checkouts with their own tests.
+    exclude: [...configDefaults.exclude, '.local/**', '.claude/**'],
   },
 });
