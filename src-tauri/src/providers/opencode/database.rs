@@ -8,9 +8,7 @@ use std::{
 use rusqlite::{types::ValueRef, Connection, OpenFlags, Row};
 use serde_json::Value;
 
-use crate::{
-    pricing::ModelPricing, providers::local_usage::session_model::SessionModelTracker,
-};
+use crate::{pricing::ModelPricing, providers::local_usage::session_model::SessionModelTracker};
 
 use super::record::{
     parse_message, parse_part, ParsedMessage, ParsedPart, UsageRecord, EPOCH_MILLISECONDS_THRESHOLD,
