@@ -179,7 +179,7 @@ impl ZCodeUsageScanner {
             // Rows from a provider no Card is configured for keep their Others on Zai.
             let home = configured_owner.unwrap_or(ZCodeProvider::Zai);
             let rate_model = (!event.model.is_empty())
-                .then(|| resolve_rate_model(&event, pricing, target_card).0)
+                .then(|| resolve_rate_model(&event, pricing, target_card))
                 .flatten();
             let observation = UsageObservation {
                 rate_model: rate_model.as_deref(),
@@ -314,11 +314,12 @@ fn read_events(path: &Path, now: DateTime<Utc>) -> Result<Vec<UsageEvent>, ZCode
     Ok(events)
 }
 
-fn resolve_rate_model<'a>(
-    event: &'a UsageEvent,
+/// The variant's own model name when `provider` prices it, as `model-variant`.
+fn resolve_rate_model(
+    event: &UsageEvent,
     pricing: &ModelPricing,
     provider: &str,
-) -> (Option<String>, &'a str) {
+) -> Option<String> {
     let variant_model = event
         .variant
         .as_deref()
@@ -328,11 +329,7 @@ fn resolve_rate_model<'a>(
             != HistoricalRates::Untracked
             || pricing.resolve(model).is_some()
     });
-    if has_variant_rate {
-        (variant_model, &event.model)
-    } else {
-        (None, &event.model)
-    }
+    variant_model.filter(|_| has_variant_rate)
 }
 
 fn event_tokens(event: &UsageEvent) -> TokenBreakdown {
