@@ -20,7 +20,7 @@ use crate::{
         UsagePeriodSelection,
     },
     pricing::PricingStore,
-    providers::log_usage::scan_or_cached_usage,
+    providers::local_usage::log_usage::scan_or_cached_usage,
     storage::Storage,
 };
 
@@ -141,8 +141,8 @@ pub enum AntigravityError {
     LocalUsage,
 }
 
-impl From<crate::providers::home_clients::FoldInUnavailable> for AntigravityError {
-    fn from(_: crate::providers::home_clients::FoldInUnavailable) -> Self {
+impl From<crate::providers::local_usage::home_clients::FoldInUnavailable> for AntigravityError {
+    fn from(_: crate::providers::local_usage::home_clients::FoldInUnavailable) -> Self {
         Self::LocalUsage
     }
 }

@@ -119,7 +119,7 @@ use self::{
     local_usage::scan_local_usage,
     mapper::map_usage,
 };
-use crate::providers::log_usage::scan_or_cached_usage;
+use crate::providers::local_usage::log_usage::scan_or_cached_usage;
 
 #[derive(Debug, Error)]
 pub enum ClaudeError {
@@ -159,8 +159,8 @@ pub enum ClaudeError {
     AccountStore(#[from] crate::storage::StorageError),
 }
 
-impl From<crate::providers::home_clients::FoldInUnavailable> for ClaudeError {
-    fn from(_: crate::providers::home_clients::FoldInUnavailable) -> Self {
+impl From<crate::providers::local_usage::home_clients::FoldInUnavailable> for ClaudeError {
+    fn from(_: crate::providers::local_usage::home_clients::FoldInUnavailable) -> Self {
         Self::LocalUsage
     }
 }

@@ -5,9 +5,8 @@ use crate::{
     models::{MetricValue, MetricValueKind, QuotaFormat, QuotaWindow, UsageHistory, ValueMetric},
     pricing::ModelPricing,
     providers::{
-        card_usage::DailyUsageAccumulator,
-        card_usage::{self, Settled, UsageObservation},
         cursor::csv::CursorCsvRow,
+        local_usage::card_usage::{self, DailyUsageAccumulator, Settled, UsageObservation},
     },
 };
 
@@ -911,8 +910,8 @@ mod tests {
         use crate::{
             pricing::{test_bundled_pricing, TokenBreakdown},
             providers::{
-                card_usage::test_support::{assert_pinned, relative_json},
                 cursor::csv::CursorCsvRow,
+                local_usage::card_usage::test_support::{assert_pinned, relative_json},
             },
         };
 

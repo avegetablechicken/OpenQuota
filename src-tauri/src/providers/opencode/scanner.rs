@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
-    providers::{
+    providers::local_usage::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, Settled, UsageObservation},
     },
@@ -347,8 +347,10 @@ mod unit_tests {
 
         use super::super::aggregate_into;
         use crate::providers::{
-            card_usage::test_support::{assert_pinned, relative_json},
-            card_usage::DailyUsageAccumulator,
+            local_usage::card_usage::{
+                test_support::{assert_pinned, relative_json},
+                DailyUsageAccumulator,
+            },
             opencode::record::{CostProvenance, UsageRecord},
         };
 

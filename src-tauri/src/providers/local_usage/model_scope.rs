@@ -79,11 +79,11 @@ fn is_zai_slug(slug: &str) -> bool {
     has_prefix_or_exact(slug, "glm") || slug.starts_with("chatglm") || slug.starts_with("codegeex")
 }
 
-pub(super) fn is_local_runtime_provider(provider_id: &str) -> bool {
+pub(in crate::providers) fn is_local_runtime_provider(provider_id: &str) -> bool {
     provider_id.trim().eq_ignore_ascii_case("ollama")
 }
 
-pub(super) fn is_kimi_provider_alias(provider_id: &str) -> bool {
+pub(in crate::providers) fn is_kimi_provider_alias(provider_id: &str) -> bool {
     matches!(
         provider_id.trim().to_ascii_lowercase().as_str(),
         "kimi" | "kimi-code" | "kimi-coding" | "moonshot" | "moonshot-cn" | "moonshotai"
@@ -91,7 +91,7 @@ pub(super) fn is_kimi_provider_alias(provider_id: &str) -> bool {
 }
 
 /// Expands bare Kimi short-series slugs (`k2p5`, `k3`, `k3.1-pro`) when paired with a Kimi provider.
-pub(super) fn normalize_provider_model(provider_id: &str, model: &str) -> String {
+pub(in crate::providers) fn normalize_provider_model(provider_id: &str, model: &str) -> String {
     let trimmed = model.trim();
     if trimmed.is_empty() || trimmed.contains('/') || !is_kimi_provider_alias(provider_id) {
         return trimmed.to_owned();
@@ -109,7 +109,7 @@ pub(super) fn normalize_provider_model(provider_id: &str, model: &str) -> String
 ///
 /// Local runtimes (`ollama/*`) and model families without a dedicated OpenQuota card
 /// (`deepseek`, `qwen`, `llama`, `mistral`, `gpt-oss`, ...) return `None`.
-pub(super) fn card_for_model(model: &str) -> Option<&'static str> {
+pub(in crate::providers) fn card_for_model(model: &str) -> Option<&'static str> {
     let normalized = normalized(model);
     let slug = model_slug(&normalized)?;
     if is_claude_slug(slug) {
@@ -132,7 +132,7 @@ pub(super) fn card_for_model(model: &str) -> Option<&'static str> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LocalModelDisposition {
+pub(in crate::providers) enum LocalModelDisposition {
     /// Belongs on the home card itself.
     Home,
     /// Belongs on another dedicated model-family card; do not add to the home card or Others.
@@ -142,7 +142,10 @@ pub(super) enum LocalModelDisposition {
 }
 
 /// Classifies a model seen in `home_card`'s native CLI logs.
-pub(super) fn native_log_disposition(home_card: &str, model: &str) -> LocalModelDisposition {
+pub(in crate::providers) fn native_log_disposition(
+    home_card: &str,
+    model: &str,
+) -> LocalModelDisposition {
     if let Some(owner) = card_for_model(model) {
         return if owner == home_card {
             LocalModelDisposition::Home
@@ -157,7 +160,7 @@ pub(super) fn native_log_disposition(home_card: &str, model: &str) -> LocalModel
     }
 }
 
-pub(super) fn model_belongs_to_card(card_id: &str, model: &str) -> bool {
+pub(in crate::providers) fn model_belongs_to_card(card_id: &str, model: &str) -> bool {
     match card_id {
         "claude" | "codex" | "grok" | "kimi" | "minimax" | "zai" => {
             card_for_model(model) == Some(card_id)
@@ -171,7 +174,7 @@ pub(super) fn model_belongs_to_card(card_id: &str, model: &str) -> bool {
 }
 
 #[cfg(test)]
-pub(super) fn is_model_obviously_foreign_to_card(card_id: &str, model: &str) -> bool {
+pub(in crate::providers) fn is_model_obviously_foreign_to_card(card_id: &str, model: &str) -> bool {
     match card_id {
         "claude" | "codex" | "grok" | "kimi" | "minimax" | "zai" | "antigravity" => {
             !model_belongs_to_card(card_id, model)

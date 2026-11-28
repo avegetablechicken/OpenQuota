@@ -1,6 +1,5 @@
 pub mod antigravity;
 pub mod api_key;
-mod card_usage;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
@@ -8,22 +7,17 @@ pub mod credential_store;
 pub mod cursor;
 mod detection;
 pub mod devin;
-mod gemini_cli_usage;
 pub mod grok;
-mod home_clients;
 pub mod kimi;
-mod log_usage;
+mod local_usage;
 pub mod minimax;
-mod model_scope;
 pub mod opencode;
 pub mod openrouter;
-mod pi_usage;
 mod registry;
 pub mod sub2api;
 #[cfg(test)]
 pub mod test_http;
 pub mod zai;
-mod zcode_usage;
 
 pub use detection::{detect_local_credentials, CredentialProbeResults, CredentialProbeStatus};
 pub use registry::ProviderRegistry;

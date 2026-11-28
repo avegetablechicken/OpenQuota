@@ -1,0 +1,1311 @@
+use std::{collections::HashMap, fs, io, path::Path};
+
+use chrono::{TimeZone, Utc};
+use tempfile::tempdir;
+
+use super::{
+    aggregate, codex_homes, discover_session_files, estimate_cost, parse_jsonl, scan_codex_events,
+    ServiceTier, TokenEvent,
+};
+use crate::{
+    pricing::{test_bundled_pricing, ModelPricing, ModelRates, PricingCatalog, PricingSupplement},
+    providers::local_usage::card_usage::codex::{
+        codex_long_context_rates, codex_priority_multiplier,
+    },
+    providers::local_usage::log_usage::LogFileFingerprint,
+    providers::local_usage::model_scope::model_belongs_to_card,
+    storage::Storage,
+};
+
+#[test]
+fn parses_last_usage_and_tracks_turn_model() {
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"turn_context","payload":{"model":"gpt-5.5"}}
+{"timestamp":"2026-07-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":115}}}}"#;
+    let events = parse_jsonl(content);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].model, "gpt-5.5");
+    assert_eq!(events[0].total, 115);
+    assert_eq!(events[0].cached, 20);
+}
+
+#[test]
+fn missing_model_records_as_unattributed_without_fabricating_gpt5() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-07-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+    let events = parse_jsonl(content);
+    assert_eq!(events.len(), 1);
+    assert!(events[0].model.is_empty());
+
+    let history = aggregate(&events, now, &test_bundled_pricing());
+    let today = history.today.unwrap();
+    assert_eq!(today.tokens, 110);
+    assert_eq!(today.estimated_cost_usd, None);
+    assert!(!today.estimate_complete);
+    assert_eq!(today.unknown_models, ["Unattributed"]);
+    assert!(history.other_usage.is_none());
+}
+
+#[test]
+fn codex_model_filter_rejects_compatible_non_codex_models() {
+    for model in [
+        "qwen3.8:27b - mlx",
+        "claude-sonnet-4.6",
+        "gemini-3-flash",
+        "gpt-oss-20b",
+        "ollama/qwen3",
+    ] {
+        assert!(!model_belongs_to_card("codex", model), "{model}");
+    }
+    for model in [
+        "gpt-5.4",
+        "gpt-5.6-luna",
+        "gpt-5.3-codex",
+        "codex-auto-review",
+    ] {
+        assert!(model_belongs_to_card("codex", model), "{model}");
+    }
+}
+
+#[test]
+fn filtered_models_are_kept_in_other_usage_without_entering_codex_totals() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"deepseek-v4-flash","info":{"last_token_usage":{"input_tokens":500,"output_tokens":20,"total_tokens":520}}}}"#;
+    let history = aggregate(&parse_jsonl(content), now, &test_bundled_pricing());
+
+    assert_eq!(history.today.as_ref().unwrap().tokens, 110);
+    let other = history.other_usage.unwrap().today.unwrap();
+    assert_eq!(other.tokens, 520);
+    assert_eq!(other.priced_tokens, 520);
+    assert!(other.estimated_cost_usd.is_some());
+}
+
+#[test]
+fn owned_foreign_models_in_codex_logs_route_to_their_card_without_entering_others() {
+    let now = Utc.with_ymd_and_hms(2026, 10, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-10-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-10-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"claude-sonnet-4-6","info":{"last_token_usage":{"input_tokens":200,"output_tokens":20,"total_tokens":220}}}}
+{"timestamp":"2026-10-10T09:30:00Z","type":"event_msg","payload":{"type":"token_count","model":"kimi-k3","info":{"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}
+{"timestamp":"2026-10-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"deepseek-v4-flash","info":{"last_token_usage":{"input_tokens":500,"output_tokens":20,"total_tokens":520}}}}"#;
+    let pricing = test_bundled_pricing();
+    let events = parse_jsonl(content);
+
+    let codex = aggregate(&events, now, &pricing);
+    assert_eq!(codex.today.as_ref().unwrap().tokens, 110);
+    assert_eq!(codex.other_usage.unwrap().today.unwrap().tokens, 520);
+
+    let mut claude = crate::providers::local_usage::card_usage::DailyUsageAccumulator::default();
+    assert!(super::aggregate_routed_into(
+        &events,
+        now,
+        &pricing,
+        "claude",
+        &mut claude
+    ));
+    let claude_today = claude.build(now, "test").today.unwrap();
+    assert_eq!(claude_today.tokens, 220);
+    assert!(claude_today.estimated_cost_usd.is_some());
+
+    let mut kimi = crate::providers::local_usage::card_usage::DailyUsageAccumulator::default();
+    assert!(super::aggregate_routed_into(
+        &events, now, &pricing, "kimi", &mut kimi
+    ));
+    let kimi_today = kimi.build(now, "test").today.unwrap();
+    assert_eq!(kimi_today.tokens, 330);
+    assert!(kimi_today.estimated_cost_usd.is_some());
+}
+
+#[test]
+fn cumulative_totals_become_deltas() {
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"output_tokens":20,"total_tokens":180}}}}"#;
+    let events = parse_jsonl(content);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].input, 60);
+    assert_eq!(events[1].output, 10);
+}
+
+#[test]
+fn auto_review_keeps_its_model_name() {
+    let content = r#"{"timestamp":"2026-03-10T08:00:00Z","type":"turn_context","payload":{"model":"codex-auto-review"}}
+{"timestamp":"2026-03-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}}"#;
+    let events = parse_jsonl(content);
+    assert_eq!(events[0].model, "codex-auto-review");
+}
+
+#[test]
+fn auto_review_requires_a_dated_chatgpt_rate_and_session_evidence() {
+    let template = r#"{"type":"session_meta","payload":{"model_provider":"openai"}}
+{"type":"turn_context","payload":{"model":"codex-auto-review"}}
+{"timestamp":"2026-10-07T08:01:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"plan_type":"pro"},"info":{"last_token_usage":{"input_tokens":100,"output_tokens":5}}}}"#;
+    let pricing = test_bundled_pricing();
+    let now = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+    for (log, expected) in [
+        (template.to_owned(), Some(0.0)),
+        (template.replace("2026-10-07", "2026-10-05"), None),
+        (template.replace("openai", "custom"), None),
+        (template.replace("pro", "unknown"), None),
+    ] {
+        let history = aggregate(&parse_jsonl(&log), now, &pricing);
+        let period = history.last_30_days.unwrap();
+        assert_eq!(period.tokens, 105);
+        assert_eq!(period.estimated_cost_usd, expected);
+        assert_eq!(period.estimate_complete, expected.is_some());
+    }
+}
+
+#[test]
+fn subagent_replay_seeds_the_cumulative_baseline() {
+    let content = r#"{"timestamp":"2026-05-12T08:03:00Z","type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":true}}}}
+{"timestamp":"2026-05-12T08:03:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":100,"output_tokens":200,"total_tokens":1200}}}}
+{"timestamp":"2026-05-12T08:04:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":150,"output_tokens":300,"total_tokens":1800}}}}
+{"timestamp":"2026-05-12T08:04:30Z","type":"event_msg","payload":{"type":"task_started","started_at":1}}
+{"timestamp":"2026-05-12T08:05:00Z","type":"event_msg","payload":{"type":"task_started","started_at":9999999999}}
+{"timestamp":"2026-05-12T08:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1600,"cached_input_tokens":160,"output_tokens":320,"total_tokens":1920}}}}"#;
+    let events = parse_jsonl(content);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].input, 100);
+    assert_eq!(events[0].cached, 10);
+    assert_eq!(events[0].output, 20);
+    assert_eq!(events[0].total, 120);
+}
+
+#[test]
+fn child_without_a_live_task_emits_no_replayed_usage() {
+    let content = r#"{"timestamp":"2026-05-12T08:03:00Z","type":"session_meta","payload":{"forked_from_id":"parent"}}
+{"timestamp":"2026-05-12T08:04:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120},"total_token_usage":{"input_tokens":1000,"output_tokens":200,"total_tokens":1200}}}}"#;
+    assert!(parse_jsonl(content).is_empty());
+}
+
+#[test]
+fn child_without_a_metadata_timestamp_opens_only_on_its_live_task() {
+    let content = r#"{"type":"session_meta","payload":{"forked_from_id":"parent"}}
+{"timestamp":"2026-05-12T08:03:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"output_tokens":200,"total_tokens":1200}}}}
+{"timestamp":"2026-05-12T08:03:30Z","type":"event_msg","payload":{"type":"task_started","started_at":1}}
+{"timestamp":"2026-05-12T08:04:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"output_tokens":300,"total_tokens":1800}}}}
+{"timestamp":"2026-05-12T08:05:00Z","type":"event_msg","payload":{"type":"task_started","started_at":9999999999}}
+{"timestamp":"2026-05-12T08:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1600,"output_tokens":320,"total_tokens":1920}}}}"#;
+    let events = parse_jsonl(content);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].input, 100);
+    assert_eq!(events[0].output, 20);
+    assert_eq!(events[0].total, 120);
+}
+
+#[test]
+fn null_parent_metadata_keeps_root_session_usage() {
+    let content = r#"{"timestamp":"2026-05-12T08:03:00Z","type":"session_meta","payload":{"forked_from_id":null,"parent_thread_id":" "}}
+{"timestamp":"2026-05-12T08:04:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}}"#;
+    assert_eq!(parse_jsonl(content).len(), 1);
+}
+
+#[test]
+fn service_tier_is_attached_to_each_usage_event() {
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":" fast "}}}
+{"timestamp":"2026-07-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T08:02:00Z","type":"event_msg","payload":{"type":"thread_settings_applied","service_tier":"default"}}
+{"timestamp":"2026-07-10T08:03:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#;
+    let events = parse_jsonl(content);
+    assert_eq!(events[0].tier, ServiceTier::Fast);
+    assert_eq!(events[1].tier, ServiceTier::Standard);
+}
+
+#[test]
+fn unchanged_cumulative_snapshot_is_not_counted_twice() {
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+    assert_eq!(parse_jsonl(content).len(), 1);
+}
+
+#[test]
+fn accepts_trimmed_timestamps_and_rejects_numeric_strings() {
+    let content = r#"{"timestamp":" 2026-07-10T08:00:00Z ","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.5","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.5","info":{"last_token_usage":{"input_tokens":"100","output_tokens":"10","total_tokens":"110"}}}}"#;
+    let events = parse_jsonl(content);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].total, 110);
+}
+
+#[test]
+fn parses_cross_device_timestamp_offsets() {
+    let content = r#"{"timestamp":"2026-07-15 15:00:00.123456+03:00","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.5","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+    let events = parse_jsonl(content);
+    assert_eq!(
+        events[0].timestamp.to_rfc3339(),
+        "2026-07-15T12:00:00.123+00:00"
+    );
+}
+
+#[test]
+fn codex_home_override_supports_multiple_comma_separated_paths() {
+    let directory = tempdir().unwrap();
+    let default_home = directory.path().join("home");
+    let first = directory.path().join("codex-work");
+    let second = directory.path().join("codex-personal");
+    let configured = format!("{}, {}", first.display(), second.display());
+
+    assert_eq!(
+        codex_homes(Some(configured.as_ref()), &default_home),
+        vec![first, second]
+    );
+    assert_eq!(
+        codex_homes(Some("~/.codex-alt".as_ref()), &default_home),
+        vec![default_home.join(".codex-alt")]
+    );
+    assert_eq!(
+        codex_homes(None, &default_home),
+        vec![default_home.join(".codex")]
+    );
+    assert_eq!(
+        codex_homes(Some("  \t ".as_ref()), &default_home),
+        vec![default_home.join(".codex")]
+    );
+}
+
+#[test]
+fn active_sessions_win_over_matching_archived_paths() {
+    let directory = tempdir().unwrap();
+    let home = directory.path();
+    let relative = "2026/07/rollout.jsonl";
+    let active = home.join("sessions").join(relative);
+    let archived = home.join("archived_sessions").join(relative);
+    fs::create_dir_all(active.parent().unwrap()).unwrap();
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::write(&active, "active").unwrap();
+    fs::write(&archived, "archived").unwrap();
+
+    assert_eq!(
+        discover_session_files(&[home.to_path_buf()]),
+        vec![fs::canonicalize(active).unwrap()]
+    );
+}
+
+#[test]
+fn discovers_logs_under_a_symlinked_sessions_root() {
+    let directory = tempdir().unwrap();
+    let home = directory.path().join("codex");
+    let real_sessions = directory.path().join("real-sessions");
+    let log = real_sessions.join("2026/07/rollout.jsonl");
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::write(&log, "{}").unwrap();
+    if create_directory_symlink(&real_sessions, &home.join("sessions")).is_err() {
+        return;
+    }
+
+    assert_eq!(
+        discover_session_files(&[home]),
+        vec![fs::canonicalize(log).unwrap()]
+    );
+}
+
+#[test]
+fn scan_cache_picks_up_changed_and_new_logs_without_using_config_tier() {
+    let directory = tempdir().unwrap();
+    let home = directory.path().join("codex");
+    let sessions = home.join("sessions");
+    let first = sessions.join("rollout-a.jsonl");
+    let second = sessions.join("rollout-b.jsonl");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(home.join("config.toml"), "service_tier = \"priority\"").unwrap();
+    fs::write(
+        &first,
+        r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.5","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#,
+    )
+    .unwrap();
+    let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+
+    let initial = scan_codex_events(&storage, std::slice::from_ref(&home), now).unwrap();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].tier, ServiceTier::Standard);
+
+    fs::write(
+        &first,
+        r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.5","info":{"last_token_usage":{"input_tokens":130,"output_tokens":10,"total_tokens":140}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &second,
+        r#"{"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.5","info":{"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#,
+    )
+    .unwrap();
+
+    let refreshed = scan_codex_events(&storage, &[home], now).unwrap();
+    assert_eq!(refreshed.len(), 2);
+    assert_eq!(refreshed.iter().map(|event| event.total).sum::<u64>(), 195);
+    assert!(refreshed
+        .iter()
+        .all(|event| event.tier == ServiceTier::Standard));
+}
+
+#[test]
+fn schema_upgrade_reparses_cached_auto_review_events() {
+    let directory = tempdir().unwrap();
+    let home = directory.path().join("codex");
+    let sessions = home.join("sessions");
+    let path = sessions.join("rollout.jsonl");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        &path,
+        r#"{"timestamp":"2026-03-10T08:00:00Z","type":"turn_context","payload":{"model":"codex-auto-review"}}
+{"timestamp":"2026-03-10T08:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}}"#,
+    )
+    .unwrap();
+    let path = fs::canonicalize(path).unwrap();
+    let fingerprint = LogFileFingerprint::from_metadata(&fs::metadata(&path).unwrap()).unwrap();
+    let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+    storage
+        .save_log_events(
+            "codex",
+            &path,
+            fingerprint.size,
+            fingerprint.modified_nanos,
+            r#"{"schema_version":2,"events":[{"timestamp":"2026-03-10T08:01:00Z","model":"gpt-5.4","input":10,"cached":0,"output":5,"reasoning":0,"total":15,"is_fast":false}]}"#,
+        )
+        .unwrap();
+
+    let events = scan_codex_events(
+        &storage,
+        &[home],
+        Utc.with_ymd_and_hms(2026, 3, 10, 12, 0, 0).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].model, "codex-auto-review");
+    let cached = storage
+        .load_log_events("codex", &path, fingerprint.size, fingerprint.modified_nanos)
+        .unwrap()
+        .unwrap();
+    let cached = serde_json::from_str::<serde_json::Value>(&cached).unwrap();
+    assert_eq!(cached["schema_version"], super::LOG_CACHE_SCHEMA_VERSION);
+    assert_eq!(cached["events"][0]["model"], "codex-auto-review");
+    assert!(cached["events"][0].get("pricing_model").is_none());
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[test]
+fn newly_priced_models_produce_a_complete_estimate() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.6-sol","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+    let pricing = test_bundled_pricing();
+    let history = aggregate(&parse_jsonl(content), now, &pricing);
+    assert_eq!(history.today.as_ref().unwrap().tokens, 110);
+    assert!(history.today.as_ref().unwrap().estimated_cost_usd.is_some());
+    assert!(history.today.as_ref().unwrap().estimate_complete);
+    assert!(history.unknown_models.is_empty());
+}
+
+#[test]
+fn uppercase_codex_models_are_priced_without_losing_display_identity() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"GPT-5.5","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+    let history = aggregate(&parse_jsonl(content), now, &test_bundled_pricing());
+    let today = history.today.unwrap();
+
+    assert_eq!(today.tokens, 110);
+    assert!(today.estimated_cost_usd.is_some());
+    assert!(today.estimate_complete);
+    let entry = &today.model_breakdown.unwrap().models[0];
+    assert_eq!(entry.model, "gpt-5.5");
+    assert_eq!(entry.variants.as_ref().unwrap()[0].model, "GPT-5.5");
+    assert!(history.unknown_models.is_empty());
+}
+
+#[test]
+fn daybreak_uses_sol_rates_without_losing_its_breakdown_identity() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-daybreak-blue-latest","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+    let pricing = test_bundled_pricing();
+    let history = aggregate(&parse_jsonl(content), now, &pricing);
+    let today = history.today.as_ref().unwrap();
+    assert_eq!(today.tokens, 110);
+    assert_eq!(today.estimated_cost_usd, Some(0.0008));
+    assert!(today.estimate_complete);
+    let entry = &today.model_breakdown.as_ref().unwrap().models[0];
+    assert_eq!(entry.model, "gpt-5.6-sol");
+    assert_eq!(
+        entry.variants.as_ref().unwrap()[0].model,
+        "gpt-daybreak-blue-latest"
+    );
+    assert!(history.unknown_models.is_empty());
+}
+
+#[test]
+fn period_breakdown_uses_model_names_and_retains_unpriced_usage() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}
+{"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":800,"output_tokens":100,"total_tokens":900}}}}
+{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
+    let pricing = test_bundled_pricing();
+    let history = aggregate(&parse_jsonl(content), now, &pricing);
+    let today = history.today.unwrap();
+    let breakdown = today.model_breakdown.unwrap();
+
+    assert_eq!(today.tokens, 2_500);
+    assert!(!today.estimate_complete);
+    assert_eq!(today.unknown_models, ["gpt-future-unpriced-model"]);
+    assert_eq!(
+        breakdown
+            .models
+            .iter()
+            .map(|entry| entry.model.as_str())
+            .collect::<Vec<_>>(),
+        ["gpt-5.4", "gpt-5.3-codex", "gpt-future-unpriced-model"]
+    );
+    assert_eq!(breakdown.models[2].total_tokens, 500);
+    assert_eq!(breakdown.models[2].cost_usd, None);
+    assert_eq!(breakdown.source_note, "From your Codex logs (estimated)");
+}
+
+#[test]
+fn unknown_only_usage_keeps_token_history_without_inventing_cost() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
+    let pricing = test_bundled_pricing();
+    let history = aggregate(&parse_jsonl(content), now, &pricing);
+
+    let today = history.today.unwrap();
+    assert_eq!(today.tokens, 500);
+    assert_eq!(today.estimated_cost_usd, None);
+    assert!(!today.estimate_complete);
+    assert_eq!(today.unknown_models, ["gpt-future-unpriced-model"]);
+    let breakdown = today.model_breakdown.unwrap();
+    assert_eq!(breakdown.models[0].model, "gpt-future-unpriced-model");
+    assert_eq!(breakdown.models[0].total_tokens, 500);
+    assert_eq!(breakdown.models[0].cost_usd, None);
+    assert_eq!(history.last_30_days.unwrap().tokens, 500);
+    assert_eq!(history.daily.len(), 1);
+    assert_eq!(history.daily[0].tokens, 500);
+    assert_eq!(history.daily[0].estimated_cost_usd, None);
+    assert_eq!(history.unknown_models, ["gpt-future-unpriced-model"]);
+}
+
+#[test]
+fn expired_until_rate_retains_tokens_as_unpriced() {
+    let now = Utc.with_ymd_and_hms(2026, 12, 1, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-12-01T12:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.6-sol","info":{"last_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}"#;
+    let pricing = test_bundled_pricing();
+    let events = parse_jsonl(content);
+    assert_eq!(events.len(), 1);
+    assert_eq!(estimate_cost(&events[0], &pricing), None);
+
+    let history = aggregate(&events, now, &pricing);
+    let today = history.today.unwrap();
+    assert_eq!(today.tokens, 1_100);
+    assert_eq!(today.estimated_cost_usd, None);
+    assert!(!today.estimate_complete);
+    assert_eq!(today.unknown_models, ["gpt-5.6-sol"]);
+}
+
+#[test]
+fn unsupported_tiers_and_fast_above_threshold_retain_tokens_as_unpriced() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","service_tier":"fast","info":{"last_token_usage":{"input_tokens":272001,"output_tokens":0,"total_tokens":272001}}}}
+{"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","service_tier":"flex","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","service_tier":"ultrafast","info":{"last_token_usage":{"input_tokens":200,"output_tokens":20,"total_tokens":220}}}}
+{"timestamp":"2026-07-10T11:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","service_tier":"mystery-tier","info":{"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#;
+    let pricing = test_bundled_pricing();
+    let events = parse_jsonl(content);
+    assert_eq!(events.len(), 4);
+    assert!(events
+        .iter()
+        .all(|event| estimate_cost(event, &pricing).is_none()));
+
+    let history = aggregate(&events, now, &pricing);
+    let today = history.today.unwrap();
+    assert_eq!(today.tokens, 272_661);
+    assert_eq!(today.estimated_cost_usd, None);
+    assert!(!today.estimate_complete);
+    assert_eq!(today.unknown_models, ["gpt-5.3-codex", "gpt-5.4"]);
+}
+
+#[test]
+fn provider_fixture_parses_realistic_codex_jsonl() {
+    let content = include_str!("../../../tests/fixtures/codex_session.jsonl");
+    let events = parse_jsonl(content);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events.iter().map(|event| event.total).sum::<u64>(), 225);
+    assert!(events.iter().all(|event| event.model == "gpt-5.4"));
+}
+
+#[test]
+fn rollout_ultrafast_and_cache_writes_use_disjoint_token_buckets() {
+    let log = r#"{"type":"turn_context","payload":{"model":"gpt-6.2-sol"}}
+{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"ultrafast"}}}
+{"timestamp":"2026-11-18T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000,"cached_input_tokens":60000,"cache_write_input_tokens":20000,"input_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":5000}},"output_tokens":10000,"reasoning_output_tokens":5000}}}}
+{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":null}}}
+{"timestamp":"2026-11-18T12:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":101000,"cached_input_tokens":60000,"cache_write_input_tokens":21000,"input_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":5000}},"output_tokens":10000,"reasoning_output_tokens":5000}}}}"#;
+    let events = parse_jsonl(log);
+    let pricing = test_bundled_pricing();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].total, 110000);
+    // 20k ordinary, 60k reads, 15k short writes, 5k long writes, 10k output.
+    assert!((estimate_cost(&events[0], &pricing).unwrap() - 0.6255).abs() < 1e-10);
+    assert_eq!(estimate_cost(&events[1], &pricing), Some(0.0025));
+}
+
+#[test]
+fn event_fast_tier_defaults_to_two_x_multiplier() {
+    let pricing = ModelPricing::new(
+        PricingSupplement::default(),
+        PricingCatalog {
+            entries: HashMap::from([("test-model".into(), ModelRates::new(2.0, 8.0))]),
+            retrieved_at: None,
+        },
+        PricingCatalog::default(),
+    );
+    let event = TokenEvent {
+        timestamp: Utc::now(),
+        model: "test-model".into(),
+        input: 1_000_000,
+        cached: 0,
+        output: 0,
+        reasoning: 0,
+        total: 1_000_000,
+        tier: ServiceTier::Standard,
+        cache_write: 0,
+        cache_write_12h: 0,
+        chatgpt_plan: false,
+    };
+    assert_eq!(estimate_cost(&event, &pricing), Some(2.0));
+    assert_eq!(
+        estimate_cost(
+            &TokenEvent {
+                tier: ServiceTier::Fast,
+                ..event
+            },
+            &pricing
+        ),
+        Some(4.0)
+    );
+}
+
+#[test]
+fn missing_cache_rate_provenance_uses_full_input_price() {
+    let mut inferred_rates = ModelRates::new(2.0, 8.0);
+    inferred_rates.cache_read_is_explicit = false;
+    let pricing = ModelPricing::new(
+        PricingSupplement::default(),
+        PricingCatalog {
+            entries: HashMap::from([("test-model".into(), inferred_rates)]),
+            retrieved_at: None,
+        },
+        PricingCatalog::default(),
+    );
+    let event = TokenEvent {
+        timestamp: Utc::now(),
+        model: "test-model".into(),
+        input: 1_000_000,
+        cached: 1_000_000,
+        output: 0,
+        reasoning: 0,
+        total: 1_000_000,
+        tier: ServiceTier::Standard,
+        cache_write: 0,
+        cache_write_12h: 0,
+        chatgpt_plan: false,
+    };
+
+    assert_eq!(estimate_cost(&event, &pricing), Some(2.0));
+}
+
+#[test]
+fn pro_model_overrides_an_explicit_legacy_cache_discount() {
+    let mut rates = ModelRates::new(2.0, 8.0);
+    rates.cache_read_per_million = 0.2;
+    let pricing = ModelPricing::new(
+        PricingSupplement::default(),
+        PricingCatalog {
+            entries: HashMap::from([("gpt-5.5-pro".into(), rates)]),
+            retrieved_at: None,
+        },
+        PricingCatalog::default(),
+    );
+    let event = TokenEvent {
+        timestamp: Utc::now(),
+        model: "gpt-5.5-pro".into(),
+        input: 100_000,
+        cached: 100_000,
+        output: 0,
+        reasoning: 0,
+        total: 100_000,
+        tier: ServiceTier::Standard,
+        cache_write: 0,
+        cache_write_12h: 0,
+        chatgpt_plan: false,
+    };
+
+    assert_eq!(estimate_cost(&event, &pricing), Some(0.2));
+}
+
+#[test]
+fn codex_long_context_rates_start_above_272k_prompt_tokens() {
+    let pricing = ModelPricing::new(
+        PricingSupplement::default(),
+        PricingCatalog {
+            entries: HashMap::from([("gpt-5.4".into(), ModelRates::new(2.5, 15.0))]),
+            retrieved_at: None,
+        },
+        PricingCatalog::default(),
+    );
+    let event = |input| TokenEvent {
+        timestamp: Utc::now(),
+        model: "gpt-5.4".into(),
+        input,
+        cached: 0,
+        output: 0,
+        reasoning: 0,
+        total: input,
+        tier: ServiceTier::Standard,
+        cache_write: 0,
+        cache_write_12h: 0,
+        chatgpt_plan: false,
+    };
+
+    assert!((estimate_cost(&event(272_000), &pricing).unwrap() - 0.68).abs() < 0.000_001);
+    assert!((estimate_cost(&event(272_001), &pricing).unwrap() - 1.360_005).abs() < 0.000_001);
+}
+
+#[test]
+fn codex_long_context_rate_matrix_matches_supported_model_families() {
+    for (model, expected) in [
+        ("gpt-5.4", (5.0, 22.5, 0.5)),
+        ("gpt-5.4-pro", (60.0, 270.0, 60.0)),
+        ("gpt-5.5", (10.0, 45.0, 1.0)),
+        ("gpt-5.5-pro", (60.0, 270.0, 60.0)),
+        ("gpt-5.6-sol", (10.0, 45.0, 1.0)),
+        ("gpt-5.6-terra", (4.0, 18.0, 0.4)),
+        ("gpt-5.6-luna", (0.4, 1.8, 0.04)),
+    ] {
+        assert_eq!(codex_long_context_rates(model), Some(expected), "{model}");
+    }
+    assert_eq!(
+        codex_long_context_rates("gpt-5.5-2026-04-23"),
+        Some((10.0, 45.0, 1.0))
+    );
+    assert_eq!(codex_long_context_rates("gpt-5.3-codex"), None);
+}
+
+#[test]
+fn codex_priority_multiplier_matrix_overrides_generic_fast_prices() {
+    let mut catalog_rates = ModelRates::new(2.0, 8.0);
+    catalog_rates.fast_multiplier = 3.0;
+
+    for model in ["gpt-5.5", "gpt-5.5-pro-20260423"] {
+        assert_eq!(codex_priority_multiplier(model, catalog_rates), 2.5);
+    }
+    for model in [
+        "gpt-5.4",
+        "gpt-5.4-pro",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra-2026-07-01",
+        "gpt-5.6-luna",
+    ] {
+        assert_eq!(
+            codex_priority_multiplier(model, catalog_rates),
+            2.0,
+            "{model}"
+        );
+    }
+    assert_eq!(
+        codex_priority_multiplier("future-model", catalog_rates),
+        3.0
+    );
+    assert_eq!(
+        codex_priority_multiplier("future-model", ModelRates::new(2.0, 8.0)),
+        2.0
+    );
+}
+
+#[test]
+fn fast_alias_uses_unscaled_base_rates_and_one_codex_multiplier() {
+    let supplement = PricingSupplement::decode(
+        br#"{"pricing":{},"fast_multipliers":{"gpt-5.5":2.5},"alias_rules":[]}"#,
+    )
+    .unwrap();
+    let pricing = ModelPricing::new(
+        supplement,
+        PricingCatalog {
+            entries: HashMap::from([("gpt-5.5".into(), ModelRates::new(2.0, 8.0))]),
+            retrieved_at: None,
+        },
+        PricingCatalog::default(),
+    );
+    let event = TokenEvent {
+        timestamp: Utc::now(),
+        model: "gpt-5.5-fast".into(),
+        input: 100_000,
+        cached: 0,
+        output: 0,
+        reasoning: 0,
+        total: 100_000,
+        tier: ServiceTier::Fast,
+        cache_write: 0,
+        cache_write_12h: 0,
+        chatgpt_plan: false,
+    };
+
+    assert_eq!(estimate_cost(&event, &pricing), Some(0.5));
+}
+
+#[test]
+fn fast_only_catalog_model_keeps_its_existing_rate_without_a_second_multiplier() {
+    let pricing = ModelPricing::new(
+        PricingSupplement::default(),
+        PricingCatalog::default(),
+        PricingCatalog {
+            entries: HashMap::from([("vendor-model-fast".into(), ModelRates::new(6.0, 20.0))]),
+            retrieved_at: None,
+        },
+    );
+    let event = TokenEvent {
+        timestamp: Utc::now(),
+        model: "vendor-model-fast".into(),
+        input: 100_000,
+        cached: 0,
+        output: 0,
+        reasoning: 0,
+        total: 100_000,
+        tier: ServiceTier::Fast,
+        cache_write: 0,
+        cache_write_12h: 0,
+        chatgpt_plan: false,
+    };
+
+    assert_eq!(estimate_cost(&event, &pricing), Some(0.6));
+}
+
+/// Pins the output of codex's per-event policy, so moving it into `card_usage` cannot change
+/// what any Card shows.
+mod characterization {
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+
+    use super::super::{aggregate, aggregate_routed_into, ServiceTier, TokenEvent};
+    use crate::{
+        pricing::test_bundled_pricing,
+        providers::local_usage::{
+            card_usage::test_support::{assert_pinned, relative_json},
+            card_usage::DailyUsageAccumulator,
+        },
+    };
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap()
+    }
+
+    fn event(days_ago: i64, model: &str, input: u64, output: u64, tier: ServiceTier) -> TokenEvent {
+        TokenEvent {
+            timestamp: now() - Duration::days(days_ago),
+            model: model.to_owned(),
+            input,
+            cached: 0,
+            output,
+            reasoning: 0,
+            total: input + output,
+            tier,
+            chatgpt_plan: false,
+            cache_write: 0,
+            cache_write_12h: 0,
+        }
+    }
+
+    fn events() -> Vec<TokenEvent> {
+        use ServiceTier::{Fast, Flex, Standard, UltraFast, Unknown};
+        let mut cached = event(0, "gpt-5.5", 10_000, 500, Standard);
+        cached.cached = 6_000;
+        cached.cache_write = 2_000;
+        cached.cache_write_12h = 500;
+        cached.reasoning = 300;
+        cached.total = 10_800;
+        let mut long_context = event(1, "gpt-5.5", 300_000, 2_000, Standard);
+        long_context.cached = 100_000;
+        let mut plan_review = event(2, "codex-auto-review", 1_000, 100, Standard);
+        plan_review.chatgpt_plan = true;
+        let mut empty_review = event(2, "codex-auto-review", 0, 0, Standard);
+        empty_review.total = 0;
+        let mut zero_total = event(5, "gpt-5.5", 0, 0, Standard);
+        zero_total.total = 0;
+        let mut routed_zero_total = event(5, "claude-sonnet-4-5", 1_000, 0, Standard);
+        routed_zero_total.total = 0;
+        let mut future = event(0, "gpt-5.5", 9_999, 9_999, Standard);
+        future.timestamp = now() + Duration::hours(1);
+        let duplicate = event(0, "gpt-5.4", 1_200, 120, Standard);
+        vec![
+            // Home models across tiers, cache splits and long context.
+            cached,
+            event(0, "gpt-5.5", 2_000, 200, Fast),
+            event(0, "gpt-5.5", 2_000, 200, UltraFast),
+            event(0, "gpt-5.5", 2_000, 200, Flex),
+            event(0, "gpt-5.5", 2_000, 200, Unknown),
+            event(1, "gpt-5.5-fast", 1_000, 100, Standard),
+            event(1, "gpt-5.4-pro", 1_000, 100, Standard),
+            event(1, "gpt-5.3-codex", 1_000, 100, Fast),
+            event(1, "gpt-5.5-2026-04-23", 1_000, 100, Standard),
+            long_context,
+            duplicate.clone(),
+            duplicate,
+            // Auto-review with and without a ChatGPT plan, and an empty one kept for its label.
+            plan_review,
+            event(2, "codex-auto-review", 1_000, 100, Standard),
+            empty_review,
+            // A codex-family model without a price, and a missing model.
+            event(2, "gpt-9-unreleased", 700, 70, Standard),
+            event(2, "  ", 400, 40, Standard),
+            // Routed to other Cards, across tiers.
+            event(3, "claude-sonnet-4-5", 1_500, 150, Standard),
+            event(3, "claude-opus-4-6", 1_500, 150, Fast),
+            event(3, "claude-opus-4-6", 1_500, 150, Flex),
+            event(3, "claude-opus-4-6", 1_500, 150, Unknown),
+            event(3, "gemini-3-pro", 800, 80, Standard),
+            event(3, "glm-4.6", 600, 60, Standard),
+            event(3, "kimi-k2", 600, 60, Standard),
+            // Others: priced, unpriced, local runtime, and gpt-oss.
+            event(4, "deepseek-chat", 900, 90, Standard),
+            event(4, "totally-unknown-model", 50, 5, Standard),
+            event(4, "ollama/llama3", 50, 5, Standard),
+            event(4, "gpt-oss-120b", 500, 50, Fast),
+            // Zero reported totals: dropped unless something was paid.
+            zero_total,
+            routed_zero_total,
+            // Window edges.
+            event(29, "gpt-5.5", 100, 10, Standard),
+            event(29, "claude-sonnet-4-5", 100, 10, Standard),
+            event(30, "gpt-5.5", 100, 10, Standard),
+            event(30, "claude-sonnet-4-5", 100, 10, Standard),
+            event(30, "deepseek-chat", 100, 10, Standard),
+            future,
+        ]
+    }
+
+    #[test]
+    fn native_card_output_is_pinned() {
+        let history = aggregate(&events(), now(), &test_bundled_pricing());
+        assert_pinned("native", &relative_json(&history, now()), NATIVE);
+    }
+
+    #[test]
+    fn routed_output_is_pinned_per_card() {
+        let actual = ["claude", "antigravity", "zai", "kimi", "grok", "minimax"]
+            .map(|card_id| {
+                let mut accumulator = DailyUsageAccumulator::default();
+                let contributed = aggregate_routed_into(
+                    &events(),
+                    now(),
+                    &test_bundled_pricing(),
+                    card_id,
+                    &mut accumulator,
+                );
+                let json = relative_json(&accumulator.build(now(), "test"), now());
+                format!("== {card_id} contributed={contributed}\n{json}")
+            })
+            .join("\n");
+        assert_pinned("routed", &actual, ROUTED);
+    }
+
+    const NATIVE: &str = r#"
+{
+  "today": {
+    "tokens": 20920,
+    "estimatedCostUsd": 0.09455,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.4",
+          "totalTokens": 1320,
+          "costUsd": 0.0048
+        },
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 19600,
+          "costUsd": null
+        }
+      ],
+      "sourceNote": "From your Codex logs (estimated)"
+    },
+    "unknownModels": [
+      "gpt-5.5"
+    ]
+  },
+  "yesterday": {
+    "tokens": 306400,
+    "estimatedCostUsd": 2.2723,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 303100,
+          "costUsd": 2.21,
+          "variants": [
+            {
+              "model": "gpt-5.5",
+              "totalTokens": 302000,
+              "costUsd": 2.19
+            },
+            {
+              "model": "gpt-5.5-fast",
+              "totalTokens": 1100,
+              "costUsd": 0.02
+            }
+          ]
+        },
+        {
+          "model": "Other",
+          "totalTokens": 3300,
+          "costUsd": 0.0623,
+          "variants": [
+            {
+              "model": "gpt-5.4-pro",
+              "totalTokens": 1100,
+              "costUsd": 0.048
+            },
+            {
+              "model": "gpt-5.5-2026-04-23",
+              "totalTokens": 1100,
+              "costUsd": 0.008
+            },
+            {
+              "model": "gpt-5.3-codex",
+              "totalTokens": 1100,
+              "costUsd": 0.0063
+            }
+          ]
+        }
+      ],
+      "sourceNote": "From your Codex logs (estimated)"
+    },
+    "unknownModels": []
+  },
+  "last30Days": {
+    "tokens": 330840,
+    "estimatedCostUsd": 2.36765,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "totalTokens": 322810,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "gpt-5.5-fast",
+              "totalTokens": 1100,
+              "costUsd": 0.02
+            },
+            {
+              "model": "gpt-5.5",
+              "totalTokens": 321710,
+              "costUsd": null
+            }
+          ]
+        },
+        {
+          "model": "Other",
+          "totalTokens": 8030,
+          "costUsd": null,
+          "variants": [
+            {
+              "model": "gpt-5.4-pro",
+              "totalTokens": 1100,
+              "costUsd": 0.048
+            },
+            {
+              "model": "gpt-5.5-2026-04-23",
+              "totalTokens": 1100,
+              "costUsd": 0.008
+            },
+            {
+              "model": "gpt-5.3-codex",
+              "totalTokens": 1100,
+              "costUsd": 0.0063
+            },
+            {
+              "model": "gpt-5.4",
+              "totalTokens": 1320,
+              "costUsd": 0.0048
+            },
+            {
+              "model": "codex-auto-review",
+              "totalTokens": 2200,
+              "costUsd": null
+            },
+            {
+              "model": "gpt-9-unreleased",
+              "totalTokens": 770,
+              "costUsd": null
+            },
+            {
+              "model": "Unattributed",
+              "totalTokens": 440,
+              "costUsd": null
+            }
+          ]
+        }
+      ],
+      "sourceNote": "From your Codex logs (estimated)"
+    },
+    "unknownModels": [
+      "Unattributed",
+      "codex-auto-review",
+      "gpt-5.5",
+      "gpt-9-unreleased"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-0",
+      "tokens": 20920,
+      "estimatedCostUsd": 0.09455,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-1",
+      "tokens": 306400,
+      "estimatedCostUsd": 2.2723,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-2",
+      "tokens": 3410,
+      "estimatedCostUsd": null,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.0008,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "Unattributed",
+    "codex-auto-review",
+    "gpt-5.5",
+    "gpt-9-unreleased"
+  ],
+  "otherUsage": {
+    "today": null,
+    "yesterday": null,
+    "last30Days": {
+      "models": {
+        "deepseek-chat": {
+          "tokens": 990,
+          "pricedTokens": 990,
+          "estimatedCostUsd": 0.0002898,
+          "costEstimated": true
+        },
+        "gpt-oss-120b": {
+          "tokens": 550,
+          "pricedTokens": 550,
+          "estimatedCostUsd": 0.00021,
+          "costEstimated": true
+        },
+        "ollama/llama3": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        },
+        "totally-unknown-model": {
+          "tokens": 55,
+          "pricedTokens": 0,
+          "estimatedCostUsd": null,
+          "costEstimated": false
+        }
+      },
+      "tokens": 1650,
+      "pricedTokens": 1540,
+      "estimatedCostUsd": 0.0004998,
+      "costEstimated": true,
+      "estimateComplete": false
+    }
+  }
+}
+"#;
+    const ROUTED: &str = r#"
+== claude contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 6710,
+    "estimatedCostUsd": 0.021449999999999997,
+    "costEstimated": true,
+    "estimateComplete": false,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "claude-sonnet-4-5",
+          "totalTokens": 1760,
+          "costUsd": 0.0102
+        },
+        {
+          "model": "claude-opus-4-6",
+          "totalTokens": 4950,
+          "costUsd": null
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": [
+      "claude-opus-4-6"
+    ]
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 6600,
+      "estimatedCostUsd": 0.018,
+      "estimateComplete": false
+    },
+    {
+      "date": "today-5",
+      "tokens": 0,
+      "estimatedCostUsd": 0.003,
+      "estimateComplete": true
+    },
+    {
+      "date": "today-29",
+      "tokens": 110,
+      "estimatedCostUsd": 0.00045,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": [
+    "claude-opus-4-6"
+  ]
+}
+== antigravity contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 880,
+    "estimatedCostUsd": 0.00256,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "gemini-3-pro-preview",
+          "totalTokens": 880,
+          "costUsd": 0.00256,
+          "variants": [
+            {
+              "model": "gemini-3-pro",
+              "totalTokens": 880,
+              "costUsd": 0.00256
+            }
+          ]
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 880,
+      "estimatedCostUsd": 0.00256,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== zai contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.000384,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "glm-4.6",
+          "totalTokens": 660,
+          "costUsd": 0.000384
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.000384,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== kimi contributed=true
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": {
+    "tokens": 660,
+    "estimatedCostUsd": 0.00051,
+    "costEstimated": true,
+    "estimateComplete": true,
+    "modelBreakdown": {
+      "models": [
+        {
+          "model": "kimi-k2",
+          "totalTokens": 660,
+          "costUsd": 0.00051
+        }
+      ],
+      "sourceNote": "test"
+    },
+    "unknownModels": []
+  },
+  "daily": [
+    {
+      "date": "today-3",
+      "tokens": 660,
+      "estimatedCostUsd": 0.00051,
+      "estimateComplete": true
+    }
+  ],
+  "unknownModels": []
+}
+== grok contributed=false
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": []
+}
+== minimax contributed=false
+{
+  "today": null,
+  "yesterday": null,
+  "last30Days": null,
+  "daily": [],
+  "unknownModels": []
+}
+"#;
+}

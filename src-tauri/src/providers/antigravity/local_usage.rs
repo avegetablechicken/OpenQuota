@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::AntigravityError;
-use crate::providers::{
+use crate::providers::local_usage::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, UsageObservation},
     home_clients::{self, Card, FoldContext, HomeClient},
@@ -456,7 +456,7 @@ mod tests {
         scan_routed_roots_into, USAGE_SOURCE_NOTE,
     };
     use crate::{
-        pricing::test_bundled_pricing, providers::card_usage::DailyUsageAccumulator,
+        pricing::test_bundled_pricing, providers::local_usage::card_usage::DailyUsageAccumulator,
         storage::Storage,
     };
 
@@ -704,7 +704,7 @@ mod tests {
         use super::super::{aggregate_into, aggregate_routed_into, AntigravityTokenEvent};
         use crate::{
             pricing::test_bundled_pricing,
-            providers::{
+            providers::local_usage::{
                 card_usage::test_support::{assert_pinned, relative_json},
                 card_usage::DailyUsageAccumulator,
             },

@@ -13,7 +13,7 @@ use tempfile::tempdir;
 use crate::{
     models::{MetricSection, ProviderErrorKind},
     pricing::{ModelPricing, ModelRates, PricingCatalog, PricingStore, PricingSupplement},
-    providers::{card_usage::DailyUsageAccumulator, UsageProvider},
+    providers::{local_usage::card_usage::DailyUsageAccumulator, UsageProvider},
 };
 
 use super::{

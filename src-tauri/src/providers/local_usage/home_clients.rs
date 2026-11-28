@@ -13,13 +13,15 @@ use crate::{
     models::UsageHistory,
     pricing::{ModelPricing, PricingStore},
     providers::{
-        antigravity,
-        card_usage::DailyUsageAccumulator,
-        claude, codex, gemini_cli_usage, grok, kimi,
-        log_usage::scan_or_cached_usage,
-        opencode, pi_usage,
-        zcode_usage::{ZCodeProvider, ZCodeUsageScanner},
-        CacheIdentity,
+        antigravity, claude, codex, grok, kimi,
+        local_usage::{
+            card_usage::DailyUsageAccumulator,
+            gemini_cli,
+            log_usage::scan_or_cached_usage,
+            pi,
+            zcode::{ZCodeProvider, ZCodeUsageScanner},
+        },
+        opencode, CacheIdentity,
     },
     storage::Storage,
 };
@@ -219,7 +221,7 @@ impl HomeClient for Pi {
         card_id: &str,
         accumulator: &mut DailyUsageAccumulator,
     ) -> Result<Vec<&'static str>, FoldError> {
-        let sources = pi_usage::scan_into(
+        let sources = pi::scan_into(
             context.storage,
             context.now,
             context.pricing,
@@ -390,7 +392,7 @@ impl HomeClient for GeminiCli {
         card_id: &str,
         accumulator: &mut DailyUsageAccumulator,
     ) -> Result<Vec<&'static str>, FoldError> {
-        let landed = gemini_cli_usage::scan_into(
+        let landed = gemini_cli::scan_into(
             context.storage,
             context.now,
             context.pricing,
@@ -561,13 +563,13 @@ mod tests {
                     input: self.others,
                     ..Default::default()
                 };
-                let observation = crate::providers::card_usage::UsageObservation::new(
+                let observation = crate::providers::local_usage::card_usage::UsageObservation::new(
                     context.now,
                     Some("totally-unknown-model"),
                     tokens,
                     None,
                 );
-                let landed = crate::providers::card_usage::record(
+                let landed = crate::providers::local_usage::card_usage::record(
                     [observation],
                     card_id,
                     card_id,

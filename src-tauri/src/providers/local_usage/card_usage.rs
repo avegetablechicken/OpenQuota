@@ -15,14 +15,14 @@ use super::model_scope::{
     card_for_model, is_local_runtime_provider, native_log_disposition, LocalModelDisposition,
 };
 
-pub(super) mod codex;
+pub(in crate::providers) mod codex;
 mod daily_usage;
 
-pub(super) use daily_usage::DailyUsageAccumulator;
+pub(in crate::providers) use daily_usage::DailyUsageAccumulator;
 
 /// One request's usage as read from a Home client's logs, before it is placed on any Card.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct UsageObservation<'a> {
+pub(in crate::providers) struct UsageObservation<'a> {
     pub timestamp: DateTime<Utc>,
     /// Trimmed model name; `None` when the log has no usable name (Unattributed usage). It
     /// decides the Disposition.
@@ -52,7 +52,7 @@ pub(super) struct UsageObservation<'a> {
 /// Where an observation lands and what it costs, when its Home client settled both itself
 /// because it prices and deduplicates whole messages first. See `record_settled`.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Settled {
+pub(in crate::providers) struct Settled {
     pub others: bool,
     pub cost: Option<f64>,
     pub estimated: bool,
@@ -67,7 +67,7 @@ pub(super) struct Settled {
 /// How an observation is estimated when it is priced under its home Card. Routed usage is
 /// always estimated from the receiving Card's rates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PriceSource {
+pub(in crate::providers) enum PriceSource {
     /// The Card's rates for the observation's tier.
     CardRates,
     /// Codex's own logs: ChatGPT-plan auto-review rates and Codex's priority, long-context and
@@ -105,10 +105,10 @@ impl<'a> UsageObservation<'a> {
 }
 
 /// Number of days in the Scan window: the last 30 days including today.
-pub(super) const SCAN_WINDOW_DAYS: u64 = 30;
+pub(in crate::providers) const SCAN_WINDOW_DAYS: u64 = 30;
 
 /// First day of the Scan window that ends on `today`.
-pub(super) fn scan_window_start(today: NaiveDate) -> NaiveDate {
+pub(in crate::providers) fn scan_window_start(today: NaiveDate) -> NaiveDate {
     today
         .checked_sub_days(Days::new(SCAN_WINDOW_DAYS - 1))
         .unwrap_or(NaiveDate::MIN)
@@ -123,7 +123,7 @@ pub(super) fn scan_window_start(today: NaiveDate) -> NaiveDate {
 /// the home Card. Local runtime usage always lands, unpriced, in the home Card's Others.
 ///
 /// Returns where the observations landed on `target_card`.
-pub(super) fn record<'a>(
+pub(in crate::providers) fn record<'a>(
     observations: impl IntoIterator<Item = UsageObservation<'a>>,
     home_card: &str,
     target_card: &str,
@@ -155,7 +155,7 @@ pub(super) fn record<'a>(
 ///
 /// Without `apply_scan_window`, as for an account export that keeps its own dates, every
 /// observation is recorded and building the history trims the dates.
-pub(super) fn record_settled<'a>(
+pub(in crate::providers) fn record_settled<'a>(
     observations: impl IntoIterator<Item = (UsageObservation<'a>, Settled)>,
     now: DateTime<Utc>,
     apply_scan_window: bool,
@@ -190,7 +190,7 @@ fn date_in_window(observation: &UsageObservation<'_>, now: DateTime<Utc>) -> Opt
 
 /// Where a batch of observations landed on the target Card.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct Landed {
+pub(in crate::providers) struct Landed {
     /// Some observation was added to the Card's own series. This decides whether a client is
     /// named in the Card's source note.
     pub own_series: bool,
@@ -403,7 +403,7 @@ fn estimate(
 /// Estimates `observation` as if priced under its home Card `home_card`, for tests of a
 /// scanner's pricing.
 #[cfg(test)]
-pub(super) fn estimate_on_home_card(
+pub(in crate::providers) fn estimate_on_home_card(
     pricing: &ModelPricing,
     home_card: &str,
     observation: &UsageObservation<'_>,
@@ -432,7 +432,7 @@ fn estimate_from_card_rates(
 
 /// Helpers for the characterization tests each scanner keeps while it migrates.
 #[cfg(test)]
-pub(super) mod test_support {
+pub(in crate::providers) mod test_support {
     use chrono::{DateTime, Days, Local, Utc};
 
     use crate::models::UsageHistory;
@@ -464,7 +464,7 @@ mod tests {
     use super::{record, record_settled, Landed, PriceSource, Settled, UsageObservation};
     use crate::{
         pricing::{is_local_runtime_model, test_bundled_pricing, ModelPricing, TokenBreakdown},
-        providers::card_usage::DailyUsageAccumulator,
+        providers::local_usage::card_usage::DailyUsageAccumulator,
     };
 
     /// Every Card a Home client's usage can land on, and every home Card: pi's and zcode's usage

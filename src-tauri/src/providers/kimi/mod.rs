@@ -25,7 +25,7 @@ use self::{
 };
 
 use super::{
-    home_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
+    local_usage::home_clients::{RoutedLocalUsage, DEFAULT_SOURCE_NOTE},
     ProviderError, UsageProvider,
 };
 

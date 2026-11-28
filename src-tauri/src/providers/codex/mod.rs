@@ -29,7 +29,7 @@ use self::{
     local_usage::scan_local_usage,
     mapper::{idle_session_candidates, map_usage, moving_idle_session, StartOnUseWindow},
 };
-use crate::providers::log_usage::scan_or_cached_usage;
+use crate::providers::local_usage::log_usage::scan_or_cached_usage;
 
 const IDLE_SESSION_CONFIRMATION_DELAY: Duration = Duration::from_millis(1100);
 
@@ -165,8 +165,8 @@ pub enum CodexError {
     Storage,
 }
 
-impl From<crate::providers::home_clients::FoldInUnavailable> for CodexError {
-    fn from(_: crate::providers::home_clients::FoldInUnavailable) -> Self {
+impl From<crate::providers::local_usage::home_clients::FoldInUnavailable> for CodexError {
+    fn from(_: crate::providers::local_usage::home_clients::FoldInUnavailable) -> Self {
         Self::LocalUsage
     }
 }

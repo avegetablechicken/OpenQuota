@@ -280,7 +280,7 @@ where
 pub fn scan_or_cached_usage<E>(
     storage: &Storage,
     provider_id: &str,
-    identity: super::CacheIdentity<'_>,
+    identity: crate::providers::CacheIdentity<'_>,
     provider_name: &str,
     scan: impl FnOnce() -> Result<UsageHistory, E>,
     warnings: &mut Vec<String>,

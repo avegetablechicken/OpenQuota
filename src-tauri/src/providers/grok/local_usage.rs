@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use crate::{
     models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
-    providers::{
+    providers::local_usage::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, UsageObservation},
         home_clients::{self, Card, FoldContext, HomeClient},
@@ -406,7 +406,8 @@ mod tests {
         assert_eq!(grok.today.as_ref().unwrap().tokens, 100_000);
         assert_eq!(grok.other_usage.unwrap().today.unwrap().tokens, 300_000);
 
-        let mut claude = crate::providers::card_usage::DailyUsageAccumulator::default();
+        let mut claude =
+            crate::providers::local_usage::card_usage::DailyUsageAccumulator::default();
         assert!(super::aggregate_routed_into(
             &events,
             now(),
@@ -468,7 +469,7 @@ mod tests {
         use super::super::{aggregate, aggregate_routed_into, TokenEvent};
         use crate::{
             pricing::test_bundled_pricing,
-            providers::{
+            providers::local_usage::{
                 card_usage::test_support::{assert_pinned, relative_json},
                 card_usage::DailyUsageAccumulator,
             },

@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     pricing::{HistoricalRates, ModelPricing, ServiceTier, TokenBreakdown},
-    providers::model_scope::{
+    providers::local_usage::model_scope::{
         card_for_model, is_local_runtime_provider, model_belongs_to_card, normalize_provider_model,
     },
 };
@@ -261,7 +261,7 @@ pub(super) fn timestamp_from_value(value: &Value) -> Option<DateTime<Utc>> {
         .or_else(|| {
             value
                 .as_str()
-                .and_then(super::super::log_usage::parse_log_timestamp)
+                .and_then(super::super::local_usage::log_usage::parse_log_timestamp)
         })
 }
 
