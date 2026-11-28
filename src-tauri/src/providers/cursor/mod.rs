@@ -3,7 +3,7 @@ pub mod client;
 pub mod csv;
 pub mod mapper;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{Days, Local, TimeZone, Utc};
 use reqwest::StatusCode;
@@ -154,6 +154,16 @@ pub enum CursorError {
 pub struct CursorProvider {
     pricing: Arc<PricingStore>,
     client: CursorClient,
+    /// A renewal that could not be saved. Its rotated refresh token replaced the saved one, which
+    /// the server has retired, so it is used in place of the saved login it was made from.
+    unsaved_renewal: Mutex<Option<UnsavedRenewal>>,
+}
+
+/// `renewed` carries tokens the saved login `from` could not take.
+#[derive(Clone)]
+struct UnsavedRenewal {
+    from: CursorAuthState,
+    renewed: CursorAuthState,
 }
 
 impl CursorProvider {
@@ -161,13 +171,54 @@ impl CursorProvider {
         Ok(Self {
             pricing,
             client: CursorClient::new()?,
+            unsaved_renewal: Mutex::new(None),
         })
     }
 
     pub fn refresh(&self) -> Result<ProviderSnapshot, CursorError> {
         let now = Utc::now();
         let auth = CursorAuthState::load()?.ok_or(CursorError::NotLoggedIn)?;
-        self.refresh_with_auth(auth, now)
+        self.refresh_with_auth(self.resume_unsaved_renewal(auth), now)
+    }
+
+    /// The unsaved renewal of `saved` when this saved login is still the one it was made from;
+    /// otherwise `saved`, forgetting a renewal whose saved login has since changed.
+    fn resume_unsaved_renewal(&self, saved: CursorAuthState) -> CursorAuthState {
+        let Ok(mut renewal) = self.unsaved_renewal.lock() else {
+            return saved;
+        };
+        match renewal.as_ref() {
+            Some(unsaved) if unsaved.from == saved => unsaved.renewed.clone(),
+            Some(_) => {
+                *renewal = None;
+                saved
+            }
+            None => saved,
+        }
+    }
+
+    /// What the saved login holds for `auth`, which may be an unsaved renewal of it.
+    fn saved_login_of(&self, auth: &CursorAuthState) -> CursorAuthState {
+        self.unsaved_renewal
+            .lock()
+            .ok()
+            .and_then(|renewal| {
+                renewal
+                    .as_ref()
+                    .filter(|unsaved| unsaved.renewed == *auth)
+                    .map(|unsaved| unsaved.from.clone())
+            })
+            .unwrap_or_else(|| auth.clone())
+    }
+
+    /// Keeps `renewed` while the saved login, now holding `stored`, could not take all of it.
+    fn remember_renewal(&self, stored: CursorAuthState, renewed: &CursorAuthState) {
+        if let Ok(mut renewal) = self.unsaved_renewal.lock() {
+            *renewal = (stored != *renewed).then(|| UnsavedRenewal {
+                from: stored,
+                renewed: renewed.clone(),
+            });
+        }
     }
 
     fn refresh_with_auth(
@@ -306,8 +357,11 @@ impl CursorProvider {
             .filter(|token| !token.is_empty() && Some(*token) != auth.refresh_token.as_deref())
             .map(str::to_owned);
         if let Some(access_token) = access_token {
+            let mut stored = self.saved_login_of(auth);
             if let Some(refresh_token) = rotated_refresh_token {
-                if auth.save_refresh_token(refresh_token.clone()).is_err() {
+                if auth.save_refresh_token(refresh_token.clone()).is_ok() {
+                    stored.refresh_token = Some(refresh_token);
+                } else {
                     auth.refresh_token = Some(refresh_token);
                     crate::app_error!(
                         "auth:cursor",
@@ -315,13 +369,16 @@ impl CursorProvider {
                     );
                 }
             }
-            if auth.save_access_token(access_token.clone()).is_err() {
+            if auth.save_access_token(access_token.clone()).is_ok() {
+                stored.access_token = Some(access_token.clone());
+            } else {
                 auth.access_token = Some(access_token.clone());
                 crate::app_error!(
                     "auth:cursor",
                     "failed to persist rotated access token; using it for this session only"
                 );
             }
+            self.remember_renewal(stored, auth);
             crate::app_info!("auth:cursor", "token refresh succeeded");
             return Ok(Some(access_token));
         }
@@ -749,6 +806,7 @@ mod tests {
         let provider = CursorProvider {
             pricing,
             client: CursorClient::with_endpoints(endpoints).unwrap(),
+            unsaved_renewal: Default::default(),
         };
         let auth = CursorAuthState {
             access_token: Some(jwt("google-oauth2|old_user")),
@@ -814,6 +872,7 @@ mod tests {
         let provider = CursorProvider {
             pricing,
             client: CursorClient::with_endpoints(endpoints).unwrap(),
+            unsaved_renewal: Default::default(),
         };
         let auth = CursorAuthState {
             access_token: Some(jwt("google-oauth2|old_user")),
@@ -827,6 +886,46 @@ mod tests {
 
         assert_eq!(snapshot.plan.as_deref(), Some("Pro Plan"));
         assert!(snapshot.warnings.is_empty());
+    }
+
+    #[test]
+    fn an_unsaved_rotated_refresh_token_survives_the_next_poll() {
+        let directory = tempdir().unwrap();
+        let renewed_access = jwt("google-oauth2|user_abc123");
+        let (base, _) = routing_server_with_token(
+            200,
+            serde_json::json!({"access_token": renewed_access, "refresh_token": "rotated"})
+                .to_string(),
+        );
+        let provider = provider_for(&base, directory.path());
+        // A directory cannot be opened as a SQLite database, so neither token can be saved and
+        // every poll reloads the spent refresh token.
+        let saved = CursorAuthState {
+            access_token: Some(jwt("google-oauth2|old_user")),
+            refresh_token: Some("refresh-token".into()),
+            source: CursorAuthSource::Sqlite(directory.path().to_path_buf()),
+        };
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+
+        provider
+            .refresh_with_auth(provider.resume_unsaved_renewal(saved.clone()), now)
+            .unwrap();
+
+        let next_poll = provider.resume_unsaved_renewal(saved.clone());
+        assert_eq!(next_poll.refresh_token.as_deref(), Some("rotated"));
+        assert_eq!(
+            next_poll.access_token.as_deref(),
+            Some(renewed_access.as_str())
+        );
+        assert_eq!(provider.saved_login_of(&next_poll), saved);
+
+        // A login saved since (for example by the Cursor app) supersedes the unsaved renewal.
+        let changed = CursorAuthState {
+            refresh_token: Some("signed-in-again".into()),
+            ..saved.clone()
+        };
+        assert_eq!(provider.resume_unsaved_renewal(changed.clone()), changed);
+        assert_eq!(provider.resume_unsaved_renewal(saved.clone()), saved);
     }
 
     fn provider_for(base: &str, directory: &std::path::Path) -> CursorProvider {
@@ -843,6 +942,7 @@ mod tests {
         CursorProvider {
             pricing: Arc::new(PricingStore::new(directory.join("pricing")).unwrap()),
             client: CursorClient::with_endpoints(endpoints).unwrap(),
+            unsaved_renewal: Default::default(),
         }
     }
 
@@ -920,6 +1020,7 @@ mod tests {
         let provider = CursorProvider {
             pricing,
             client: CursorClient::with_endpoints(endpoints).unwrap(),
+            unsaved_renewal: Default::default(),
         };
         let auth = CursorAuthState {
             access_token: Some(jwt("google-oauth2|enterprise-user")),
