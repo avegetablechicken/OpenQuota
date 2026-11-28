@@ -18,7 +18,15 @@ pub enum ResetClaimOutcome {
 
 pub struct CodexResetClaimService {
     client: CodexClient,
-    matched_credit_ids: Mutex<HashMap<String, String>>,
+    matched_credit_ids: Mutex<HashMap<String, MatchedCredit>>,
+}
+
+/// A credit matched for a claim, with the account that owns it: only that account can
+/// consume it.
+#[derive(Debug, Clone)]
+struct MatchedCredit {
+    credit_id: String,
+    owner: Option<String>,
 }
 
 impl CodexResetClaimService {
@@ -42,13 +50,24 @@ impl CodexResetClaimService {
             }
         };
 
-        let cached_credit_id = self
+        let cached_credit = self
             .matched_credit_ids
             .lock()
             .ok()
             .and_then(|cache| cache.get(redeem_request_id).cloned());
-        let (credit_id, preferred_index) = if let Some(credit_id) = cached_credit_id {
-            (credit_id, None)
+        let identities = candidates
+            .iter()
+            .map(CodexAuthState::account_identity)
+            .collect::<Vec<_>>();
+        let (credit_id, indexes) = if let Some(cached) = cached_credit {
+            let Some(indexes) = owner_indexes(&identities, cached.owner.as_deref()) else {
+                crate::app_error!(
+                    "provider:codex",
+                    "reset claim credit owner is no longer logged in"
+                );
+                return ResetClaimOutcome::Failed;
+            };
+            (cached.credit_id, indexes)
         } else {
             let mut matched = None;
             for (index, candidate) in candidates.iter().enumerate() {
@@ -89,14 +108,17 @@ impl CodexResetClaimService {
                 if cache.len() >= 256 {
                     cache.clear();
                 }
-                cache.insert(redeem_request_id.to_owned(), credit_id.clone());
+                cache.insert(
+                    redeem_request_id.to_owned(),
+                    MatchedCredit {
+                        credit_id: credit_id.clone(),
+                        owner: identities[index].clone(),
+                    },
+                );
             }
-            (credit_id, Some(index))
+            (credit_id, vec![index])
         };
 
-        let indexes = preferred_index
-            .into_iter()
-            .chain((0..candidates.len()).filter(|index| Some(*index) != preferred_index));
         for index in indexes {
             let candidate = &candidates[index];
             let response = match self.client.consume_reset_credit(
@@ -128,6 +150,19 @@ impl CodexResetClaimService {
             return outcome;
         }
         ResetClaimOutcome::Failed
+    }
+}
+
+/// The candidates that may consume a credit owned by `owner`: that account alone, or every
+/// candidate in order when the owner could not be identified. `None` when the owner is no longer
+/// among the candidates.
+fn owner_indexes(identities: &[Option<String>], owner: Option<&str>) -> Option<Vec<usize>> {
+    match owner {
+        Some(owner) => identities
+            .iter()
+            .position(|identity| identity.as_deref() == Some(owner))
+            .map(|index| vec![index]),
+        None => Some((0..identities.len()).collect()),
     }
 }
 
@@ -178,7 +213,15 @@ mod tests {
     use reqwest::StatusCode;
     use serde_json::json;
 
-    use super::{credit_id_for_expiry, outcome_from_consume, ResetClaimOutcome};
+    use super::{credit_id_for_expiry, outcome_from_consume, owner_indexes, ResetClaimOutcome};
+
+    #[test]
+    fn a_matched_credit_is_consumed_only_by_the_account_that_owns_it() {
+        let identities = [Some("account-a".to_owned()), Some("account-b".to_owned())];
+        assert_eq!(owner_indexes(&identities, Some("account-b")), Some(vec![1]));
+        assert_eq!(owner_indexes(&identities, Some("account-c")), None);
+        assert_eq!(owner_indexes(&identities, None), Some(vec![0, 1]));
+    }
 
     #[test]
     fn matches_only_an_available_credit_at_the_selected_expiry() {
