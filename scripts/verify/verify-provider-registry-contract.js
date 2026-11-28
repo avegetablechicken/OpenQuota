@@ -25,9 +25,188 @@ const frontendConsumers = [
 ];
 const providerLiteral =
   /["'](?:claude|codex|cursor|antigravity|copilot|devin|grok|opencode|openrouter|zai|kimi|minimax|sub2api)["']/;
+const cfgTestAttr = /^#\[\s*cfg\s*\(\s*test\s*\)\s*\]/;
+
+function skipLineComment(source, pos) {
+  while (pos < source.length && source[pos] !== '\n') pos++;
+  return pos;
+}
+
+function skipBlockComment(source, pos) {
+  let depth = 1;
+  pos += 2;
+  while (pos < source.length && depth > 0) {
+    if (source[pos] === '/' && source[pos + 1] === '*') {
+      depth++;
+      pos += 2;
+    } else if (source[pos] === '*' && source[pos + 1] === '/') {
+      depth--;
+      pos += 2;
+    } else {
+      pos++;
+    }
+  }
+  return pos;
+}
+
+function skipQuotedString(source, pos) {
+  pos++;
+  while (pos < source.length) {
+    if (source[pos] === '\\') pos += 2;
+    else if (source[pos] === '"') return pos + 1;
+    else pos++;
+  }
+  return pos;
+}
+
+function matchRawStringEnd(source, pos) {
+  let cursor = pos;
+  if (source[cursor] === 'b') cursor++;
+  if (source[cursor] !== 'r') return -1;
+  cursor++;
+  let hashes = 0;
+  while (cursor < source.length && source[cursor] === '#') {
+    hashes++;
+    cursor++;
+  }
+  if (source[cursor] !== '"') return -1;
+  cursor++;
+  const closing = `"${'#'.repeat(hashes)}`;
+  const found = source.indexOf(closing, cursor);
+  return found === -1 ? source.length : found + closing.length;
+}
+
+function skipWhitespaceCommentsAndAttrs(source, pos) {
+  while (pos < source.length) {
+    if (/\s/.test(source[pos])) {
+      pos++;
+      continue;
+    }
+    if (source[pos] === '/' && source[pos + 1] === '/') {
+      pos = skipLineComment(source, pos);
+      continue;
+    }
+    if (source[pos] === '/' && source[pos + 1] === '*') {
+      pos = skipBlockComment(source, pos);
+      continue;
+    }
+    if (source[pos] === '#' && source[pos + 1] === '[') {
+      let depth = 0;
+      pos++;
+      while (pos < source.length) {
+        if (source[pos] === '[') {
+          depth++;
+          pos++;
+        } else if (source[pos] === ']') {
+          depth--;
+          pos++;
+          if (depth === 0) break;
+        } else if (source[pos] === '"') {
+          pos = skipQuotedString(source, pos);
+        } else {
+          pos++;
+        }
+      }
+      continue;
+    }
+    break;
+  }
+  return pos;
+}
+
+function skipRustItem(source, pos) {
+  pos = skipWhitespaceCommentsAndAttrs(source, pos);
+  let braceDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  while (pos < source.length) {
+    if (source[pos] === '/' && source[pos + 1] === '/') {
+      pos = skipLineComment(source, pos);
+      continue;
+    }
+    if (source[pos] === '/' && source[pos + 1] === '*') {
+      pos = skipBlockComment(source, pos);
+      continue;
+    }
+    const rawEnd = matchRawStringEnd(source, pos);
+    if (rawEnd !== -1) {
+      pos = rawEnd;
+      continue;
+    }
+    if (source[pos] === '"') {
+      pos = skipQuotedString(source, pos);
+      continue;
+    }
+    if (source[pos] === "'") {
+      if (source[pos + 1] === '\\') {
+        pos += 2;
+        while (pos < source.length && source[pos] !== "'") pos++;
+        if (pos < source.length) pos++;
+        continue;
+      }
+      if (pos + 2 < source.length && source[pos + 2] === "'") {
+        pos += 3;
+        continue;
+      }
+    }
+    const ch = source[pos++];
+    if (ch === '(') parenDepth++;
+    else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+    else if (ch === '[') bracketDepth++;
+    else if (ch === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (ch === '{') braceDepth++;
+    else if (ch === '}') {
+      braceDepth--;
+      if (braceDepth === 0 && parenDepth === 0 && bracketDepth === 0) return pos;
+    } else if (ch === ';' && braceDepth === 0 && parenDepth === 0 && bracketDepth === 0) {
+      return pos;
+    }
+  }
+  return pos;
+}
+
+function stripCfgTestItems(source) {
+  let out = '';
+  let pos = 0;
+  while (pos < source.length) {
+    if (source[pos] === '/' && source[pos + 1] === '/') {
+      const end = skipLineComment(source, pos);
+      out += source.slice(pos, end);
+      pos = end;
+      continue;
+    }
+    if (source[pos] === '/' && source[pos + 1] === '*') {
+      const end = skipBlockComment(source, pos);
+      out += source.slice(pos, end);
+      pos = end;
+      continue;
+    }
+    const rawEnd = matchRawStringEnd(source, pos);
+    if (rawEnd !== -1) {
+      out += source.slice(pos, rawEnd);
+      pos = rawEnd;
+      continue;
+    }
+    if (source[pos] === '"') {
+      const end = skipQuotedString(source, pos);
+      out += source.slice(pos, end);
+      pos = end;
+      continue;
+    }
+    if (source[pos] === '#' && source[pos + 1] === '[') {
+      const match = cfgTestAttr.exec(source.slice(pos));
+      if (match) {
+        pos = skipRustItem(source, pos + match[0].length);
+        continue;
+      }
+    }
+    out += source[pos++];
+  }
+  return out;
+}
 
 for (const file of rustConsumers) {
-  const source = fs.readFileSync(new URL(file, root), 'utf8').split('#[cfg(test)]')[0];
+  const source = stripCfgTestItems(fs.readFileSync(new URL(file, root), 'utf8'));
   if (providerLiteral.test(source)) {
     throw new Error(`${file} contains provider identity outside the provider registry.`);
   }

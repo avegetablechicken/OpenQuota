@@ -147,6 +147,23 @@ impl ProviderRegistry {
             .collect()
     }
 
+    /// Launch-observed account identities for providers that switch accounts per credential,
+    /// excluding connection-configured slot providers.
+    pub fn launch_accounts(&self) -> Vec<(String, String)> {
+        self.catalog
+            .providers
+            .iter()
+            .filter_map(|definition| {
+                let runtime = self.runtimes.get(&definition.id)?;
+                if runtime.supports_connection_configuration() {
+                    return None;
+                }
+                let identity = runtime.account_identity()?;
+                Some((definition.id.clone(), identity.to_owned()))
+            })
+            .collect()
+    }
+
     pub fn metric(&self, id: &str) -> Option<&crate::models::MetricDefinition> {
         let (provider_index, metric_index) = *self.metric_indices.get(id)?;
         self.catalog
@@ -634,6 +651,60 @@ mod tests {
         assert_eq!(
             serialized["providers"][1]["metrics"][9]["source"],
             serde_json::json!({"kind":"usage","period":"last30Days"})
+        );
+    }
+
+    #[test]
+    fn launch_accounts_excludes_connection_configured_and_unscoped_providers() {
+        struct AccountStub {
+            definition: ProviderDefinition,
+            identity: Option<&'static str>,
+            connection_configured: bool,
+        }
+
+        impl UsageProvider for AccountStub {
+            fn definition(&self) -> ProviderDefinition {
+                self.definition.clone()
+            }
+            fn has_local_credentials(&self) -> bool {
+                true
+            }
+            fn refresh(
+                &self,
+            ) -> Result<crate::models::ProviderSnapshot, crate::providers::ProviderError>
+            {
+                unreachable!()
+            }
+            fn account_identity(&self) -> Option<&str> {
+                self.identity
+            }
+            fn supports_connection_configuration(&self) -> bool {
+                self.connection_configured
+            }
+        }
+
+        let registry = ProviderRegistry::new(vec![
+            Arc::new(AccountStub {
+                definition: crate::providers::claude::definition(),
+                identity: Some("claude-acct"),
+                connection_configured: false,
+            }),
+            Arc::new(AccountStub {
+                definition: crate::providers::codex::definition(),
+                identity: None,
+                connection_configured: false,
+            }),
+            Arc::new(AccountStub {
+                definition: crate::providers::sub2api::test_definition("sub2api"),
+                identity: Some("sub2api"),
+                connection_configured: true,
+            }),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            registry.launch_accounts(),
+            vec![("claude".to_owned(), "claude-acct".to_owned())]
         );
     }
 }

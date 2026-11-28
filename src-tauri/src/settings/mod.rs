@@ -1,8 +1,5 @@
 mod normalize;
 
-#[cfg(test)]
-mod tests;
-
 pub use normalize::{default_settings, normalize, MetricTemplateChange};
 
 use std::{
@@ -190,15 +187,8 @@ impl SettingsService {
     }
 
     fn activate_launch_accounts(&self) -> Result<(), StorageError> {
-        for provider_id in ["claude", "codex"] {
-            let identity = self
-                .registry
-                .cache_identity(provider_id)
-                .resolved_value()
-                .map(str::to_owned);
-            if let Some(identity) = identity {
-                self.activate_account(provider_id, provider_id, &identity)?;
-            }
+        for (provider_id, identity) in self.registry.launch_accounts() {
+            self.activate_account(&provider_id, &provider_id, &identity)?;
         }
         Ok(())
     }
@@ -764,3 +754,6 @@ impl SettingsService {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

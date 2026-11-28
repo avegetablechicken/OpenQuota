@@ -1,8 +1,5 @@
 mod snapshot;
 
-#[cfg(test)]
-mod tests;
-
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, RwLock},
@@ -779,3 +776,6 @@ impl RefreshFlight {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
