@@ -14,7 +14,7 @@ use crate::{
     service::UsageViewState,
 };
 
-const TRAY_ID: &str = "openquota-tray";
+use crate::tray::TRAY_ID;
 
 #[derive(Debug, Clone, PartialEq)]
 struct TrayMetric {
@@ -168,7 +168,7 @@ pub fn update(
             .try_state::<MenuBarMenuState>()
             .is_some_and(|state| state.replace(menu))
         {
-            crate::update_tray_menu(app, settings);
+            crate::tray::update_tray_menu(app, settings);
         }
     }
 }

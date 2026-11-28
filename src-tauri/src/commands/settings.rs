@@ -265,7 +265,7 @@ async fn save_app_settings_inner(
         &updated,
         settings_service.registry(),
     );
-    crate::update_tray_menu(&app, &updated);
+    crate::tray::update_tray_menu(&app, &updated);
     let _ = app.emit(
         "settings-state",
         settings_view_state(&app, &settings_service),
