@@ -8,9 +8,23 @@ pub fn set_enabled(enabled: bool) -> Result<(), String> {
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
     )?;
-    let executable =
-        std::env::current_exe().map_err(|_| "OpenQuota executable path could not be resolved.")?;
+    let executable = launch_executable(std::env::var_os("APPIMAGE").map(PathBuf::from), || {
+        std::env::current_exe().ok()
+    })
+    .ok_or("OpenQuota executable path could not be resolved.")?;
     set_enabled_at(&path, &executable, enabled)
+}
+
+/// The program a login session should start. An AppImage runs from a temporary mount that is gone
+/// after the app exits, so its runtime-provided `APPIMAGE` file path is used instead of the mounted
+/// executable; every other install starts the running executable.
+fn launch_executable(
+    appimage: Option<PathBuf>,
+    current_exe: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    appimage
+        .filter(|path| path.is_absolute() && path.is_file())
+        .or_else(current_exe)
 }
 
 fn set_enabled_at(
@@ -99,7 +113,36 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{autostart_path, desktop_entry, set_enabled_at};
+    use super::{autostart_path, desktop_entry, launch_executable, set_enabled_at};
+
+    #[test]
+    fn an_appimage_launch_starts_the_appimage_file_not_its_temporary_mount() {
+        let directory = tempdir().unwrap();
+        let appimage = directory.path().join("OpenQuota.AppImage");
+        std::fs::write(&appimage, b"").unwrap();
+        let mounted = PathBuf::from("/tmp/.mount_OpenQuXXXX/usr/bin/openquota");
+
+        assert_eq!(
+            launch_executable(Some(appimage.clone()), || Some(mounted.clone())),
+            Some(appimage)
+        );
+        assert_eq!(
+            launch_executable(None, || Some(mounted.clone())),
+            Some(mounted.clone())
+        );
+        assert_eq!(
+            launch_executable(Some(PathBuf::from("relative.AppImage")), || Some(
+                mounted.clone()
+            )),
+            Some(mounted.clone())
+        );
+        assert_eq!(
+            launch_executable(Some(directory.path().join("missing.AppImage")), || Some(
+                mounted.clone()
+            )),
+            Some(mounted)
+        );
+    }
 
     #[test]
     fn honors_absolute_xdg_config_home_and_falls_back_to_home() {
