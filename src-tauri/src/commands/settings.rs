@@ -89,6 +89,9 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
                 }
             }
             if next == current {
+                // The clicked check item toggled itself natively; rebuild the
+                // menu so a reselected or refused choice keeps its mark.
+                crate::tray::update_tray_menu(&app, &current);
                 return;
             }
 
@@ -108,6 +111,7 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
                 Err(error) if error.starts_with("Settings changed before") => continue,
                 Err(error) => {
                     crate::app_warn!("config", "tray setting could not be saved: {error}");
+                    crate::tray::update_tray_menu(&app, &settings_service.get());
                     return;
                 }
             }
@@ -117,6 +121,7 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
             "config",
             "tray setting could not be saved after concurrent changes"
         );
+        crate::tray::update_tray_menu(&app, &settings_service.get());
     });
 }
 
