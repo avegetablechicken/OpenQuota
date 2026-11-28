@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
@@ -12,6 +13,25 @@ use crate::{
     models::{AppSettings, DailyUsage, MetricLayout, ProviderSnapshot},
     providers::CacheIdentity,
 };
+
+/// The `log_file_cache.path` key for `path`: the path itself when it is UTF-8,
+/// otherwise its encoded bytes in hex behind a NUL (which no real path holds),
+/// so a non-UTF-8 path keeps a stable key that no other path shares.
+fn log_cache_key(path: &Path) -> Cow<'_, str> {
+    match path.to_str() {
+        Some(text) => Cow::Borrowed(text),
+        None => Cow::Owned(
+            std::iter::once("\0".to_owned())
+                .chain(
+                    path.as_os_str()
+                        .as_encoded_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}")),
+                )
+                .collect(),
+        ),
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -253,7 +273,7 @@ impl Storage {
                  WHERE provider_id = ?1 AND path = ?2 AND size = ?3 AND modified_nanos = ?4",
                 params![
                     provider_id,
-                    path.to_string_lossy(),
+                    log_cache_key(path),
                     size as i64,
                     modified_nanos
                 ],
@@ -280,7 +300,7 @@ impl Storage {
                modified_nanos = excluded.modified_nanos,
                events_json = excluded.events_json",
             params![
-                path.to_string_lossy(),
+                log_cache_key(path),
                 size as i64,
                 modified_nanos,
                 events_json,
@@ -293,7 +313,7 @@ impl Storage {
     pub fn remove_log_events(&self, provider_id: &str, path: &Path) -> Result<(), StorageError> {
         self.connection()?.execute(
             "DELETE FROM log_file_cache WHERE provider_id = ?1 AND path = ?2",
-            params![provider_id, path.to_string_lossy()],
+            params![provider_id, log_cache_key(path)],
         )?;
         Ok(())
     }
@@ -313,8 +333,12 @@ impl Storage {
                 .collect::<Result<Vec<_>, _>>()?;
             paths
         };
+        let seen_keys = seen_paths
+            .iter()
+            .map(|path| log_cache_key(path))
+            .collect::<HashSet<_>>();
         for cached_path in cached_paths {
-            if !seen_paths.contains(Path::new(&cached_path)) {
+            if !seen_keys.contains(cached_path.as_str()) {
                 transaction.execute(
                     "DELETE FROM log_file_cache WHERE provider_id = ?1 AND path = ?2",
                     params![provider_id, cached_path],
@@ -926,6 +950,36 @@ mod tests {
                 .load_log_events("claude", &claude_current, 10, 20)
                 .unwrap(),
             Some("[]".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_log_paths_keep_distinct_cache_rows_across_pruning() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        let first = PathBuf::from(OsStr::from_bytes(b"/logs/session-\xff.jsonl"));
+        let second = PathBuf::from(OsStr::from_bytes(b"/logs/session-\xfe.jsonl"));
+        storage
+            .save_log_events("codex", &first, 10, 20, "first")
+            .unwrap();
+        storage
+            .save_log_events("codex", &second, 10, 20, "second")
+            .unwrap();
+
+        storage
+            .prune_log_events("codex", &HashSet::from([first.clone(), second.clone()]))
+            .unwrap();
+
+        assert_eq!(
+            storage.load_log_events("codex", &first, 10, 20).unwrap(),
+            Some("first".to_owned())
+        );
+        assert_eq!(
+            storage.load_log_events("codex", &second, 10, 20).unwrap(),
+            Some("second".to_owned())
         );
     }
 
