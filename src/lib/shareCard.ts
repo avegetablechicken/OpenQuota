@@ -420,7 +420,9 @@ function quotaShareRow(
     pace.severity === 'spent'
       ? 'Limit reached'
       : pace.severity === 'runningOut'
-        ? formatLimit(pace.runOutAt, serverNow, settings.resetDisplay, settings.timeFormat)
+        ? pace.runOutAt === null
+          ? null
+          : formatLimit(pace.runOutAt, serverNow, settings.resetDisplay, settings.timeFormat)
         : pace.severity === 'close' && pace.projectedUsedPercent !== null
           ? `~${Math.max(1, Math.round(100 - pace.projectedUsedPercent))}% spare`
           : pace.severity === 'healthy' &&

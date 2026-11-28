@@ -298,6 +298,30 @@ describe('share card layout', () => {
     });
   });
 
+  it('does not claim the limit is reached for a pace that lands exactly on the limit', () => {
+    const now = Date.parse('2026-08-12T12:00:00Z');
+    const snapshot = structuredClone(codexState.snapshot!);
+    snapshot.quotas[1] = {
+      ...snapshot.quotas[1],
+      format: 'percent',
+      usedPercent: 80,
+      clockOffsetSeconds: 0,
+      resetsAt: new Date(now + snapshot.quotas[1].periodSeconds * 1000 * 0.2).toISOString(),
+    };
+    const rows = buildProviderShareRows(
+      'codex',
+      snapshot,
+      settingsState.settings.providers[0],
+      settingsState.settings,
+      now,
+    );
+
+    expect(rows.find((row) => row.kind === 'quota' && row.label === 'Weekly')).toMatchObject({
+      severity: 'critical',
+      headingDetail: null,
+    });
+  });
+
   it('exports customizable status metrics as text rows', () => {
     const catalog = new ProviderCatalogIndex({
       providers: [
