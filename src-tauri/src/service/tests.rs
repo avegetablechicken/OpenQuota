@@ -622,18 +622,20 @@ fn failed_refresh_preserves_last_successful_snapshot_without_forcing_stale() {
         warnings: Vec::new(),
         refreshed_at: Utc::now(),
     };
-    let mut state = ProviderViewState {
-        snapshot: Some(snapshot.clone()),
-        ..ProviderViewState::default()
-    };
-    merge_refresh_result(
-        &mut state,
-        Err(ProviderError::new(ProviderErrorKind::Network, "offline")),
-    );
-    assert_eq!(state.snapshot, Some(snapshot));
-    assert!(!state.stale);
-    assert_eq!(state.error.as_deref(), Some("offline"));
-    assert_eq!(state.error_kind, Some(ProviderErrorKind::Network));
+    for kind in [
+        ProviderErrorKind::Network,
+        ProviderErrorKind::InvalidResponse,
+    ] {
+        let mut state = ProviderViewState {
+            snapshot: Some(snapshot.clone()),
+            ..ProviderViewState::default()
+        };
+        merge_refresh_result(&mut state, Err(ProviderError::new(kind, "refresh failed")));
+        assert_eq!(state.snapshot.as_ref(), Some(&snapshot));
+        assert!(!state.stale);
+        assert_eq!(state.error.as_deref(), Some("refresh failed"));
+        assert_eq!(state.error_kind, Some(kind));
+    }
 }
 
 #[test]

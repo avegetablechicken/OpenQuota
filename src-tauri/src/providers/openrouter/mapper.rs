@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use super::OpenRouterError;
 use crate::models::{MetricValue, MetricValueKind, QuotaFormat, QuotaWindow, ValueMetric};
 
 #[derive(Debug, Default, PartialEq)]
@@ -19,19 +20,33 @@ pub fn data_object(body: &Value) -> Option<&serde_json::Map<String, Value>> {
     body.get("data")?.as_object()
 }
 
-pub fn map_credits(data: &serde_json::Map<String, Value>) -> CreditsMetrics {
-    let Some(total_usage) = number(data.get("total_usage")) else {
-        return CreditsMetrics::default();
-    };
+pub fn map_credits(
+    data: &serde_json::Map<String, Value>,
+) -> Result<CreditsMetrics, OpenRouterError> {
+    let total_usage = number(data.get("total_usage")).ok_or(OpenRouterError::InvalidResponse)?;
     let used = total_usage.max(0.0);
-    let total = number(data.get("total_credits")).unwrap_or(0.0).max(0.0);
-    CreditsMetrics {
+    let total = number(data.get("total_credits"))
+        .ok_or(OpenRouterError::InvalidResponse)?
+        .max(0.0);
+    Ok(CreditsMetrics {
         quota: (total > 0.0).then(|| dollars_quota("credits", "Credits", used, total)),
         balance: Some(dollars_value("balance", "Balance", (total - used).max(0.0))),
-    }
+    })
 }
 
-pub fn map_key(data: &serde_json::Map<String, Value>) -> KeyMetrics {
+pub fn map_key(data: &serde_json::Map<String, Value>) -> Result<KeyMetrics, OpenRouterError> {
+    if ![
+        "usage",
+        "usage_daily",
+        "usage_weekly",
+        "usage_monthly",
+        "limit_remaining",
+    ]
+    .iter()
+    .any(|field| number(data.get(*field)).is_some())
+    {
+        return Err(OpenRouterError::InvalidResponse);
+    }
     let values = [
         ("today", "Today", "usage_daily"),
         ("week", "This Week", "usage_weekly"),
@@ -44,7 +59,12 @@ pub fn map_key(data: &serde_json::Map<String, Value>) -> KeyMetrics {
     .collect();
     let quota = number(data.get("limit"))
         .filter(|limit| *limit > 0.0)
-        .map(|limit| dollars_quota("keyLimit", "Key Limit", key_limit_used(data, limit), limit));
+        .map(|limit| {
+            key_limit_used(data, limit)
+                .map(|used| dollars_quota("keyLimit", "Key Limit", used, limit))
+                .ok_or(OpenRouterError::InvalidResponse)
+        })
+        .transpose()?;
     let plan = data
         .get("is_free_tier")
         .and_then(Value::as_bool)
@@ -55,19 +75,19 @@ pub fn map_key(data: &serde_json::Map<String, Value>) -> KeyMetrics {
                 "Pay as you go".to_owned()
             }
         });
-    KeyMetrics {
+    Ok(KeyMetrics {
         plan,
         quota,
         values,
-    }
+    })
 }
 
 /// Spend counted against the key cap. `usage` is lifetime spend, while a cap
 /// with `limit_reset` only counts the current window, so prefer the in-window
 /// remainder and then the matching period spend.
-fn key_limit_used(data: &serde_json::Map<String, Value>, limit: f64) -> f64 {
+fn key_limit_used(data: &serde_json::Map<String, Value>, limit: f64) -> Option<f64> {
     if let Some(remaining) = number(data.get("limit_remaining")) {
-        return (limit - remaining).max(0.0);
+        return Some((limit - remaining).max(0.0));
     }
     let field = match data.get("limit_reset").and_then(Value::as_str) {
         Some("daily") => "usage_daily",
@@ -75,7 +95,7 @@ fn key_limit_used(data: &serde_json::Map<String, Value>, limit: f64) -> f64 {
         Some("monthly") => "usage_monthly",
         _ => "usage",
     };
-    number(data.get(field)).unwrap_or(0.0).max(0.0)
+    number(data.get(field)).map(|used| used.max(0.0))
 }
 
 fn dollars_quota(id: &str, label: &str, used: f64, limit: f64) -> QuotaWindow {
@@ -133,7 +153,7 @@ mod tests {
     #[test]
     fn credits_map_to_a_dollar_meter_and_measured_balance() {
         let body = json!({"data":{"total_credits":277.47,"total_usage":178.20}});
-        let mapped = map_credits(data_object(&body).unwrap());
+        let mapped = map_credits(data_object(&body).unwrap()).unwrap();
         let quota = mapped.quota.unwrap();
         assert_eq!(quota.id, "credits");
         assert_eq!(quota.used_value, Some(178.20));
@@ -144,7 +164,7 @@ mod tests {
     #[test]
     fn zero_purchased_credits_keep_balance_without_a_fake_meter() {
         let body = json!({"data":{"total_credits":0,"total_usage":0}});
-        let mapped = map_credits(data_object(&body).unwrap());
+        let mapped = map_credits(data_object(&body).unwrap()).unwrap();
         assert!(mapped.quota.is_none());
         assert_eq!(mapped.balance.unwrap().values[0].number, 0.0);
     }
@@ -159,7 +179,7 @@ mod tests {
             "usage":2,
             "limit":5
         }});
-        let mapped = map_key(data_object(&body).unwrap());
+        let mapped = map_key(data_object(&body).unwrap()).unwrap();
         assert_eq!(mapped.plan.as_deref(), Some("Pay as you go"));
         assert_eq!(
             mapped
@@ -181,7 +201,7 @@ mod tests {
             "limit_reset":"monthly",
             "limit_remaining":7
         }});
-        let quota = map_key(data_object(&body).unwrap()).quota.unwrap();
+        let quota = map_key(data_object(&body).unwrap()).unwrap().quota.unwrap();
         assert_eq!(quota.used_value, Some(3.0));
         assert!((quota.used_percent - 30.0).abs() < 1e-9);
 
@@ -191,7 +211,29 @@ mod tests {
             "limit":10,
             "limit_reset":"weekly"
         }});
-        let quota = map_key(data_object(&body).unwrap()).quota.unwrap();
+        let quota = map_key(data_object(&body).unwrap()).unwrap().quota.unwrap();
         assert_eq!(quota.used_value, Some(4.0));
+    }
+
+    #[test]
+    fn missing_balances_and_cap_usage_are_not_zero_measurements() {
+        for body in [json!({"total_usage":10}), json!({"total_credits":100})] {
+            assert!(map_credits(body.as_object().unwrap()).is_err());
+        }
+        for body in [
+            json!({}),
+            json!({"limit":100}),
+            json!({"limit":100,"limit_reset":"weekly","usage":20}),
+        ] {
+            assert!(map_key(body.as_object().unwrap()).is_err());
+        }
+        assert_eq!(
+            map_key(json!({"limit":100,"usage":0}).as_object().unwrap())
+                .unwrap()
+                .quota
+                .unwrap()
+                .used_percent,
+            0.0
+        );
     }
 }

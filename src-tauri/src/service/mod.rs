@@ -606,6 +606,23 @@ impl ProviderService {
         });
         let result = result.map(|mut refresh| {
             if let Some(previous) = self.provider_state(provider_id).snapshot {
+                for quota in &refresh.snapshot.quotas {
+                    if let Some(old) = previous.quotas.iter().find(|old| old.id == quota.id) {
+                        if old.used_percent != quota.used_percent
+                            || old.resets_at != quota.resets_at
+                        {
+                            crate::app_debug!(
+                                "refresh",
+                                "{provider_id} quota {}: used {} -> {}, reset {:?} -> {:?}",
+                                quota.id,
+                                old.used_percent,
+                                quota.used_percent,
+                                old.resets_at,
+                                quota.resets_at
+                            );
+                        }
+                    }
+                }
                 local_usage::carry_local(&previous, &mut refresh.snapshot);
             }
             if let Some(definition) = self.registry.definition(provider_id) {

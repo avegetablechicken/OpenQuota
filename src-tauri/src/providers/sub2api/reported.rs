@@ -12,7 +12,7 @@ where
 
 #[derive(Clone, Default, Deserialize, Serialize, PartialEq)]
 pub(super) struct AccountStats {
-    #[serde(default, deserialize_with = "deserialize_null_default")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub(super) history: Vec<AccountStatsDay>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub(super) models: Vec<AccountStatsModel>,
@@ -279,10 +279,10 @@ mod tests {
     }
 
     #[test]
-    fn account_stats_tolerates_missing_and_null_slices() {
-        let missing: AccountStats = serde_json::from_value(json!({})).unwrap();
-        assert!(missing.history.is_empty());
-        assert!(missing.models.is_empty());
+    fn account_stats_requires_history_but_accepts_explicit_empty_slices() {
+        assert!(serde_json::from_value::<AccountStats>(json!({})).is_err());
+        let empty: AccountStats = serde_json::from_value(json!({"history":[]})).unwrap();
+        assert!(empty.history.is_empty());
 
         let nulls: AccountStats =
             serde_json::from_value(json!({"history": null, "models": null})).unwrap();

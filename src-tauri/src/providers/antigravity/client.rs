@@ -5,10 +5,9 @@ use serde_json::{json, Value};
 use super::{discovery::LanguageServer, AntigravityError};
 
 const SERVICE: &str = "exa.language_server_pb.LanguageServerService";
-const CLOUD_BASES: [&str; 2] = [
-    "https://daily-cloudcode-pa.googleapis.com",
-    "https://cloudcode-pa.googleapis.com",
-];
+// These environments do not share quota state. The other Cloud Code host can return
+// HTTP 200 with untouched pools for the same login, overwriting real usage with zero.
+const CLOUD_BASES: [&str; 1] = ["https://daily-cloudcode-pa.googleapis.com"];
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
@@ -27,6 +26,7 @@ pub struct AntigravityClient {
 pub enum CloudOutcome {
     Ok(Value),
     Failed(AntigravityError),
+    Unsupported,
     Unavailable,
 }
 
@@ -214,13 +214,13 @@ impl AntigravityClient {
                     if let Some(hint) = crate::http_client::certificate_restart_hint(&error) {
                         certificate_error = Some(hint);
                     }
-                    crate::app_warn!("http", "antigravity cloud request failed (transport)");
+                    crate::app_warn!("http", "antigravity cloud {base}{path} failed (transport)");
                     continue;
                 }
             };
             crate::app_debug!(
                 "http",
-                "antigravity cloud request HTTP {}",
+                "antigravity cloud {base}{path} HTTP {}",
                 response.status().as_u16()
             );
             if response.status() == StatusCode::UNAUTHORIZED {
@@ -229,6 +229,9 @@ impl AntigravityClient {
             if response.status() == StatusCode::FORBIDDEN {
                 let body = response.json::<Value>().unwrap_or(Value::Null);
                 return CloudOutcome::Failed(forbidden_error(&body));
+            }
+            if matches!(response.status().as_u16(), 404 | 405 | 501) {
+                return CloudOutcome::Unsupported;
             }
             if response.status().is_success() {
                 if let Ok(body) = response.json() {
@@ -435,6 +438,19 @@ mod tests {
         assert!(matches!(
             timeout_client.refresh_google_token("secret-refresh"),
             RefreshOutcome::Unavailable
+        ));
+    }
+
+    #[test]
+    fn quota_hosts_are_not_interchangeable() {
+        assert_eq!(
+            super::CLOUD_BASES,
+            ["https://daily-cloudcode-pa.googleapis.com"]
+        );
+        let base = test_http::serve_once(404, &[], "{}");
+        assert!(matches!(
+            client(&base).cloud_code("/quota", "test", json!({}), CloudUserAgent::Antigravity),
+            CloudOutcome::Unsupported
         ));
     }
 }

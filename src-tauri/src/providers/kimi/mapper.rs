@@ -58,15 +58,11 @@ fn map_quotas(body: &Value) -> Result<Vec<QuotaWindow>, KimiError> {
     // Convention: the short rolling window is the Session quota and the main usage quota is the
     // Weekly quota. Session is shown first.
     let mut quotas = Vec::new();
-    if let Ok(Some(session)) = session_quota(body) {
+    if let Some(session) = session_quota(body)? {
         quotas.push(session);
     }
-    if let Ok(weekly) = weekly_quota(body) {
-        quotas.push(weekly);
-    }
-    (!quotas.is_empty())
-        .then_some(quotas)
-        .ok_or(KimiError::InvalidResponse)
+    quotas.push(weekly_quota(body)?);
+    Ok(quotas)
 }
 
 fn weekly_quota(body: &Value) -> Result<QuotaWindow, KimiError> {
@@ -102,6 +98,12 @@ fn weekly_quota(body: &Value) -> Result<QuotaWindow, KimiError> {
 }
 
 fn session_quota(body: &Value) -> Result<Option<QuotaWindow>, KimiError> {
+    if body
+        .get("limits")
+        .is_some_and(|limits| !limits.is_array() && !limits.is_null())
+    {
+        return Err(KimiError::InvalidResponse);
+    }
     let Some(entry) = body
         .get("limits")
         .and_then(Value::as_array)
@@ -271,35 +273,19 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_weekly_section_keeps_a_valid_session_quota() {
+    fn an_invalid_weekly_section_rejects_the_partial_response() {
         let mut body = captured();
         body["usage"]["used"] = json!("not-a-number");
 
-        let mapped = map_usage(&body).unwrap();
-        assert_eq!(
-            mapped
-                .quotas
-                .iter()
-                .map(|quota| quota.id.as_str())
-                .collect::<Vec<_>>(),
-            ["session"]
-        );
+        assert!(map_usage(&body).is_err());
     }
 
     #[test]
-    fn an_invalid_session_section_keeps_a_valid_weekly_quota() {
+    fn an_invalid_session_section_rejects_the_partial_response() {
         let mut body = captured();
         body["limits"][0]["detail"]["remaining"] = json!("not-a-number");
 
-        let mapped = map_usage(&body).unwrap();
-        assert_eq!(
-            mapped
-                .quotas
-                .iter()
-                .map(|quota| quota.id.as_str())
-                .collect::<Vec<_>>(),
-            ["weekly"]
-        );
+        assert!(map_usage(&body).is_err());
     }
 
     #[test]

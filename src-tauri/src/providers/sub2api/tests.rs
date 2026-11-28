@@ -2206,3 +2206,70 @@ fn connection_errors_never_include_credentials() {
     assert_eq!(error, Sub2ApiError::InvalidConfig);
     assert!(!error.to_string().contains("secret"));
 }
+
+#[test]
+fn incomplete_subscription_and_stats_do_not_replace_cached_usage() {
+    for body in [
+        serde_json::json!({"subscription":{"daily_usage_usd":0,"daily_limit_usd":10}}),
+        serde_json::json!({"subscription":{"daily_limit_usd":10},"daily_usage":[]}),
+        serde_json::json!({"subscription":{"daily_usage_usd":0,"daily_limit_usd":10},"daily_usage":{}}),
+    ] {
+        let (base, _requests, worker) = serve_sequence(vec![body.to_string()]);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("marker"),
+            false,
+        );
+        let config: StoredConfig = serde_json::from_value(serde_json::json!({
+            "base_url":base, "mode":"subscription", "api_key":"test", "upstream":"antigravity", "email":"", "password":""
+        })).unwrap();
+        assert!(matches!(
+            provider.refresh_snapshot(&config),
+            Err(Sub2ApiError::InvalidResponse)
+        ));
+        worker.join().unwrap();
+    }
+    let (base, _requests, worker) = serve_sequence(vec![r#"{"code":0,"data":{}}"#.into()]);
+    let client = Sub2ApiClient::new(&base).unwrap();
+    assert!(matches!(
+        client.stats("test", 1),
+        Err(Sub2ApiError::InvalidResponse)
+    ));
+    worker.join().unwrap();
+}
+
+#[test]
+fn subscription_accepts_explicit_empty_history_and_today_only_responses() {
+    for history in [
+        serde_json::json!({"daily_usage": null}),
+        serde_json::json!({"daily_usage": []}),
+        serde_json::json!({"usage":{"today":{"tokens":42,"actual_cost":0}}}),
+    ] {
+        let today_only = history.get("usage").is_some();
+        let mut body = history;
+        body["subscription"] = serde_json::json!({"daily_usage_usd":0,"daily_limit_usd":10});
+        let (base, _requests, worker) = serve_sequence(vec![body.to_string()]);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Sub2API".into(),
+            directory.path().join("marker"),
+            false,
+        );
+        let config: StoredConfig = serde_json::from_value(serde_json::json!({
+            "base_url":base, "mode":"subscription", "api_key":"test", "upstream":"antigravity", "email":"", "password":""
+        })).unwrap();
+        let snapshot = provider.refresh_snapshot(&config).unwrap();
+        worker.join().unwrap();
+        assert_eq!(snapshot.quotas[0].used_value, Some(0.0));
+        let history = snapshot.usage_histories.account.unwrap();
+        assert!(history.daily.is_empty());
+        if today_only {
+            assert_eq!(history.today.unwrap().tokens, 42);
+        } else {
+            assert!(history.today.is_none());
+        }
+    }
+}

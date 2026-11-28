@@ -306,9 +306,12 @@ impl AntigravityProvider {
             json!({}),
             CloudUserAgent::Antigravity,
         ) {
-            CloudOutcome::Ok(value) => parse_quota_summary(&value, Utc::now()),
+            CloudOutcome::Ok(value) => {
+                Some(parse_quota_summary(&value, Utc::now()).ok_or(AntigravityError::Unavailable)?)
+            }
             CloudOutcome::Failed(error) => return Err(error),
-            CloudOutcome::Unavailable => None,
+            CloudOutcome::Unsupported => None,
+            CloudOutcome::Unavailable => return Err(AntigravityError::Unavailable),
         };
         // An account whose Gemini models share no pool in the summary (Google AI Pro, say)
         // reports their five-hour window per model instead.
@@ -324,7 +327,8 @@ impl AntigravityProvider {
         ) {
             CloudOutcome::Ok(value) => build_legacy_quotas(parse_cloud_models(&value), Utc::now()),
             CloudOutcome::Failed(error) => return Err(error),
-            CloudOutcome::Unavailable => Vec::new(),
+            CloudOutcome::Unsupported => Vec::new(),
+            CloudOutcome::Unavailable => return Err(AntigravityError::Unavailable),
         };
         let quotas = match summary {
             Some(summary) => merge_model_pools(summary, models),
@@ -349,7 +353,7 @@ impl AntigravityProvider {
                     .map(str::to_owned),
             ),
             CloudOutcome::Failed(error) => return Err(error),
-            CloudOutcome::Unavailable => (None, None),
+            CloudOutcome::Unavailable | CloudOutcome::Unsupported => (None, None),
         };
 
         let body = project
@@ -372,7 +376,7 @@ impl AntigravityProvider {
                 }
             }
             CloudOutcome::Failed(error) => return Err(error),
-            CloudOutcome::Unavailable => {}
+            CloudOutcome::Unavailable | CloudOutcome::Unsupported => {}
         }
         Err(AntigravityError::Unavailable)
     }
@@ -1038,5 +1042,49 @@ mod tests {
             false
         }));
         assert!(!discovery_called.get());
+    }
+
+    #[test]
+    fn summary_failure_does_not_replace_usage_with_legacy_model_defaults() {
+        use std::{
+            net::TcpListener,
+            time::{Duration as StdDuration, Instant},
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + StdDuration::from_secs(2);
+            let mut requests = 0;
+            while Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(StdDuration::from_millis(5));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(StdDuration::from_secs(1)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                requests += 1;
+                let (status, body) = if requests == 1 {
+                    (503, "{}")
+                } else {
+                    (
+                        200,
+                        r#"{"models":{"gemini":{"displayName":"Gemini","quotaInfo":{"remainingFraction":1}}}}"#,
+                    )
+                };
+                let _ = stream.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            }
+            requests
+        });
+        let login = FakeLogin::new(vec![], false);
+        let (provider, _dir) = provider(&base, &login);
+        assert!(matches!(
+            provider.fetch_remote("test"),
+            Err(AntigravityError::Unavailable)
+        ));
+        assert_eq!(server.join().unwrap(), 1);
     }
 }

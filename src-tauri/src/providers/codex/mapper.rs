@@ -32,6 +32,24 @@ pub fn map_usage(
     }
 
     let rate_limit = response.body.get("rate_limit");
+    if let Some(limits) = rate_limit.filter(|value| !value.is_null()) {
+        if !limits.is_object() {
+            return Err(CodexError::InvalidResponse);
+        }
+        for (key, header) in [
+            ("primary_window", "x-codex-primary-used-percent"),
+            ("secondary_window", "x-codex-secondary-used-percent"),
+        ] {
+            if let Some(window) = limits.get(key).filter(|value| !value.is_null()) {
+                if !window.is_object()
+                    || (number(window.get("used_percent")).is_none()
+                        && header_number(response, header).is_none())
+                {
+                    return Err(CodexError::InvalidResponse);
+                }
+            }
+        }
+    }
     let mut quotas = map_classified_windows(
         rate_limit,
         WindowMetricLabels {
@@ -54,6 +72,9 @@ pub fn map_usage(
         value_metrics.push(credits_metric(balance));
     }
 
+    if quotas.is_empty() && value_metrics.is_empty() {
+        return Err(CodexError::InvalidResponse);
+    }
     Ok(MappedUsage {
         plan: format_plan(response.body.get("plan_type")),
         quotas,
@@ -972,9 +993,8 @@ mod tests {
             })),
             None,
             Utc::now(),
-        )
-        .unwrap();
-        assert!(mapped.quotas.is_empty());
+        );
+        assert!(mapped.is_err());
     }
 
     #[test]
@@ -1055,10 +1075,11 @@ mod tests {
 
     #[test]
     fn malformed_or_negative_reset_counts_are_omitted() {
-        for body in [
+        for mut body in [
             json!({"rate_limit_reset_credits": {"available_count": null}}),
             json!({"rate_limit_reset_credits": {"available_count": -1}}),
         ] {
+            body["rate_limit"] = json!({"primary_window":{"used_percent":10}});
             let mapped = map_usage(&response(body), None, Utc::now()).unwrap();
             assert!(mapped
                 .value_metrics
@@ -1082,5 +1103,22 @@ mod tests {
         assert_eq!(mapped.quotas[0].used_percent, 37.5);
         assert_eq!(mapped.quotas[1].period_seconds, 604_800);
         assert!(mapped.quotas.iter().all(|quota| quota.resets_at.is_some()));
+    }
+
+    #[test]
+    fn missing_usage_is_not_a_successful_empty_snapshot() {
+        for body in [
+            json!({}),
+            json!({"rate_limit":{"primary_window":{},"secondary_window":{"used_percent":30}}}),
+        ] {
+            assert!(map_usage(&response(body), None, Utc::now()).is_err());
+        }
+        let mapped = map_usage(
+            &response(json!({"rate_limit":{"primary_window":{"used_percent":0}}})),
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(mapped.quotas[0].used_percent, 0.0);
     }
 }

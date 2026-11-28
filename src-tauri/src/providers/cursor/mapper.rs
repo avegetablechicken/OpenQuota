@@ -118,20 +118,26 @@ pub fn map_live_usage(
     let used_cents = plan_usage
         .get("totalSpend")
         .and_then(number)
-        .unwrap_or_else(|| {
-            facts.limit.unwrap_or_default()
-                - plan_usage
-                    .get("remaining")
-                    .and_then(number)
-                    .unwrap_or_default()
+        .or_else(|| {
+            facts
+                .limit
+                .zip(plan_usage.get("remaining").and_then(number))
+                .map(|(limit, remaining)| limit - remaining)
         })
-        .max(0.0);
-    let computed_percent = facts
-        .limit
-        .filter(|limit| *limit > 0.0)
-        .map(|limit| used_cents / limit * 100.0)
-        .unwrap_or_default();
-    let total_percent = facts.total_percent_used.unwrap_or(computed_percent);
+        .or_else(|| {
+            facts
+                .limit
+                .zip(facts.total_percent_used)
+                .map(|(limit, percent)| limit * percent / 100.0)
+        })
+        .map(|used| used.max(0.0));
+    let computed_percent = used_cents
+        .zip(facts.limit.filter(|limit| *limit > 0.0))
+        .map(|(used, limit)| used / limit * 100.0);
+    let total_percent = facts
+        .total_percent_used
+        .or(computed_percent)
+        .ok_or(CursorError::TotalUsageLimitMissing)?;
     let (resets_at, period_seconds) = billing_cycle(usage);
     let plan = plan_name.unwrap_or_default().trim().to_ascii_lowercase();
     let team = plan == "team" || facts.team_by_shape();
@@ -145,7 +151,7 @@ pub fn map_live_usage(
         quotas.push(quota(
             "usage",
             "Total usage",
-            used_cents / 100.0,
+            used_cents.ok_or(CursorError::TotalUsageLimitMissing)? / 100.0,
             limit / 100.0,
             QuotaFormat::Dollars,
             resets_at,
@@ -231,7 +237,11 @@ pub fn map_request_usage(
     let used = gpt4
         .and_then(|value| value.get("numRequests"))
         .and_then(number)
-        .unwrap_or_default();
+        .or_else(|| {
+            gpt4.and_then(|value| value.get("numRequestsTotal"))
+                .and_then(number)
+        })
+        .ok_or_else(|| CursorError::RequestBasedUnavailable(unavailable_message.into()))?;
     let resets_at = usage
         .get("startOfMonth")
         .and_then(Value::as_str)
@@ -259,6 +269,42 @@ pub fn map_summary_usage(
     unavailable_message: &str,
 ) -> Result<CursorMappedUsage, CursorError> {
     let (resets_at, period_seconds) = summary_billing_cycle(summary, request_usage);
+    for path in [
+        "/individualUsage/overall",
+        "/teamUsage/pooled",
+        "/individualUsage/onDemand",
+        "/teamUsage/onDemand",
+    ] {
+        if let Some(bucket) = summary.and_then(|value| value.pointer(path)) {
+            if bucket.get("enabled").and_then(Value::as_bool) != Some(false)
+                && bucket
+                    .get("limit")
+                    .and_then(number)
+                    .is_some_and(|limit| limit > 0.0)
+                && dollar_meter(bucket).is_none()
+            {
+                return Err(CursorError::RequestBasedUnavailable(
+                    unavailable_message.into(),
+                ));
+            }
+        }
+    }
+    if let Some(requests) = request_usage.and_then(|value| value.get("gpt-4")) {
+        if requests
+            .get("maxRequestUsage")
+            .and_then(number)
+            .is_some_and(|limit| limit > 0.0)
+            && requests
+                .get("numRequests")
+                .and_then(number)
+                .or_else(|| requests.get("numRequestsTotal").and_then(number))
+                .is_none()
+        {
+            return Err(CursorError::RequestBasedUnavailable(
+                unavailable_message.into(),
+            ));
+        }
+    }
     let mut quotas = Vec::new();
     let mut value_metrics = Vec::new();
 
@@ -273,8 +319,7 @@ pub fn map_summary_usage(
             let used = requests
                 .get("numRequests")
                 .and_then(number)
-                .or_else(|| requests.get("numRequestsTotal").and_then(number))
-                .unwrap_or_default()
+                .or_else(|| requests.get("numRequestsTotal").and_then(number))?
                 .max(0.0);
             Some((used, limit))
         });
@@ -446,9 +491,14 @@ fn dollar_meter(bucket: &Value) -> Option<(f64, f64)> {
         .and_then(number)
         .filter(|value| *value > 0.0)?;
     let reported = bucket.get("used").and_then(number);
-    let remaining = bucket.get("remaining").and_then(number).unwrap_or(limit);
-    let inferred = (limit - remaining).max(0.0);
-    let used = reported.filter(|value| *value > 0.0).unwrap_or(inferred);
+    let inferred = bucket
+        .get("remaining")
+        .and_then(number)
+        .map(|remaining| (limit - remaining).max(0.0));
+    let used = reported
+        .filter(|value| *value > 0.0)
+        .or(inferred)
+        .or(reported)?;
     Some((used.max(0.0), limit))
 }
 
@@ -1142,5 +1192,31 @@ mod tests {
   ]
 }
 "#;
+    }
+
+    #[test]
+    fn missing_usage_fields_do_not_become_zero() {
+        let summary =
+            json!({"individualUsage":{"overall":{"limit":100},"plan":{"autoPercentUsed":10}}});
+        assert!(
+            super::map_summary_usage(Some(&summary), None, Some("pro"), "unavailable").is_err()
+        );
+        let requests = json!({"gpt-4":{"maxRequestUsage":100}});
+        assert!(super::map_request_usage(&requests, Some("pro"), "unavailable").is_err());
+        assert!(
+            super::map_summary_usage(None, Some(&requests), Some("pro"), "unavailable").is_err()
+        );
+        assert!(
+            super::map_live_usage(&json!({"planUsage":{"limit":100}}), Some("pro"), None, 0.0)
+                .is_err()
+        );
+        assert_eq!(
+            super::dollar_meter(&json!({"limit":100,"used":0})),
+            Some((0.0, 100.0))
+        );
+        assert_eq!(
+            super::dollar_meter(&json!({"limit":100,"remaining":100})),
+            Some((0.0, 100.0))
+        );
     }
 }

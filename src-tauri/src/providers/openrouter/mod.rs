@@ -169,17 +169,22 @@ impl OpenRouterProvider {
         });
         let credits = classify(credits);
         let key = classify(key);
+        // Permission-gated endpoints are optional; transport and malformed-response
+        // failures are not evidence that their previously shown metrics disappeared.
+        if let Some(error) = credits.error().or_else(|| key.error()) {
+            return Err(error.into());
+        }
         let mut quotas = Vec::new();
         let mut values = Vec::new();
         let mut plan = None;
 
         if let EndpointOutcome::Success(data) = &credits {
-            let mapped = map_credits(data);
+            let mapped = map_credits(data)?;
             quotas.extend(mapped.quota);
             values.extend(mapped.balance);
         }
         if let EndpointOutcome::Success(data) = &key {
-            let mapped = map_key(data);
+            let mapped = map_key(data)?;
             plan = mapped.plan;
             quotas.extend(mapped.quota);
             values.extend(mapped.values);
@@ -202,11 +207,7 @@ impl OpenRouterProvider {
         if credits.is_auth_failure() && key.is_auth_failure() {
             return Err(OpenRouterError::InvalidKey.into());
         }
-        Err(credits
-            .error()
-            .or_else(|| key.error())
-            .unwrap_or(OpenRouterError::InvalidResponse)
-            .into())
+        Err(OpenRouterError::InvalidResponse.into())
     }
 }
 
@@ -507,6 +508,21 @@ mod tests {
                 crate::models::MetricSection::OnDemand
             );
             assert!(!metric(id).default_pinned);
+        }
+    }
+
+    #[test]
+    fn a_partial_transient_response_is_not_a_successful_replacement() {
+        for (status, body) in [(503, "{}"), (200, r#"{"data":{"total_usage":1}}"#)] {
+            assert!(provider(
+                Some("test"),
+                status,
+                body,
+                200,
+                r#"{"data":{"usage_daily":0.5}}"#
+            )
+            .refresh()
+            .is_err());
         }
     }
 }

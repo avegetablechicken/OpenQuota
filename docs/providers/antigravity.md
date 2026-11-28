@@ -54,3 +54,8 @@ request left unanswered for a minute is abandoned and retried on a later refresh
 - **Quota permission denied (HTTP 403)** — Google rejected the quota request. `SUBSCRIPTION_REQUIRED` means Google did not recognize a valid license for that request. OpenQuota shows the reason and numeric reference when available.
 - **Credentials could not be read** — reopen Antigravity so its local sign-in state can be restored.
 - **Usage temporarily unavailable** — wait briefly and refresh again.
+
+Cloud quota requests use the Antigravity `daily-cloudcode-pa.googleapis.com` environment.
+The other Cloud Code environment can report untouched quota pools for the same login and is
+not a fallback. A transient request failure keeps the last successful quota snapshot; only an
+explicitly unsupported API allows trying an older quota API on the same environment.

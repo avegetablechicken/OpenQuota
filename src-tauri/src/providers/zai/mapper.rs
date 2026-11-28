@@ -61,7 +61,7 @@ fn map_quota_with_kind(body: &Value) -> Result<(Vec<QuotaWindow>, bool), ZaiErro
         .and_then(Value::as_array)
         .ok_or(ZaiError::InvalidResponse)?;
     if limits.is_empty() {
-        return Ok((Vec::new(), false));
+        return Err(ZaiError::InvalidResponse);
     }
     let limits = limits
         .iter()
@@ -103,14 +103,15 @@ fn map_quota_with_kind(body: &Value) -> Result<(Vec<QuotaWindow>, bool), ZaiErro
         .map(web_search_quota)
         .transpose()?;
 
-    Ok((
-        session
-            .into_iter()
-            .chain(weekly)
-            .chain(web_searches)
-            .collect(),
-        uses_credits,
-    ))
+    let quotas: Vec<_> = session
+        .into_iter()
+        .chain(weekly)
+        .chain(web_searches)
+        .collect();
+    if quotas.is_empty() {
+        return Err(ZaiError::InvalidResponse);
+    }
+    Ok((quotas, uses_credits))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -351,9 +352,7 @@ mod tests {
         ] {
             assert!(matches!(map_quota(&body), Err(ZaiError::InvalidResponse)));
         }
-        assert!(map_quota(&json!({"data":{"limits":[]}}))
-            .unwrap()
-            .is_empty());
+        assert!(map_quota(&json!({"data":{"limits":[]}})).is_err());
     }
 
     #[test]
@@ -371,9 +370,8 @@ mod tests {
         let unknown_only = map_quota(&json!({"data":{"limits":[
             {"type":"FUTURE_LIMIT"},
             {"type":"TOKENS_LIMIT","unit":99,"number":1,"percentage":70}
-        ]}}))
-        .unwrap();
-        assert!(unknown_only.is_empty());
+        ]}}));
+        assert!(unknown_only.is_err());
     }
 
     #[test]

@@ -5,16 +5,29 @@ use super::{
 use crate::models::{MetricValueKind, ProviderSnapshot, QuotaFormat, QuotaWindow, UsageHistories};
 use chrono::{DateTime, Days, Local, Utc};
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 #[derive(Deserialize)]
 struct UsageResponse {
     #[serde(rename = "planName")]
     plan: Option<String>,
     subscription: Option<Subscription>,
+    #[serde(default, deserialize_with = "deserialize_daily_usage")]
     daily_usage: Option<Vec<AccountStatsDay>>,
     model_stats: Option<Vec<AccountStatsModel>>,
     usage: Option<KeyUsage>,
+}
+
+// Go encodes a present nil slice as null. Keep that explicit empty history distinct
+// from an omitted field, which may indicate an incomplete response.
+fn deserialize_daily_usage<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<AccountStatsDay>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<Vec<AccountStatsDay>>::deserialize(deserializer)
+        .map(|history| Some(history.unwrap_or_default()))
 }
 
 #[derive(Deserialize)]
@@ -173,6 +186,15 @@ impl Sub2ApiClient {
         }
         let usage: UsageResponse = decode_response("subscription", response)?;
         let subscription = usage.subscription.ok_or(Sub2ApiError::NoSubscription)?;
+        if usage.daily_usage.is_none()
+            && usage
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.today.as_ref())
+                .is_none()
+        {
+            return Err(Sub2ApiError::InvalidResponse);
+        }
         snapshot.plan = usage.plan;
         let mut history = AccountStats {
             history: usage.daily_usage.unwrap_or_default(),
@@ -207,6 +229,9 @@ impl Sub2ApiClient {
                 None,
             ),
         ]) {
+            if limit.is_some_and(|limit| limit > 0.0) && used.is_none() {
+                return Err(Sub2ApiError::InvalidResponse);
+            }
             if let Some(used) = used.filter(|n| *n >= 0.0) {
                 snapshot
                     .quotas

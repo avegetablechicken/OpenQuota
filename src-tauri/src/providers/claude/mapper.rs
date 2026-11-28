@@ -40,6 +40,18 @@ pub fn map_usage_at(
         return Err(ClaudeError::RequestFailed(status.as_u16()));
     }
     let object = body.as_object().ok_or(ClaudeError::InvalidResponse)?;
+    for key in [
+        "five_hour",
+        "seven_day",
+        "seven_day_sonnet",
+        "seven_day_fable",
+    ] {
+        if let Some(window) = object.get(key).filter(|value| !value.is_null()) {
+            if window.get("utilization").and_then(number).is_none() {
+                return Err(ClaudeError::InvalidResponse);
+            }
+        }
+    }
     let mut quotas = Vec::new();
     let mut value_metrics = Vec::new();
     append_window(
@@ -133,6 +145,9 @@ pub fn map_usage_at(
     }
     if let Some(resets) = map_cedar_ember_resets(body, now) {
         value_metrics.push(resets);
+    }
+    if quotas.is_empty() && value_metrics.is_empty() {
+        return Err(ClaudeError::InvalidResponse);
     }
     Ok(ClaudeMappedUsage {
         plan: format_plan(
@@ -716,11 +731,12 @@ mod tests {
         .unwrap();
         assert_eq!(zero.value_metrics[0].values[0].number, 0.0);
 
-        for body in [
+        for mut body in [
             serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "cli_version"}}),
             serde_json::json!({"cedar_ember": {"eligible": true}}),
             serde_json::json!({}),
         ] {
+            body["five_hour"] = serde_json::json!({"utilization": 10});
             let mapped = map_usage_at(StatusCode::OK, &body, &ClaudeOAuth::default(), now).unwrap();
             assert!(mapped
                 .value_metrics
@@ -769,12 +785,13 @@ mod tests {
         assert_eq!(metrics[0].reset_credits[0].kind, ResetCreditKind::Full);
 
         // Explicit negative or malformed reset metadata must supersede the prior positive state.
-        for body in [
+        for mut body in [
             serde_json::json!({"cedar_ember": {"eligible": false}}),
             serde_json::json!({"cedar_ember": null}),
             serde_json::json!({"cedar_ember": {"eligible": true}}),
             serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}}),
         ] {
+            body["five_hour"] = serde_json::json!({"utilization": 10});
             let mut mapped =
                 map_usage_at(StatusCode::OK, &body, &ClaudeOAuth::default(), t1).unwrap();
             retain_known_resets(&mut mapped.value_metrics, Some(&previous), &body, t1);
@@ -821,5 +838,22 @@ mod tests {
             now
         )
         .is_none());
+    }
+
+    #[test]
+    fn malformed_usage_does_not_erase_previous_windows() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"five_hour":{},"seven_day":{"utilization":30}}),
+        ] {
+            assert!(map_usage(StatusCode::OK, &body, &ClaudeOAuth::default()).is_err());
+        }
+        let mapped = map_usage(
+            StatusCode::OK,
+            &serde_json::json!({"five_hour":{"utilization":0}}),
+            &ClaudeOAuth::default(),
+        )
+        .unwrap();
+        assert_eq!(mapped.quotas[0].used_percent, 0.0);
     }
 }
