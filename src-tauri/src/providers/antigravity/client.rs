@@ -127,7 +127,10 @@ impl AntigravityClient {
         remote_timeout: std::time::Duration,
     ) -> Result<Self, AntigravityError> {
         Ok(Self {
+            // The language server listens on loopback only: never route it (or its CSRF token)
+            // through a system or environment proxy.
             local: crate::http_client::blocking_client_builder()
+                .no_proxy()
                 .danger_accept_invalid_certs(true)
                 .timeout(std::time::Duration::from_secs(5))
                 .build()
