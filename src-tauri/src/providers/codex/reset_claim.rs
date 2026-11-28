@@ -60,7 +60,7 @@ impl CodexResetClaimService {
             .map(CodexAuthState::account_identity)
             .collect::<Vec<_>>();
         let (credit_id, indexes) = if let Some(cached) = cached_credit {
-            let Some(indexes) = owner_indexes(&identities, cached.owner.as_deref()) else {
+            let Some(indexes) = owner_indexes(&identities, cached.owner.as_deref(), None) else {
                 crate::app_error!(
                     "provider:codex",
                     "reset claim credit owner is no longer logged in"
@@ -116,7 +116,10 @@ impl CodexResetClaimService {
                     },
                 );
             }
-            (credit_id, vec![index])
+            let owner = identities[index].as_deref();
+            let indexes =
+                owner_indexes(&identities, owner, Some(index)).unwrap_or_else(|| vec![index]);
+            (credit_id, indexes)
         };
 
         for index in indexes {
@@ -153,17 +156,32 @@ impl CodexResetClaimService {
     }
 }
 
-/// The candidates that may consume a credit owned by `owner`: that account alone, or every
-/// candidate in order when the owner could not be identified. `None` when the owner is no longer
-/// among the candidates.
-fn owner_indexes(identities: &[Option<String>], owner: Option<&str>) -> Option<Vec<usize>> {
-    match owner {
+/// The candidates that may consume a credit owned by `owner`, in order with `first` (the
+/// candidate that matched the credit) leading: every stored login of that account, since one copy
+/// may hold a stale token while another is valid. Every candidate when the owner could not be
+/// identified. `None` when the owner is no longer among the candidates.
+fn owner_indexes(
+    identities: &[Option<String>],
+    owner: Option<&str>,
+    first: Option<usize>,
+) -> Option<Vec<usize>> {
+    let mut indexes: Vec<usize> = match owner {
         Some(owner) => identities
             .iter()
-            .position(|identity| identity.as_deref() == Some(owner))
-            .map(|index| vec![index]),
-        None => Some((0..identities.len()).collect()),
+            .enumerate()
+            .filter(|(_, identity)| identity.as_deref() == Some(owner))
+            .map(|(index, _)| index)
+            .collect(),
+        None => (0..identities.len()).collect(),
+    };
+    if indexes.is_empty() {
+        return None;
     }
+    if let Some(position) = first.and_then(|first| indexes.iter().position(|&i| i == first)) {
+        let first = indexes.remove(position);
+        indexes.insert(0, first);
+    }
+    Some(indexes)
 }
 
 fn credit_id_for_expiry(body: &Value, expiry: DateTime<Utc>) -> Option<String> {
@@ -218,9 +236,35 @@ mod tests {
     #[test]
     fn a_matched_credit_is_consumed_only_by_the_account_that_owns_it() {
         let identities = [Some("account-a".to_owned()), Some("account-b".to_owned())];
-        assert_eq!(owner_indexes(&identities, Some("account-b")), Some(vec![1]));
-        assert_eq!(owner_indexes(&identities, Some("account-c")), None);
-        assert_eq!(owner_indexes(&identities, None), Some(vec![0, 1]));
+        assert_eq!(
+            owner_indexes(&identities, Some("account-b"), None),
+            Some(vec![1])
+        );
+        assert_eq!(owner_indexes(&identities, Some("account-c"), None), None);
+        assert_eq!(owner_indexes(&identities, None, None), Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn every_stored_login_of_the_owner_may_consume_with_the_matching_one_first() {
+        // The same account stored twice (e.g. CODEX_HOME and the keychain): a stale first copy
+        // must not hide a valid second one.
+        let identities = [
+            Some("account-a".to_owned()),
+            Some("account-b".to_owned()),
+            Some("account-a".to_owned()),
+        ];
+        assert_eq!(
+            owner_indexes(&identities, Some("account-a"), None),
+            Some(vec![0, 2])
+        );
+        assert_eq!(
+            owner_indexes(&identities, Some("account-a"), Some(2)),
+            Some(vec![2, 0])
+        );
+        assert_eq!(
+            owner_indexes(&identities, None, Some(1)),
+            Some(vec![1, 0, 2])
+        );
     }
 
     #[test]
