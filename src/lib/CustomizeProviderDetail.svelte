@@ -27,6 +27,7 @@
     renamableProviderIds: string[];
     metricPolicy: MetricPolicy | undefined;
     onChange: (settings: AppSettings) => void;
+    /** Saves settings outside the layout undo history: card names and proxies. */
     onNameChange: (settings: AppSettings) => void;
     onReorderStart: () => void;
     onReorderEnd: (moved: boolean, cancelled?: boolean) => void;
@@ -251,14 +252,26 @@
     {/each}
     {#if catalog.supportsConnectionConfiguration(provider.id)}
       <Sub2ApiConfigSection providerId={provider.id} onRemove={onProviderRemoved}>
-        <ProviderProxySection {settings} {provider} {onChange} {onContentMorph} {reducedMotion} />
+        <ProviderProxySection
+          {settings}
+          {provider}
+          onChange={onNameChange}
+          {onContentMorph}
+          {reducedMotion}
+        />
       </Sub2ApiConfigSection>
     {:else}
       <ProviderApiKeySection
         providerId={provider.id}
         providerName={providerDisplayName(provider.id)}
       />
-      <ProviderProxySection {settings} {provider} {onChange} {onContentMorph} {reducedMotion} />
+      <ProviderProxySection
+        {settings}
+        {provider}
+        onChange={onNameChange}
+        {onContentMorph}
+        {reducedMotion}
+      />
     {/if}
     {#if message}
       <div class:denied={messageKind === 'denied'} class="customization-pill" role="status">

@@ -4,6 +4,7 @@ import { plainMetricPolicies, providerCatalog, providerCatalogIndex } from '../t
 import CustomizeProviderDetail from './CustomizeProviderDetail.svelte';
 import CustomizeProviderList from './CustomizeProviderList.svelte';
 import { ProviderCatalogIndex } from './metrics';
+import { selectOption } from '../test/selectOption';
 import type { AppSettings, ProviderCatalog } from './types';
 
 afterEach(cleanup);
@@ -148,6 +149,31 @@ describe('pointer reorder integrations', () => {
 
     expect(input).toHaveValue('Work');
     expect(onNameChange).not.toHaveBeenCalled();
+  });
+
+  it('saves proxy changes outside the layout undo history', async () => {
+    const onChange = vi.fn();
+    const onNameChange = vi.fn();
+    render(CustomizeProviderDetail, {
+      settings,
+      providerId: 'claude',
+      metricPolicy: plainMetricPolicies()['claude'],
+      catalog: providerCatalogIndex,
+      renamableProviderIds: ['claude'],
+      onChange,
+      onNameChange,
+      onReorderStart: vi.fn(),
+      onReorderEnd: vi.fn(),
+      reducedMotion: false,
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Edit proxy' }));
+    await selectOption(screen.getByRole('combobox', { name: 'Proxy mode' }), 'Direct');
+
+    expect(onNameChange).toHaveBeenCalledWith(
+      expect.objectContaining({ providerProxies: expect.objectContaining({ claude: 'direct' }) }),
+    );
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it('keeps dashboard visibility and menu bar stars independent', async () => {
