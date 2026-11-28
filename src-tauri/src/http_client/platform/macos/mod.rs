@@ -54,6 +54,10 @@ use pac::{pac_source, PacDecision, PacResolver, PacSource};
 type ProxySettings = CFDictionary<CFString, CFType>;
 
 const SYSTEM_PROXY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+// A PAC URL that cannot be loaded is retried with backoff: each retry blocks
+// proxied requests on the cache mutex for up to the PAC download timeout.
+const PAC_RELOAD_INITIAL_BACKOFF: Duration = Duration::from_secs(15);
+const PAC_RELOAD_MAX_BACKOFF: Duration = Duration::from_secs(300);
 static PROXY_RESOLVER: OnceLock<ProxyResolver> = OnceLock::new();
 
 pub(in crate::http_client) fn configure(builder: ClientBuilder) -> ClientBuilder {
@@ -164,7 +168,13 @@ struct SystemProxyCache {
     checked_at: Option<Instant>,
     configuration: Option<SystemProxyConfiguration>,
     resolver: Option<Arc<SystemProxyResolver>>,
-    reload_failed: bool,
+    reload_retry: Option<PacReloadRetry>,
+}
+
+#[derive(Clone, Copy)]
+struct PacReloadRetry {
+    at: Instant,
+    backoff: Duration,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -300,9 +310,18 @@ impl DynamicSystemProxyResolver {
 
 impl SystemProxyCache {
     fn update(&mut self, configuration: Option<SystemProxyConfiguration>) {
-        if self.configuration == configuration && !self.reload_failed {
+        self.update_at(configuration, Instant::now());
+    }
+
+    fn update_at(&mut self, configuration: Option<SystemProxyConfiguration>, now: Instant) {
+        let unchanged = self.configuration == configuration;
+        if unchanged && self.reload_retry.is_none_or(|retry| now < retry.at) {
             return;
         }
+        let previous_backoff = self
+            .reload_retry
+            .filter(|_| unchanged)
+            .map(|retry| retry.backoff);
 
         // pacparser keeps one process-global engine. Replacing the resolver reloads
         // that engine under its own mutex while this cache mutex excludes evaluations.
@@ -312,7 +331,15 @@ impl SystemProxyCache {
             .map(SystemProxyResolver::from_configuration)
             .unwrap_or((None, false));
         self.resolver = resolver.map(Arc::new);
-        self.reload_failed = reload_failed;
+        self.reload_retry = reload_failed.then(|| {
+            let backoff = previous_backoff.map_or(PAC_RELOAD_INITIAL_BACKOFF, |backoff| {
+                (backoff * 2).min(PAC_RELOAD_MAX_BACKOFF)
+            });
+            PacReloadRetry {
+                at: now + backoff,
+                backoff,
+            }
+        });
     }
 }
 
@@ -617,7 +644,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
             mpsc, Arc, Condvar, Mutex,
         },
-        time::Instant,
+        time::{Duration, Instant},
     };
 
     fn url(value: &str) -> Url {
@@ -734,6 +761,42 @@ mod tests {
     }
 
     #[test]
+    fn failed_pac_reload_backs_off_until_configuration_changes() {
+        let mut configuration = static_configuration(Some("http://fallback:8080"));
+        configuration.pac = Some(super::PacSource::Url(
+            "file:///nonexistent/openquota-test.pac".into(),
+        ));
+        let start = Instant::now();
+        let mut cache = SystemProxyCache::default();
+
+        cache.update_at(Some(configuration.clone()), start);
+        let first = cache.reload_retry.expect("failed PAC reload is retried");
+        assert_eq!(first.backoff, super::PAC_RELOAD_INITIAL_BACKOFF);
+        assert_eq!(
+            cache
+                .resolver
+                .as_ref()
+                .and_then(|resolver| resolver.proxy_for_url(&url("https://example.com"))),
+            Some("http://fallback:8080".into())
+        );
+
+        cache.update_at(Some(configuration.clone()), start + Duration::from_secs(1));
+        assert_eq!(cache.reload_retry.unwrap().at, first.at);
+
+        cache.update_at(Some(configuration.clone()), first.at);
+        assert_eq!(
+            cache.reload_retry.unwrap().backoff,
+            super::PAC_RELOAD_INITIAL_BACKOFF * 2
+        );
+
+        cache.update_at(
+            Some(static_configuration(Some("http://fallback:8080"))),
+            first.at,
+        );
+        assert!(cache.reload_retry.is_none());
+    }
+
+    #[test]
     fn system_proxy_uses_cached_basic_credentials() {
         let endpoint = ProxyEndpoint {
             host: "proxy.example".into(),
@@ -779,7 +842,7 @@ mod tests {
                 checked_at: Some(Instant::now()),
                 configuration: Some(static_configuration(Some("http://proxy.example:8080"))),
                 resolver: Some(Arc::clone(&resolver)),
-                reload_failed: false,
+                reload_retry: None,
             }),
         };
 
@@ -958,6 +1021,17 @@ mod tests {
         }
         assert!(!rules.matches(&url("https://notexample.com")));
         assert!(!rules.matches(&url("https://internal.example.net")));
+    }
+
+    #[test]
+    fn bypass_rules_match_ipv6_literals() {
+        let rules = BypassRules::from_comma_list("::1,fd00::/8", false);
+        assert!(rules.matches(&url("http://[::1]:8080")));
+        assert!(rules.matches(&url("http://[fd00::5]:8080")));
+        assert!(!rules.matches(&url("http://[2001:db8::1]")));
+
+        let simple = BypassRules::from_comma_list("<local>", false);
+        assert!(!simple.matches(&url("http://[2001:db8::1]")));
     }
 
     #[test]

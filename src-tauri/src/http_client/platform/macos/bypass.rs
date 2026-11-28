@@ -92,11 +92,16 @@ impl BypassRules {
         let Some(host) = url.host_str() else {
             return false;
         };
+        // `host_str` keeps the brackets around IPv6 literals ("[::1]").
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
         let host = host.trim_end_matches('.').to_ascii_lowercase();
-        if self.exclude_simple_hostnames && !host.contains('.') && host.parse::<IpAddr>().is_err() {
+        let ip = host.parse::<IpAddr>().ok();
+        if self.exclude_simple_hostnames && !host.contains('.') && ip.is_none() {
             return true;
         }
-        let ip = host.parse::<IpAddr>().ok();
         self.rules.iter().any(|rule| match rule {
             BypassRule::All => true,
             BypassRule::Ip(expected) => ip.as_ref() == Some(expected),

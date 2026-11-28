@@ -16,6 +16,9 @@ use super::{string_setting, ProxySettings};
 
 const MAX_PAC_BYTES: u64 = 4 * 1024 * 1024;
 const PAC_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+// PAC scripts may decide on the full URL, so decisions are cached per URL. Bound
+// the cache so URLs with changing query strings do not grow it without limit.
+const MAX_PAC_DECISIONS: usize = 256;
 static PAC_ENGINE: OnceLock<Mutex<()>> = OnceLock::new();
 
 unsafe extern "C" {
@@ -159,6 +162,9 @@ impl PacResolver {
         };
         let decision = pac_decision_from_result(result);
         if decision != PacDecision::Error {
+            if decisions.len() >= MAX_PAC_DECISIONS {
+                decisions.clear();
+            }
             decisions.insert(cache_key.to_owned(), decision.clone());
         }
         decision
