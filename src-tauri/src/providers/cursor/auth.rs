@@ -50,17 +50,27 @@ impl CursorAuthState {
     }
 
     pub fn save_access_token(&mut self, access_token: String) -> Result<(), CursorError> {
-        match &self.source {
-            CursorAuthSource::Sqlite(path) => {
-                write_state_value(path, ACCESS_TOKEN_KEY, &access_token)
-            }
-            CursorAuthSource::Keychain { account } => {
-                write_generic_password(ACCESS_TOKEN_SERVICE, account, access_token.as_bytes())
-                    .map_err(|_| CursorError::AuthWrite)
-            }
-        }?;
+        self.write(ACCESS_TOKEN_KEY, ACCESS_TOKEN_SERVICE, &access_token)?;
         self.access_token = Some(access_token);
         Ok(())
+    }
+
+    /// Persists a rotated refresh token to the same source, so neither OpenQuota nor the Cursor
+    /// app keeps one the server has retired.
+    pub fn save_refresh_token(&mut self, refresh_token: String) -> Result<(), CursorError> {
+        self.write(REFRESH_TOKEN_KEY, REFRESH_TOKEN_SERVICE, &refresh_token)?;
+        self.refresh_token = Some(refresh_token);
+        Ok(())
+    }
+
+    fn write(&self, key: &str, service: &str, value: &str) -> Result<(), CursorError> {
+        match &self.source {
+            CursorAuthSource::Sqlite(path) => write_state_value(path, key, value),
+            CursorAuthSource::Keychain { account } => {
+                write_generic_password(service, account, value.as_bytes())
+                    .map_err(|_| CursorError::AuthWrite)
+            }
+        }
     }
 }
 

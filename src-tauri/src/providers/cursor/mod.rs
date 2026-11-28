@@ -284,7 +284,8 @@ impl CursorProvider {
             });
         }
         if !response.status.is_success() {
-            return Ok(None);
+            // An outage or rate limit at the token endpoint says nothing about the login.
+            return Err(CursorError::RequestFailed(response.status.as_u16()));
         }
         let Some(body) = body else {
             return Ok(None);
@@ -298,7 +299,22 @@ impl CursorProvider {
             .map(str::trim)
             .filter(|token| !token.is_empty())
             .map(str::to_owned);
+        let rotated_refresh_token = body
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty() && Some(*token) != auth.refresh_token.as_deref())
+            .map(str::to_owned);
         if let Some(access_token) = access_token {
+            if let Some(refresh_token) = rotated_refresh_token {
+                if auth.save_refresh_token(refresh_token.clone()).is_err() {
+                    auth.refresh_token = Some(refresh_token);
+                    crate::app_error!(
+                        "auth:cursor",
+                        "failed to persist rotated refresh token; using it for this session only"
+                    );
+                }
+            }
             if auth.save_access_token(access_token.clone()).is_err() {
                 auth.access_token = Some(access_token.clone());
                 crate::app_error!(
@@ -530,7 +546,7 @@ mod tests {
     use super::{
         auth::{CursorAuthSource, CursorAuthState},
         client::{CursorClient, Endpoints},
-        definition, CursorProvider,
+        definition, CursorError, CursorProvider,
     };
     use crate::pricing::PricingStore;
 
@@ -541,6 +557,17 @@ mod tests {
     }
 
     fn routing_server(refreshed_token: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        routing_server_with_token(
+            200,
+            serde_json::json!({"access_token": refreshed_token}).to_string(),
+        )
+    }
+
+    /// Answers the first usage request with 401 and the token endpoint with the given response.
+    fn routing_server_with_token(
+        token_status: u16,
+        token_body: String,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -573,11 +600,7 @@ mod tests {
                         )
                     }
                 } else if path.starts_with("/token") {
-                    (
-                        200,
-                        "application/json",
-                        serde_json::json!({"access_token": refreshed_token}).to_string(),
-                    )
+                    (token_status, "application/json", token_body.clone())
                 } else if path.starts_with("/plan") {
                     (
                         200,
@@ -804,6 +827,79 @@ mod tests {
 
         assert_eq!(snapshot.plan.as_deref(), Some("Pro Plan"));
         assert!(snapshot.warnings.is_empty());
+    }
+
+    fn provider_for(base: &str, directory: &std::path::Path) -> CursorProvider {
+        let endpoints = Endpoints {
+            usage: format!("{base}/usage"),
+            plan: format!("{base}/plan"),
+            credits: format!("{base}/credits"),
+            refresh: format!("{base}/token"),
+            rest_usage: format!("{base}/rest"),
+            usage_summary: format!("{base}/summary"),
+            stripe: format!("{base}/stripe"),
+            csv: format!("{base}/csv"),
+        };
+        CursorProvider {
+            pricing: Arc::new(PricingStore::new(directory.join("pricing")).unwrap()),
+            client: CursorClient::with_endpoints(endpoints).unwrap(),
+        }
+    }
+
+    fn sqlite_auth(database: &std::path::Path) -> CursorAuthState {
+        let connection = Connection::open(database).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+                [],
+            )
+            .unwrap();
+        CursorAuthState {
+            access_token: Some(jwt("google-oauth2|old_user")),
+            refresh_token: Some("refresh-token".into()),
+            source: CursorAuthSource::Sqlite(database.to_path_buf()),
+        }
+    }
+
+    #[test]
+    fn token_endpoint_outage_is_not_reported_as_an_expired_login() {
+        let directory = tempdir().unwrap();
+        let (base, _) = routing_server_with_token(503, "unavailable".into());
+        let provider = provider_for(&base, directory.path());
+        let auth = sqlite_auth(&directory.path().join("state.vscdb"));
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+
+        let error = provider.refresh_with_auth(auth, now).unwrap_err();
+        assert!(
+            matches!(error, CursorError::RequestFailed(503)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rotated_refresh_token_is_persisted_with_the_access_token() {
+        let directory = tempdir().unwrap();
+        let refreshed = jwt("google-oauth2|old_user");
+        let (base, _) = routing_server_with_token(
+            200,
+            serde_json::json!({"access_token": refreshed, "refresh_token": "rotated"}).to_string(),
+        );
+        let provider = provider_for(&base, directory.path());
+        let database = directory.path().join("state.vscdb");
+        let auth = sqlite_auth(&database);
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+
+        provider.refresh_with_auth(auth, now).unwrap();
+
+        let saved: String = Connection::open(database)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = 'cursorAuth/refreshToken'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(saved, "rotated");
     }
 
     #[test]
