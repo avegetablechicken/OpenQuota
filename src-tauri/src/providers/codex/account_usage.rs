@@ -56,8 +56,9 @@ fn map_account_usage(response: &UsageResponse, now: DateTime<Utc>) -> Option<Usa
     let buckets = profile.stats.daily_usage_buckets?;
     let today = now.with_timezone(&Local).date_naive();
     let yesterday = today.checked_sub_days(Days::new(1));
+    // Today plus the 29 days before it: 30 dates, matching local history's Last 30 Days.
     let since = today
-        .checked_sub_days(Days::new(30))
+        .checked_sub_days(Days::new(29))
         .unwrap_or(NaiveDate::MIN);
     let mut tokens_by_date = BTreeMap::<NaiveDate, u64>::new();
 
@@ -137,8 +138,8 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap();
         let today = now.with_timezone(&Local).date_naive();
         let yesterday = today.checked_sub_days(Days::new(1)).unwrap();
-        let oldest = today.checked_sub_days(Days::new(30)).unwrap();
-        let outside = today.checked_sub_days(Days::new(31)).unwrap();
+        let oldest = today.checked_sub_days(Days::new(29)).unwrap();
+        let outside = today.checked_sub_days(Days::new(30)).unwrap();
         let outcome = classify_account_usage(
             &response(
                 StatusCode::OK,
