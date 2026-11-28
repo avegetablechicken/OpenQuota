@@ -436,11 +436,16 @@
         'image/png',
       ),
     );
+    let copiedImage = false;
     if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-    } else {
-      await navigator.clipboard.writeText(fallback);
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        copiedImage = true;
+      } catch {
+        // Some WebViews expose ClipboardItem but reject image writes.
+      }
     }
+    if (!copiedImage) await navigator.clipboard.writeText(fallback);
     showConfirmation('Copied to clipboard');
   }
   async function shareProvider(

@@ -2240,6 +2240,41 @@ describe('OpenQuota dashboard', () => {
     expect(openMenu()).toBeNull();
   });
 
+  it('copies the text fallback when the WebView rejects an image clipboard write', async () => {
+    const canvas = document.createElement('canvas');
+    vi.spyOn(canvas, 'toBlob').mockImplementation((callback) => callback(new Blob()));
+    const renderTotal = vi.spyOn(shareCard, 'renderTotalSpendShareCard').mockReturnValue(canvas);
+    const write = vi.fn().mockRejectedValue(new Error('image/png unsupported'));
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal(
+      'ClipboardItem',
+      class {
+        constructor(readonly items: Record<string, Blob>) {}
+      },
+    );
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { write, writeText },
+    });
+    try {
+      render(App);
+      await screen.findByText('Plus');
+      const card = document.querySelector<HTMLElement>('[data-total-spend]')!;
+      // jsdom does not implement innerText.
+      Object.defineProperty(card, 'innerText', { value: card.textContent });
+      await fireEvent.contextMenu(document.querySelector('.spend-ring__label')!);
+      await chooseMenuItem('Share Screenshot');
+
+      await waitFor(() => expect(writeText).toHaveBeenCalled());
+      expect(write).toHaveBeenCalledOnce();
+      expect(await screen.findByText('Copied to clipboard')).toBeInTheDocument();
+      expect(screen.queryByText('Total Spend screenshot could not be copied.')).toBeNull();
+    } finally {
+      renderTotal.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('honors Reduce Motion without overriding a manually sized native panel', async () => {
     const originalMatchMedia = window.matchMedia;
     const defaultInvoke = mocks.invoke.getMockImplementation()!;
