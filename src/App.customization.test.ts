@@ -333,6 +333,65 @@ describe('OpenQuota customization persistence and reorder', () => {
     );
   });
 
+  it('records an update check that lands mid-drag against the committed layout', async () => {
+    let finishCheck: (status: unknown) => void = () => undefined;
+    const defaultInvoke = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args?: InvokeArgs) =>
+      command === 'check_for_updates'
+        ? new Promise((resolve) => (finishCheck = resolve))
+        : defaultInvoke(command, args),
+    );
+    render(App);
+    await screen.findByText('Plus');
+    const session = screen.getByRole('group', { name: 'Session options' });
+    const weekly = screen.getByRole('group', { name: 'Weekly options' });
+    session.getBoundingClientRect = () =>
+      ({ top: 0, right: 280, bottom: 40, left: 0, width: 280, height: 40 }) as DOMRect;
+    weekly.getBoundingClientRect = () =>
+      ({ top: 40, right: 280, bottom: 80, left: 0, width: 280, height: 40 }) as DOMRect;
+    const saves = () =>
+      mocks.invoke.mock.calls
+        .filter(([command]) => command === 'save_app_settings')
+        .map(([, args]) => (args as { settings: SettingsViewState['settings'] }).settings);
+    await openOptions();
+    await chooseMenuItem('Check for Updates…');
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('check_for_updates'));
+
+    await fireEvent.pointerDown(session, {
+      pointerId: 1,
+      pointerType: 'mouse',
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+    });
+    await fireEvent.pointerMove(window, {
+      pointerId: 1,
+      pointerType: 'mouse',
+      clientX: 20,
+      clientY: 52,
+    });
+    finishCheck({
+      available: false,
+      currentVersion: '0.1.0',
+      version: null,
+      body: null,
+      installable: true,
+      releaseUrl: 'https://github.com/deviffyy/OpenQuota/releases/latest',
+    });
+    await screen.findByText('OpenQuota 0.1.0 is up to date.');
+    expect(saves()).toHaveLength(0);
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(saves()).toHaveLength(1));
+    expect(saves()[0].lastUpdateCheckAt).toEqual(expect.any(String));
+    expect(
+      saves()[0]
+        .providers.find((provider) => provider.id === 'codex')
+        ?.metrics.slice(0, 2)
+        .map((metric) => metric.id),
+    ).toEqual(['codex.session', 'codex.weekly']);
+  });
+
   it('restores the pre-drag layout when a reorder is cancelled', async () => {
     render(App);
     await screen.findByText('Plus');

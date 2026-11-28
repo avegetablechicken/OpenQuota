@@ -89,6 +89,7 @@
   let slidePageTransition = $state(false);
   let customizationHistory = $state<AppSettings[]>([]);
   let customizationGestureStart: AppSettings | null = null;
+  let pendingUpdateCheckAt: string | null = null;
   let reordering = $state(false);
   let confirmationMessage = $state<string | null>(null);
   let resetConfirmationOpen = $state(false);
@@ -296,6 +297,9 @@
       saveSettings(final);
     }
     settingsController.endDraft();
+    const checkedAt = pendingUpdateCheckAt;
+    pendingUpdateCheckAt = null;
+    if (checkedAt) recordUpdateCheck(checkedAt);
     queueMicrotask(scheduleWindowFit);
   }
   function undoCustomization() {
@@ -737,13 +741,20 @@
       settingsError = 'Notification settings could not be opened on this system.';
     }
   }
+  // A background bookkeeping save: it leaves any shown settings error alone.
+  function recordUpdateCheck(checkedAt: string) {
+    if (!settingsState) return;
+    void settingsController.save({ ...settingsState.settings, lastUpdateCheckAt: checkedAt });
+  }
   async function checkForUpdates(manual = false) {
     if (!settingsState) return;
     await updates.check(
       manual,
       (checkedAt) => {
         if (!settingsState) return;
-        saveSettings({ ...settingsState.settings, lastUpdateCheckAt: checkedAt });
+        // Mid-gesture settings are an uncommitted draft; record the check once it ends.
+        if (customizationGestureStart) pendingUpdateCheckAt = checkedAt;
+        else recordUpdateCheck(checkedAt);
       },
       showConfirmation,
     );
