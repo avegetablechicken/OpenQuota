@@ -13,6 +13,7 @@ const typeScriptSource = fs.readFileSync(new URL('src/lib/types.ts', root), 'utf
 const contracts = [
   'QuotaWindow',
   'MetricValue',
+  'ResetCreditDetail',
   'ValueMetric',
   'StatusMetric',
   'ProviderNotice',

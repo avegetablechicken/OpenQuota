@@ -442,6 +442,28 @@ pub struct ClaudeOAuthConfig {
     pub client_id: String,
 }
 
+impl ClaudeOAuthConfig {
+    pub fn api_base(&self) -> String {
+        let trimmed = self.usage_url.trim_end_matches('/');
+        trimmed
+            .strip_suffix("/api/oauth/usage")
+            .or_else(|| trimmed.strip_suffix("/usage"))
+            .unwrap_or(trimmed)
+            .to_owned()
+    }
+
+    pub fn profile_url(&self) -> String {
+        format!("{}/api/oauth/profile", self.api_base())
+    }
+
+    pub fn reset_rate_limits_url(&self, organization_uuid: &str) -> String {
+        format!(
+            "{}/api/organizations/{organization_uuid}/reset_rate_limits",
+            self.api_base()
+        )
+    }
+}
+
 pub(super) fn has_local_credentials(scope: &ClaudeCredentialScope) -> bool {
     !load_candidates(scope).is_empty()
 }

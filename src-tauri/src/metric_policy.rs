@@ -221,7 +221,7 @@ mod tests {
             ),
             (
                 Some("claude"),
-                &["session", "weekly", "sonnet", "fable"],
+                &["session", "weekly", "sonnet", "fable", "rateLimitResets"],
                 &["spark", "claude", "monthly", "extra"],
             ),
             (

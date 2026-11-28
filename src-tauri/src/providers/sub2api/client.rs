@@ -302,6 +302,41 @@ impl Sub2ApiClient {
             .ok_or(Sub2ApiError::InvalidResponse)
     }
 
+    pub(super) fn claude_reset_credits(
+        &self,
+        token: &str,
+        account_id: i64,
+    ) -> Result<Value, Sub2ApiError> {
+        let account_id = account_id.to_string();
+        let response = self
+            .client
+            .get(self.endpoint(&[
+                "api",
+                "v1",
+                "admin",
+                "accounts",
+                &account_id,
+                "claude",
+                "reset-credits",
+            ])?)
+            .bearer_auth(token)
+            .header("Accept", "application/json")
+            .send()
+            .map_err(|error| transport_error("claude reset credits", &error))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(status));
+        }
+        let envelope: Envelope<Value> = decode_response("claude reset credits", response)?;
+        if envelope.code != 0 {
+            return Err(Sub2ApiError::InvalidResponse);
+        }
+        envelope
+            .data
+            .filter(Value::is_object)
+            .ok_or(Sub2ApiError::InvalidResponse)
+    }
+
     pub(super) fn stats(&self, token: &str, account_id: i64) -> Result<AccountStats, Sub2ApiError> {
         let account_id = account_id.to_string();
         let mut url = self.endpoint(&["api", "v1", "admin", "accounts", &account_id, "stats"])?;

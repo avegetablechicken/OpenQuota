@@ -10,6 +10,7 @@ OpenQuota tracks Claude subscription limits and local Claude usage history.
 | Weekly                           | Usage remaining in the weekly window                         |
 | Sonnet / Fable                   | Model-specific limits when they are reported for the account |
 | Extra Usage                      | Extra-usage allowance or spending reported by Claude         |
+| Rate Limit Resets                | Available reset credits (Full, Fable, or Partial)            |
 | Today / Yesterday / Last 30 Days | Tokens and estimated spend calculated from local usage logs  |
 | Usage Trend                      | Recent local usage over time                                 |
 

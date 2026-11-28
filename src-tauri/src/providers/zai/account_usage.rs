@@ -32,6 +32,7 @@ impl ZaiAccountUsage {
                 estimated: false,
             }],
             expiries_at: Vec::new(),
+            reset_credits: Vec::new(),
         })
     }
 }

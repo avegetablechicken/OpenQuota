@@ -4,9 +4,13 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::{
     commands::settings::SettingsWatch,
+    models::ResetCreditKind,
     notifications::finish_refresh,
     pacing::NotificationEvaluator,
-    providers::codex::reset_claim::{CodexResetClaimService, ResetClaimOutcome},
+    providers::{
+        claude::reset_claim::{ClaudeResetClaimOutcome, ClaudeResetClaimService},
+        codex::reset_claim::{CodexResetClaimService, ResetClaimOutcome},
+    },
     service::{ProviderService, UsageViewState},
     settings::SettingsService,
     tray_presentation,
@@ -47,6 +51,45 @@ pub async fn claim_codex_reset_credit(
     if outcome != ResetClaimOutcome::Failed {
         let watch = SettingsWatch::new(&settings);
         service.refresh("codex", true).await;
+        let state = service.state();
+        watch.emit_if_changed(&app, &settings);
+        let _ = app.emit("usage-state", &state);
+        finish_refresh(&app, &state, &settings, &notifications);
+    }
+    Ok(outcome)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn claim_claude_reset_credit(
+    app: AppHandle,
+    claims: State<'_, Arc<ClaudeResetClaimService>>,
+    service: State<'_, Arc<ProviderService>>,
+    settings: State<'_, Arc<SettingsService>>,
+    notifications: State<'_, Arc<NotificationEvaluator>>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    kind: Option<ResetCreditKind>,
+    claim_account: String,
+    redeem_request_id: String,
+) -> Result<ClaudeResetClaimOutcome, String> {
+    if !settings
+        .enabled_provider_ids()
+        .iter()
+        .any(|id| id == "claude")
+    {
+        return Err("Claude is not enabled.".to_owned());
+    }
+    let claims = claims.inner().clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        claims.claim(expires_at, kind, &claim_account, &redeem_request_id)
+    })
+    .await
+    .map_err(|_| "The reset claim could not be completed.".to_owned())?;
+
+    // An uncertain debit may have succeeded; refresh once without resending the claim.
+    if outcome != ClaudeResetClaimOutcome::Failed {
+        let watch = SettingsWatch::new(&settings);
+        service.refresh("claude", true).await;
         let state = service.state();
         watch.emit_if_changed(&app, &settings);
         let _ = app.emit("usage-state", &state);

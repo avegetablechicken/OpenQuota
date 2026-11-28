@@ -53,12 +53,12 @@ use crate::{
     pacing::NotificationEvaluator,
     pricing::PricingStore,
     providers::{
-        antigravity::AntigravityProvider, claude::ClaudeProvider,
-        codex::reset_claim::CodexResetClaimService, codex::CodexProvider, copilot::CopilotProvider,
-        cursor::CursorProvider, detect_local_credentials, devin::DevinProvider, grok::GrokProvider,
-        kimi::KimiProvider, minimax::MiniMaxProvider, opencode::OpenCodeProvider,
-        openrouter::OpenRouterProvider, sub2api::Sub2ApiProviders, zai::ZaiProvider,
-        ProviderRegistry, UsageProvider,
+        antigravity::AntigravityProvider, claude::reset_claim::ClaudeResetClaimService,
+        claude::ClaudeProvider, codex::reset_claim::CodexResetClaimService, codex::CodexProvider,
+        copilot::CopilotProvider, cursor::CursorProvider, detect_local_credentials,
+        devin::DevinProvider, grok::GrokProvider, kimi::KimiProvider, minimax::MiniMaxProvider,
+        opencode::OpenCodeProvider, openrouter::OpenRouterProvider, sub2api::Sub2ApiProviders,
+        zai::ZaiProvider, ProviderRegistry, UsageProvider,
     },
     storage::Storage,
     window::{handle_window_event, toggle_main_window, PanelResizeSession, MAIN_WINDOW},
@@ -330,6 +330,7 @@ pub fn run() {
             app.manage(notifications.clone());
             app.manage(sub2api);
             app.manage(Arc::new(CodexResetClaimService::new()?));
+            app.manage(Arc::new(ClaudeResetClaimService::new()?));
 
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                 if window::apply_panel_surface(&window, settings.get().theme).is_err() {
@@ -427,6 +428,7 @@ pub fn run() {
             commands::usage::refresh_usage,
             commands::usage::refresh_provider_usage,
             commands::usage::claim_codex_reset_credit,
+            commands::usage::claim_claude_reset_credit,
             commands::settings::get_app_settings,
             commands::settings::save_app_settings,
             commands::settings::reset_customization,

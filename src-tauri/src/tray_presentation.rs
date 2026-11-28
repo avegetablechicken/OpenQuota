@@ -1547,6 +1547,7 @@ mod tests {
             id: "weekly".into(),
             label: "Weekly".into(),
             expiries_at: vec![],
+            reset_credits: Vec::new(),
             values: vec![MetricValue {
                 number: 11.0,
                 kind: MetricValueKind::Dollars,
@@ -1600,6 +1601,7 @@ mod tests {
                     },
                 ],
                 expiries_at: Vec::new(),
+                reset_credits: Vec::new(),
             }],
             status_metrics: Vec::new(),
             notices: Vec::new(),

@@ -391,6 +391,7 @@ fn map_reset_credits(body: &Value, dedicated: Option<&UsageResponse>) -> Option<
             estimated: false,
         }],
         expiries_at,
+        reset_credits: Vec::new(),
     })
 }
 
@@ -427,6 +428,7 @@ fn credits_metric(remaining: f64) -> ValueMetric {
             },
         ],
         expiries_at: Vec::new(),
+        reset_credits: Vec::new(),
     }
 }
 

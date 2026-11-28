@@ -80,6 +80,28 @@ pub struct MetricValue {
     pub estimated: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ResetCreditKind {
+    Full,
+    Fable,
+    Partial,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCreditDetail {
+    /// Opaque identity of the login whose snapshot offered this reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub kind: ResetCreditKind,
+    #[serde(default = "default_true")]
+    pub redeemable: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ValueMetric {
@@ -88,6 +110,8 @@ pub struct ValueMetric {
     pub values: Vec<MetricValue>,
     #[serde(default)]
     pub expiries_at: Vec<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reset_credits: Vec<ResetCreditDetail>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -927,7 +951,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            schema_version: 7,
+            schema_version: 9,
             providers: Vec::new(),
             known_provider_ids: Vec::new(),
             provider_names: BTreeMap::new(),

@@ -110,6 +110,7 @@ fn dollars_value(id: &str, label: &str, number: f64) -> ValueMetric {
             estimated: false,
         }],
         expiries_at: Vec::new(),
+        reset_credits: Vec::new(),
     }
 }
 

@@ -56,7 +56,7 @@ use template::{definition_for, normalize_refreshed_quotas, should_apply_metric_t
 #[cfg(test)]
 use super::claude::config::ClaudeConfigError;
 use super::{
-    claude::map_sub2api_usage,
+    claude::{map_sub2api_claude_reset_credits, map_sub2api_usage_at},
     codex::{client::UsageResponse, mapper::map_usage},
     credential_store::{delete_owned_password, read_owned_password, write_owned_password},
     CacheIdentity, ProviderError, UsageProvider,
@@ -368,7 +368,33 @@ impl Sub2ApiProvider {
                 (mapped.plan, mapped.quotas, mapped.value_metrics)
             }
             Sub2ApiUpstream::Claude => {
-                let mapped = map_sub2api_usage(&body).map_err(|_| Sub2ApiError::InvalidResponse)?;
+                let mut mapped =
+                    map_sub2api_usage_at(&body, now).map_err(|_| Sub2ApiError::InvalidResponse)?;
+                match client.claude_reset_credits(token, account.id) {
+                    Ok(credits_body) => {
+                        // A successful dedicated response is authoritative, including ineligibility.
+                        mapped
+                            .value_metrics
+                            .retain(|metric| metric.id != "claudeRateLimitResets");
+                        if let Some(metric) = map_sub2api_claude_reset_credits(&credits_body, now) {
+                            mapped.value_metrics.push(metric);
+                        }
+                    }
+                    Err(Sub2ApiError::Authentication) => return Err(Sub2ApiError::Authentication),
+                    Err(_) => {
+                        for metric in &mut mapped.value_metrics {
+                            if metric.id == "claudeRateLimitResets" {
+                                metric.id = "sub2apiRateLimitResets".into();
+                                for credit in &mut metric.reset_credits {
+                                    credit.redeemable = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                mapped
+                    .value_metrics
+                    .retain(|metric| metric.id == "sub2apiRateLimitResets");
                 (mapped.plan, mapped.quotas, mapped.value_metrics)
             }
             Sub2ApiUpstream::Antigravity | Sub2ApiUpstream::Grok => {

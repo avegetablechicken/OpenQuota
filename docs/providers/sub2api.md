@@ -34,7 +34,7 @@ Switching **Track** or **Upstream** on an existing connection preserves metric v
 | Today, Yesterday, Last 30 Days | Token counts and cost for the upstream accounts |
 | Model breakdown | Token counts and cost per model and account |
 
-A Claude upstream shows Session, Weekly, and the Sonnet and Fable limits instead of the Codex rows.
+A Claude upstream shows Session, Weekly, the Sonnet and Fable limits, and read-only Rate Limit Resets instead of the Codex rows.
 
 An Antigravity upstream shows the same pools as the [Antigravity](antigravity.md) provider, read
 from Sub2API's `antigravity_quota_groups`:

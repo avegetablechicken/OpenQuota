@@ -5,8 +5,9 @@ pub mod config;
 pub(crate) mod local_usage;
 mod mapper;
 mod refresh_lock;
+pub mod reset_claim;
 
-pub(crate) use mapper::map_sub2api_usage;
+pub(crate) use mapper::{map_sub2api_claude_reset_credits, map_sub2api_usage_at};
 
 use std::sync::{Arc, Mutex};
 
@@ -85,6 +86,16 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "E",
             ),
             MetricDefinition::trend("claude.trend"),
+            MetricDefinition::value(
+                "claude.rateLimitResets",
+                "Rate Limit Resets",
+                "claudeRateLimitResets",
+                true,
+                MetricSection::OnDemand,
+                false,
+                "R",
+                Some("resets"),
+            ),
             MetricDefinition::usage(
                 "claude.today",
                 "Today",
@@ -117,7 +128,7 @@ use self::{
     },
     client::ClaudeClient,
     local_usage::scan_local_usage,
-    mapper::map_usage,
+    mapper::{map_usage_at, retain_known_resets},
 };
 use crate::providers::local_usage::log_usage::scan_or_cached_usage;
 
@@ -481,7 +492,37 @@ impl ClaudeProvider {
                 refreshed_at: now,
             });
         }
-        let mut mapped = map_usage(status, &body, &credential.oauth)?;
+        let mut mapped = map_usage_at(status, &body, &credential.oauth, now)?;
+        let last_good = self.last_good.lock().ok().and_then(|value| value.clone());
+        retain_known_resets(&mut mapped.value_metrics, last_good.as_ref(), &body, now);
+        let has_resets = mapped
+            .value_metrics
+            .iter()
+            .any(|metric| metric.id == "claudeRateLimitResets" && !metric.reset_credits.is_empty());
+        // The local identity file and the first usable credential (e.g. Keychain) can belong
+        // to different logins. Verify the very token that produced this usage before stamping
+        // new or retained reset credits with the local account identity.
+        let verified_owner = identity.filter(|expected| {
+            has_resets
+                && credential
+                    .access_token()
+                    .and_then(|token| self.client.fetch_profile(token, config).ok())
+                    .is_some_and(|(status, profile)| {
+                        status.is_success()
+                            && accounts::profile_matches_identity(&profile, expected)
+                    })
+        });
+        if has_resets && verified_owner.is_none() {
+            warnings.push("Claude reset ownership could not be verified; claiming resets is disabled until a successful refresh.".into());
+        }
+        for metric in &mut mapped.value_metrics {
+            if metric.id == "claudeRateLimitResets" {
+                for credit in &mut metric.reset_credits {
+                    credit.claim_account = verified_owner.map(str::to_owned);
+                    credit.redeemable &= verified_owner.is_some();
+                }
+            }
+        }
         for quota in &mut mapped.quotas {
             quota.clock_offset_seconds = clock_offset;
         }
@@ -930,6 +971,104 @@ mod tests {
         )))
     }
 
+    #[test]
+    fn reset_ownership_is_verified_with_the_usage_token_including_retained_credits() {
+        let org = "550e8400-e29b-41d4-a716-446655440000";
+        let matching =
+            serde_json::json!({"account":{"uuid":"account-a"},"organization":{"uuid":org}});
+        let mismatched =
+            serde_json::json!({"account":{"uuid":"account-b"},"organization":{"uuid":org}});
+        for (profile_status, profile, verified) in [
+            (200, matching.clone(), true),
+            (200, mismatched.clone(), false),
+            (403, serde_json::Value::Null, false),
+            (503, serde_json::Value::Null, false),
+            (
+                200,
+                serde_json::json!({"account":{"uuid":"account-a"}}),
+                false,
+            ),
+        ] {
+            let directory = tempdir().unwrap();
+            let root = directory.path().join("account");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(
+                root.join(".credentials.json"),
+                credential_json("usage-token", "refresh-token", "pro"),
+            )
+            .unwrap();
+            fs::write(root.join(".claude.json"), serde_json::json!({"oauthAccount":{"accountUuid":"account-a","organizationUuid":org}}).to_string()).unwrap();
+            let provider = isolated_provider(directory.path(), &root);
+            let expected_owner =
+                super::accounts::identity_for_scope(&provider.credential_scope).unwrap();
+            let usage = serde_json::json!({"five_hour":{"utilization":12},"cedar_ember":{
+                "eligible":true,"next_grant_id":"grant","grants":[{"id":"grant","resets_left":2,"ends_at":"2099-12-01T00:00:00Z","usable_now":true,"clears":["five_hour","seven_day"]}]
+            }});
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let mismatched = mismatched.clone();
+            let server = thread::spawn(move || {
+                for (status, body, path) in [
+                    (200, usage, "/usage?cedar_ember=1"),
+                    (profile_status, profile, "/api/oauth/profile"),
+                    (
+                        200,
+                        serde_json::json!({"five_hour":{"utilization":13}}),
+                        "/usage?cedar_ember=1",
+                    ),
+                    (200, mismatched.clone(), "/api/oauth/profile"),
+                ] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(StdDuration::from_secs(5)))
+                        .unwrap();
+                    let request = read_request(&mut stream);
+                    assert!(request.starts_with(&format!("GET {path} ")), "{request}");
+                    assert!(request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer usage-token"));
+                    let body = body.to_string();
+                    write!(stream,"HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                }
+            });
+            let config = ClaudeOAuthConfig {
+                usage_url: format!("{base}/usage"),
+                refresh_url: format!("{base}/token"),
+                client_id: "test".into(),
+            };
+            let (snapshot, _) = provider.refresh_inner_with_config(&config).unwrap();
+            let metric = snapshot
+                .value_metrics
+                .iter()
+                .find(|metric| metric.id == "claudeRateLimitResets")
+                .unwrap();
+            assert_eq!(metric.values[0].number, 2.0);
+            for credit in &metric.reset_credits {
+                assert_eq!(
+                    credit.claim_account.as_deref(),
+                    verified.then_some(expected_owner.as_str())
+                );
+                assert_eq!(credit.redeemable, verified);
+            }
+            let (retained, _) = provider.refresh_inner_with_config(&config).unwrap();
+            let metric = retained
+                .value_metrics
+                .iter()
+                .find(|metric| metric.id == "claudeRateLimitResets")
+                .unwrap();
+            assert_eq!(metric.values[0].number, 2.0);
+            assert!(metric
+                .reset_credits
+                .iter()
+                .all(|credit| credit.claim_account.is_none() && !credit.redeemable));
+            assert!(retained
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("ownership")));
+            server.join().unwrap();
+        }
+    }
+
     fn expired_login(account_root: &std::path::Path) -> std::path::PathBuf {
         fs::create_dir_all(account_root).unwrap();
         let path = account_root.join(".credentials.json");
@@ -1045,7 +1184,10 @@ mod tests {
 
         // The only request asks for usage with Claude Code's renewal.
         let request = server.join().unwrap();
-        assert!(request.starts_with("GET /usage "), "{request}");
+        assert!(
+            request.starts_with("GET /usage?cedar_ember=1 "),
+            "{request}"
+        );
         assert!(request
             .to_ascii_lowercase()
             .contains("authorization: bearer code-access"));
@@ -1146,7 +1288,7 @@ mod tests {
         assert!(refresh.starts_with("POST /token "), "{refresh}");
         assert!(refresh.contains("\"refresh_token\":\"spent\""));
         assert!(locked_during_refresh);
-        assert!(usage.starts_with("GET /usage "), "{usage}");
+        assert!(usage.starts_with("GET /usage?cedar_ember=1 "), "{usage}");
         assert!(usage
             .to_ascii_lowercase()
             .contains("authorization: bearer new-access"));
@@ -1219,7 +1361,7 @@ mod tests {
         let requests = server.join().unwrap();
         assert!(requests[0].starts_with("POST /token "), "{}", requests[0]);
         for usage in &requests[1..] {
-            assert!(usage.starts_with("GET /usage "), "{usage}");
+            assert!(usage.starts_with("GET /usage?cedar_ember=1 "), "{usage}");
             assert!(usage
                 .to_ascii_lowercase()
                 .contains("authorization: bearer new-access"));

@@ -20,11 +20,21 @@ export interface MetricValue {
   estimated: boolean;
 }
 
+export type ResetCreditKind = 'full' | 'fable' | 'partial' | 'unknown';
+
+export interface ResetCreditDetail {
+  claimAccount?: string | null;
+  expiresAt?: string | null;
+  kind: ResetCreditKind;
+  redeemable: boolean;
+}
+
 export interface ValueMetric {
   id: string;
   label: string;
   values: MetricValue[];
   expiriesAt: string[];
+  resetCredits?: ResetCreditDetail[];
 }
 
 export interface StatusMetric {
@@ -35,7 +45,8 @@ export interface StatusMetric {
   subtitle?: string | null;
 }
 
-export type ResetClaimOutcome = 'success' | 'nothingToReset' | 'noCredit' | 'failed';
+export type ResetClaimOutcome =
+  'success' | 'nothingToReset' | 'noCredit' | 'cooldown' | 'uncertain' | 'failed';
 
 export interface ProviderNotice {
   id: string;

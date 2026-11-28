@@ -820,6 +820,146 @@ fn normalization_adds_new_codex_metrics_without_disturbing_existing_order() {
         assert_eq!(metric.section, MetricSection::OnDemand);
         assert!(!metric.pinned);
     }
+    let position = |id: &str| {
+        codex
+            .metrics
+            .iter()
+            .position(|metric| metric.id == id)
+            .unwrap()
+    };
+    assert!(position("codex.spark") < position("codex.sparkWeekly"));
+    assert!(position("codex.sparkWeekly") < position("codex.credits"));
+    assert!(position("codex.credits") < position("codex.rateLimitResets"));
+    assert!(position("codex.rateLimitResets") < position("codex.today"));
+}
+
+#[test]
+fn normalization_inserts_claude_reset_credits_before_usage_periods_and_migrates_trailing_position()
+{
+    let detected = HashSet::from(["claude".to_owned()]);
+    let catalog = catalog();
+    let mut settings = default_settings(&catalog, &detected);
+    let claude = settings
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "claude")
+        .unwrap();
+    claude
+        .metrics
+        .retain(|metric| metric.id != "claude.rateLimitResets");
+
+    normalize(&catalog, &mut settings, &detected);
+
+    let claude = settings
+        .providers
+        .iter()
+        .find(|provider| provider.id == "claude")
+        .unwrap();
+    let position = |id: &str| {
+        claude
+            .metrics
+            .iter()
+            .position(|metric| metric.id == id)
+            .unwrap()
+    };
+    assert!(position("claude.rateLimitResets") < position("claude.today"));
+
+    // Simulate an older layout where both claude.fable and claude.rateLimitResets were appended
+    // after claude.last30 (which previously blocked canonical-order migration).
+    let mut legacy = settings.clone();
+    legacy.schema_version = 8;
+    let legacy_claude = legacy
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "claude")
+        .unwrap();
+    for trailing_id in ["claude.fable", "claude.rateLimitResets"] {
+        let index = legacy_claude
+            .metrics
+            .iter()
+            .position(|metric| metric.id == trailing_id)
+            .unwrap();
+        let metric = legacy_claude.metrics.remove(index);
+        legacy_claude.metrics.push(metric);
+    }
+
+    normalize(&catalog, &mut legacy, &detected);
+
+    let migrated_claude = legacy
+        .providers
+        .iter()
+        .find(|provider| provider.id == "claude")
+        .unwrap();
+    let migrated_pos = |id: &str| {
+        migrated_claude
+            .metrics
+            .iter()
+            .position(|metric| metric.id == id)
+            .unwrap()
+    };
+    assert!(migrated_pos("claude.rateLimitResets") < migrated_pos("claude.today"));
+}
+
+#[test]
+fn startup_upgrades_untouched_sub2api_claude_v1_template_to_enable_and_position_resets() {
+    let claude_admin = (Sub2ApiMode::Admin, Sub2ApiUpstream::Claude);
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+    let providers = Sub2ApiProviders::new(directory.path().join("sub2api"), storage.clone());
+    let mut definition = providers.provider("sub2api").unwrap().definition();
+    definition.fallback_enabled = true;
+    let connection = Arc::new(TrackedConnection(
+        definition,
+        std::sync::Mutex::new(Some(track_provider_id(claude_admin.0, claude_admin.1))),
+    ));
+    let registry = Arc::new(ProviderRegistry::new(vec![connection]).unwrap());
+
+    // Build a v1 Claude Sub2API template where rateLimitResets was hidden at the end after last30.
+    let v1_order = [
+        ("session", true, MetricSection::AlwaysVisible, true),
+        ("weekly", true, MetricSection::AlwaysVisible, true),
+        ("trend", true, MetricSection::AlwaysVisible, false),
+        ("sonnet", false, MetricSection::OnDemand, false),
+        ("fable", false, MetricSection::OnDemand, false),
+        ("extra", false, MetricSection::OnDemand, false),
+        ("today", true, MetricSection::OnDemand, false),
+        ("yesterday", true, MetricSection::OnDemand, false),
+        ("last30", true, MetricSection::OnDemand, false),
+        ("daily", false, MetricSection::OnDemand, false),
+        ("monthly", false, MetricSection::OnDemand, false),
+        ("spark", false, MetricSection::OnDemand, false),
+        ("sparkWeekly", false, MetricSection::OnDemand, false),
+        ("rateLimitResets", false, MetricSection::OnDemand, false),
+        ("claude", false, MetricSection::OnDemand, false),
+        ("claudeWeekly", false, MetricSection::OnDemand, false),
+    ];
+    let v1_metrics: Vec<MetricLayout> = v1_order
+        .iter()
+        .map(|(suffix, enabled, section, pinned)| MetricLayout {
+            id: format!("sub2api.{suffix}"),
+            enabled: *enabled,
+            section: *section,
+            pinned: *pinned,
+        })
+        .collect();
+    let mut saved = default_settings(&registry, &HashSet::from(["sub2api".to_owned()]));
+    saved.schema_version = 7;
+    saved.providers[0].metrics = v1_metrics.clone();
+    storage
+        .save_settings_with_metric_template_defaults(&saved, "sub2api", &v1_metrics)
+        .unwrap();
+
+    let (service, _) = SettingsService::new_deferred(storage, registry).unwrap();
+    let upgraded = service.get();
+    let metrics = &upgraded.providers[0].metrics;
+    let reset = metrics
+        .iter()
+        .find(|metric| metric.id == "sub2api.rateLimitResets")
+        .unwrap();
+    assert!(reset.enabled);
+    assert_eq!(reset.section, MetricSection::OnDemand);
+    let pos = |id: &str| metrics.iter().position(|metric| metric.id == id).unwrap();
+    assert!(pos("sub2api.rateLimitResets") < pos("sub2api.today"));
 }
 
 #[test]
@@ -928,7 +1068,7 @@ fn schema_two_migration_uses_the_multi_provider_default_order() {
         &mut settings,
         &HashSet::from(["codex".to_owned(), "antigravity".to_owned()]),
     );
-    assert_eq!(settings.schema_version, 7);
+    assert_eq!(settings.schema_version, 9);
     assert_eq!(
         settings
             .providers

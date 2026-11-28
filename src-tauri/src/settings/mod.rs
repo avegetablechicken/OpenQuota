@@ -67,8 +67,15 @@ impl SettingsService {
         let mut settings = storage
             .load_settings()?
             .unwrap_or_else(|| default_settings(&registry, detected));
+        let migrating_templates = settings.schema_version < 9;
         normalize(&registry, &mut settings, detected);
-        storage.save_settings(&settings)?;
+        let template_updates = sync_connection_metric_templates(
+            &registry,
+            &storage,
+            &mut settings,
+            migrating_templates,
+        )?;
+        storage.save_settings_with_updates(&settings, &[], &template_updates)?;
         let service = Self {
             storage,
             registry,
@@ -120,8 +127,15 @@ impl SettingsService {
             .map(|provider| provider.id.clone())
             .collect();
 
+        let migrating_templates = settings.schema_version < 9;
         normalize(&registry, &mut settings, &detected);
-        storage.save_settings(&settings)?;
+        let template_updates = sync_connection_metric_templates(
+            &registry,
+            &storage,
+            &mut settings,
+            migrating_templates,
+        )?;
+        storage.save_settings_with_updates(&settings, &[], &template_updates)?;
         let provider_ids = registry
             .catalog()
             .providers
@@ -754,6 +768,69 @@ impl SettingsService {
             platform_summary,
         }
     }
+}
+
+/// Applies updated track metric templates to existing detected connections at launch without
+/// disturbing user customizations or touching credential stores.
+fn sync_connection_metric_templates(
+    registry: &ProviderRegistry,
+    storage: &Storage,
+    settings: &mut AppSettings,
+    migrating_legacy_templates: bool,
+) -> Result<Vec<(String, Vec<MetricLayout>)>, StorageError> {
+    let mut updates = Vec::new();
+    for provider in &mut settings.providers {
+        if !provider.detected {
+            continue;
+        }
+        let policy = MetricPolicy::for_provider(registry, &provider.id);
+        let Some(track) = policy.track() else {
+            continue;
+        };
+        let Some(template) =
+            crate::providers::sub2api::metric_template_for_track(&provider.id, track)
+        else {
+            continue;
+        };
+        if let Some(applied) = storage.load_metric_template_defaults(&provider.id)? {
+            if applied != template {
+                let recorded =
+                    apply_metric_template(&mut provider.metrics, &template, &applied, &policy);
+                updates.push((provider.id.clone(), recorded));
+            }
+        } else if migrating_legacy_templates {
+            let Some(definition) = registry.definition(&provider.id) else {
+                continue;
+            };
+            let Some(reset_definition) = definition.metrics.iter().find(|metric| {
+                matches!(
+                    &metric.source,
+                    crate::models::MetricSource::Value { source_id, .. }
+                        if source_id == "sub2apiRateLimitResets"
+                )
+            }) else {
+                continue;
+            };
+            let template_enables_reset = template
+                .iter()
+                .any(|metric| metric.id == reset_definition.id && metric.enabled);
+            if template_enables_reset {
+                if let Some(metric) = provider
+                    .metrics
+                    .iter_mut()
+                    .find(|metric| metric.id == reset_definition.id)
+                {
+                    if !metric.enabled
+                        && metric.section == crate::models::MetricSection::OnDemand
+                        && !metric.pinned
+                    {
+                        metric.enabled = true;
+                    }
+                }
+            }
+        }
+    }
+    Ok(updates)
 }
 
 #[cfg(test)]

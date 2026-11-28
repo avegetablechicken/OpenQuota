@@ -71,6 +71,29 @@ fn parse_identity(bytes: &[u8]) -> Option<String> {
     )
 }
 
+/// Checks the server-authenticated login against the opaque identity attached to a snapshot.
+/// Older Claude state files omit the organization, so accept the account-only form as well.
+pub(super) fn profile_matches_identity(profile: &serde_json::Value, expected: &str) -> bool {
+    let Some(account) = profile
+        .pointer("/account/uuid")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(organization) = profile
+        .pointer("/organization/uuid")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    expected == identity_stamp(&format!("{account}|{organization}"))
+        || expected == identity_stamp(account)
+}
+
 fn identity_stamp(identity: &str) -> String {
     sha256_hex(identity.to_ascii_lowercase().as_bytes())
 }
@@ -132,6 +155,35 @@ mod tests {
             identity_stamp("Account-A|Org-A"),
             identity_stamp("account-a|org-a")
         );
+    }
+
+    #[test]
+    fn profile_identity_checks_account_and_organization_across_token_generations() {
+        let profile = serde_json::json!({
+            "account": {"uuid": " Account-A "},
+            "organization": {"uuid": "Org-A"}
+        });
+        for owner in ["account-a|org-a", "account-a"] {
+            assert!(super::profile_matches_identity(
+                &profile,
+                &identity_stamp(owner)
+            ));
+        }
+        for owner in ["account-b|org-a", "account-a|org-b", "account-b"] {
+            assert!(!super::profile_matches_identity(
+                &profile,
+                &identity_stamp(owner)
+            ));
+        }
+        for missing in [
+            serde_json::json!({}),
+            serde_json::json!({"organization":{"uuid":"Org-A"}}),
+        ] {
+            assert!(!super::profile_matches_identity(
+                &missing,
+                &identity_stamp("account-a")
+            ));
+        }
     }
 
     #[test]

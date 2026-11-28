@@ -7,6 +7,7 @@ import type {
   ProviderApiKeyState,
   ProxyExitLocation,
   ResetClaimOutcome,
+  ResetCreditKind,
   SettingsViewState,
   Sub2ApiConfigInput,
   Sub2ApiConfigOutcome,
@@ -43,6 +44,20 @@ export function refreshProviderUsage(providerId: string) {
 
 export function claimCodexResetCredit(expiresAt: string, redeemRequestId: string) {
   return invoke<ResetClaimOutcome>('claim_codex_reset_credit', { expiresAt, redeemRequestId });
+}
+
+export function claimClaudeResetCredit(
+  expiresAt: string | null,
+  kind: ResetCreditKind | null,
+  claimAccount: string,
+  redeemRequestId: string,
+) {
+  return invoke<ResetClaimOutcome>('claim_claude_reset_credit', {
+    expiresAt,
+    kind,
+    claimAccount,
+    redeemRequestId,
+  });
 }
 
 export function openProviderLink(providerId: string, linkIndex: number) {

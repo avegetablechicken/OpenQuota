@@ -9,6 +9,11 @@ type UsageResponse = (StatusCode, Value, Option<u64>, Option<i64>);
 
 const OAUTH_SCOPES: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+// Banked resets (`cedar_ember`) require a Claude Code 2.1.280+ CLI User-Agent;
+// 2.1.322 also exposes Fable weekly-refund metadata (`gives_back_weekly`).
+const USAGE_USER_AGENT: &str = "claude-cli/2.1.322 (external, cli)";
+const LEGACY_USER_AGENT: &str = "claude-code/2.1.69";
 
 #[derive(Debug, Deserialize)]
 pub struct ClaudeRefreshResponse {
@@ -31,6 +36,18 @@ pub struct ClaudeClient {
 impl ClaudeClient {
     pub fn new() -> Result<Self, ClaudeError> {
         Self::with_timeout(std::time::Duration::from_secs(15))
+    }
+
+    pub fn new_no_redirect() -> Result<Self, ClaudeError> {
+        let timeout = std::time::Duration::from_secs(30);
+        Ok(Self {
+            client: crate::http_client::ProviderClient::new("claude", move |builder| {
+                builder
+                    .timeout(timeout)
+                    .redirect(reqwest::redirect::Policy::none())
+            })
+            .map_err(|_| ClaudeError::ConnectionFailed)?,
+        })
     }
 
     fn with_timeout(timeout: std::time::Duration) -> Result<Self, ClaudeError> {
@@ -56,23 +73,58 @@ impl ClaudeClient {
         token: &str,
         config: &ClaudeOAuthConfig,
     ) -> Result<UsageResponse, ClaudeError> {
+        let primary = self.fetch_usage_once(
+            token,
+            &config.usage_url,
+            &[("cedar_ember", "1")],
+            USAGE_USER_AGENT,
+            true,
+        )?;
+        if primary.0 == StatusCode::TOO_MANY_REQUESTS {
+            if let Ok(fallback) = self.fetch_usage_once(
+                token,
+                &config.usage_url,
+                &[("cedar_ember", "1")],
+                LEGACY_USER_AGENT,
+                false,
+            ) {
+                if fallback.0.is_success() {
+                    return Ok(fallback);
+                }
+            }
+        }
+        Ok(primary)
+    }
+
+    fn fetch_usage_once(
+        &self,
+        token: &str,
+        url: &str,
+        query: &[(&str, &str)],
+        user_agent: &str,
+        cli_app_header: bool,
+    ) -> Result<UsageResponse, ClaudeError> {
         let started = std::time::Instant::now();
-        let response = self
+        let mut parsed_url = reqwest::Url::parse(url).map_err(|_| ClaudeError::InvalidOAuthUrl)?;
+        parsed_url.query_pairs_mut().extend_pairs(query);
+        let mut request = self
             .client
             .current()
             .map_err(|_| ClaudeError::ConnectionFailed)?
-            .get(&config.usage_url)
+            .get(parsed_url)
             .bearer_auth(token.trim())
             .header("Accept", "application/json")
-            .header("anthropic-beta", "oauth-2025-04-20")
-            .header("User-Agent", "claude-code/2.1.69")
-            .send()
-            .map_err(|error| {
-                crate::app_warn!("http", "claude usage request failed (transport)");
-                crate::http_client::certificate_restart_hint(&error)
-                    .map(ClaudeError::CertificateFailed)
-                    .unwrap_or(ClaudeError::ConnectionFailed)
-            })?;
+            .header("anthropic-beta", OAUTH_BETA)
+            .header("User-Agent", user_agent);
+        if cli_app_header {
+            request = request.header("x-app", "cli");
+        }
+        let response = request.send().map_err(|error| {
+            crate::app_warn!("http", "claude usage request failed (transport)");
+            crate::http_client::certificate_restart_hint(&error)
+                .map(ClaudeError::CertificateFailed)
+                .unwrap_or(ClaudeError::ConnectionFailed)
+        })?;
         let clock_offset = response
             .headers()
             .get(reqwest::header::DATE)
@@ -105,6 +157,97 @@ impl ClaudeClient {
             }
         })?;
         Ok((status, body, retry_after, clock_offset))
+    }
+
+    pub fn fetch_reset_status(
+        &self,
+        token: &str,
+        config: &ClaudeOAuthConfig,
+    ) -> Result<(StatusCode, Value), ClaudeError> {
+        let (status, body, _, _) = self.fetch_usage_once(
+            token,
+            &config.usage_url,
+            &[("cedar_ember", "1"), ("skip_spend", "1")],
+            USAGE_USER_AGENT,
+            true,
+        )?;
+        Ok((status, body))
+    }
+
+    pub fn fetch_profile(
+        &self,
+        token: &str,
+        config: &ClaudeOAuthConfig,
+    ) -> Result<(StatusCode, Value), ClaudeError> {
+        let started = std::time::Instant::now();
+        let response = self
+            .client
+            .current()
+            .map_err(|_| ClaudeError::ConnectionFailed)?
+            .get(config.profile_url())
+            .bearer_auth(token.trim())
+            .header("Accept", "application/json")
+            .header("anthropic-beta", OAUTH_BETA)
+            .header("x-app", "cli")
+            .header("User-Agent", USAGE_USER_AGENT)
+            .send()
+            .map_err(|error| {
+                crate::app_warn!("http", "claude profile request failed (transport)");
+                crate::http_client::certificate_restart_hint(&error)
+                    .map(ClaudeError::CertificateFailed)
+                    .unwrap_or(ClaudeError::ConnectionFailed)
+            })?;
+        let status = response.status();
+        crate::app_debug!(
+            "http",
+            "claude profile HTTP {} ({}ms)",
+            status.as_u16(),
+            started.elapsed().as_millis()
+        );
+        let body = response.json().unwrap_or(Value::Null);
+        Ok((status, body))
+    }
+
+    pub fn redeem_reset_credit(
+        &self,
+        token: &str,
+        config: &ClaudeOAuthConfig,
+        organization_uuid: &str,
+        grant_id: &str,
+        request_id: &str,
+    ) -> Result<(StatusCode, Value), ClaudeError> {
+        let started = std::time::Instant::now();
+        let response = self
+            .client
+            .current()
+            .map_err(|_| ClaudeError::ConnectionFailed)?
+            .post(config.reset_rate_limits_url(organization_uuid))
+            .bearer_auth(token.trim())
+            .header("Accept", "application/json")
+            .header("anthropic-beta", OAUTH_BETA)
+            .header("x-app", "cli")
+            .header("User-Agent", USAGE_USER_AGENT)
+            .json(&json!({
+                "program": "cedar_ember",
+                "grant_id": grant_id,
+                "request_id": request_id,
+            }))
+            .send()
+            .map_err(|error| {
+                crate::app_warn!("http", "claude reset-credit redeem failed (transport)");
+                crate::http_client::certificate_restart_hint(&error)
+                    .map(ClaudeError::CertificateFailed)
+                    .unwrap_or(ClaudeError::ConnectionFailed)
+            })?;
+        let status = response.status();
+        crate::app_debug!(
+            "http",
+            "claude reset-credit redeem HTTP {} ({}ms)",
+            status.as_u16(),
+            started.elapsed().as_millis()
+        );
+        let body = response.json().unwrap_or(Value::Null);
+        Ok((status, body))
     }
 
     pub fn refresh_token(
@@ -338,5 +481,174 @@ mod tests {
             parse_retry_after("Fri, 31 Dec 9999 23:59:59 GMT", now),
             Some(super::MAX_RETRY_AFTER_SECONDS)
         );
+    }
+
+    #[test]
+    fn usage_sends_cedar_ember_cli_agent_and_falls_back_on_429() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::mpsc,
+            thread,
+            time::Duration,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for (status, body) in [
+                (429, r#"{"error":"rate_limited"}"#),
+                (200, r#"{"five_hour":{"utilization":12}}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 4096];
+                let count = stream.read(&mut buffer).unwrap();
+                sender
+                    .send(String::from_utf8_lossy(&buffer[..count]).into_owned())
+                    .unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let base = format!("http://{address}");
+        let (status, body, _, _) = ClaudeClient::new()
+            .unwrap()
+            .fetch_usage("secret-token", &config(&base))
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["five_hour"]["utilization"], 12);
+        let first = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(first.starts_with("GET /usage?cedar_ember=1 HTTP/1.1"));
+        assert!(first
+            .to_ascii_lowercase()
+            .contains("user-agent: claude-cli/2.1.322 (external, cli)"));
+        assert!(first.to_ascii_lowercase().contains("x-app: cli"));
+        assert!(second.starts_with("GET /usage?cedar_ember=1 HTTP/1.1"));
+        assert!(second
+            .to_ascii_lowercase()
+            .contains("user-agent: claude-code/2.1.69"));
+    }
+
+    #[test]
+    fn failed_legacy_responses_preserve_the_primary_rate_limit() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        for fallback_status in [401, 403, 429, 500, 503] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                for (status, body) in [
+                    (429, r#"{"error":"primary_rate_limit"}"#),
+                    (fallback_status, r#"{"error":"legacy_failure"}"#),
+                ] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let mut chunk = [0_u8; 4096];
+                        let count = stream.read(&mut chunk).unwrap();
+                        assert!(count > 0);
+                        request.extend_from_slice(&chunk[..count]);
+                    }
+                    write!(stream,"HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nContent-Type: application/json\r\nRetry-After: 1800\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                }
+            });
+            let (status, body, retry, _) = ClaudeClient::new()
+                .unwrap()
+                .fetch_usage("test-token", &config(&base))
+                .unwrap();
+            server.join().unwrap();
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(body["error"], "primary_rate_limit");
+            assert_eq!(retry, Some(1800));
+        }
+    }
+
+    #[test]
+    fn reset_redeem_sends_cedar_ember_payload_to_organization_endpoint() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::mpsc,
+            thread,
+            time::Duration,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let count = stream.read(&mut chunk).unwrap();
+                request.extend_from_slice(&chunk[..count]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(header_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = text[..header_end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            sender
+                .send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            let body = r#"{"result":"reset","cleared":["five_hour","seven_day"]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let base = format!("http://{address}");
+        let (status, body) = ClaudeClient::new_no_redirect()
+            .unwrap()
+            .redeem_reset_credit(
+                "secret-token",
+                &config(&base),
+                "550e8400-e29b-41d4-a716-446655440000",
+                "grant_1",
+                "req-123",
+            )
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"], "reset");
+        let request = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(request.starts_with(
+            "POST /api/organizations/550e8400-e29b-41d4-a716-446655440000/reset_rate_limits HTTP/1.1"
+        ));
+        assert!(request.contains("\"program\":\"cedar_ember\""));
+        assert!(request.contains("\"grant_id\":\"grant_1\""));
+        assert!(request.contains("\"request_id\":\"req-123\""));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("anthropic-beta: oauth-2025-04-20"));
+        assert!(request.to_ascii_lowercase().contains("x-app: cli"));
     }
 }

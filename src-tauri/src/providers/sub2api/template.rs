@@ -34,15 +34,6 @@ pub(super) fn definition_for(provider_id: &str, display_name: &str) -> ProviderD
                 "S",
             ),
             MetricDefinition::quota_or_value(
-                &metric_id("weekly"),
-                "Weekly",
-                "weekly",
-                true,
-                MetricSection::AlwaysVisible,
-                true,
-                "W",
-            ),
-            MetricDefinition::quota_or_value(
                 &metric_id("daily"),
                 "Daily",
                 "daily",
@@ -50,6 +41,15 @@ pub(super) fn definition_for(provider_id: &str, display_name: &str) -> ProviderD
                 MetricSection::OnDemand,
                 false,
                 "D",
+            ),
+            MetricDefinition::quota_or_value(
+                &metric_id("weekly"),
+                "Weekly",
+                "weekly",
+                true,
+                MetricSection::AlwaysVisible,
+                true,
+                "W",
             ),
             MetricDefinition::quota_or_value(
                 &metric_id("monthly"),
@@ -109,7 +109,6 @@ pub(super) fn definition_for(provider_id: &str, display_name: &str) -> ProviderD
                 false,
                 "E",
             ),
-            MetricDefinition::trend(&metric_id("trend")),
             MetricDefinition::quota(
                 &metric_id("spark"),
                 "Spark",
@@ -130,6 +129,7 @@ pub(super) fn definition_for(provider_id: &str, display_name: &str) -> ProviderD
                 false,
                 "SW",
             ),
+            MetricDefinition::trend(&metric_id("trend")),
             MetricDefinition::value(
                 &metric_id("rateLimitResets"),
                 "Rate Limit Resets",
@@ -213,7 +213,7 @@ pub(crate) fn track_shows_metric(
     }
     let upstream_only: &[&str] = match upstream_provider_id {
         Some("codex") => &["session", "spark", "sparkWeekly", "rateLimitResets"],
-        Some("claude") => &["session", "sonnet", "fable"],
+        Some("claude") => &["session", "sonnet", "fable", "rateLimitResets"],
         Some("antigravity") => &["session", "claude", "claudeWeekly"],
         Some("grok") => &["monthly"],
         _ => {
@@ -237,143 +237,83 @@ pub(crate) fn subscription_percentage_metric(metric_id: &str) -> bool {
     )
 }
 
+const CANONICAL_METRIC_SUFFIXES: &[&str] = &[
+    "session",
+    "daily",
+    "weekly",
+    "monthly",
+    "sonnet",
+    "fable",
+    "claude",
+    "claudeWeekly",
+    "extra",
+    "spark",
+    "sparkWeekly",
+    "trend",
+    "rateLimitResets",
+    "today",
+    "yesterday",
+    "last30",
+];
+
 pub fn metric_template(
     provider_id: &str,
     upstream: Sub2ApiUpstream,
     mode: Sub2ApiMode,
 ) -> Vec<MetricLayout> {
-    let metric = |suffix: &str, enabled: bool, section: MetricSection, pinned: bool| MetricLayout {
-        id: format!("{provider_id}.{suffix}"),
-        enabled,
-        section,
-        pinned,
-    };
     let always = MetricSection::AlwaysVisible;
     let demand = MetricSection::OnDemand;
-    if mode == Sub2ApiMode::Subscription {
-        let mut template = vec![
-            metric("daily", true, always, true),
-            metric("weekly", true, always, true),
-            metric("monthly", true, always, false),
-            metric("trend", true, always, false),
-            metric("today", true, demand, false),
-            metric("yesterday", true, demand, false),
-            metric("last30", true, demand, false),
-        ];
-        for suffix in [
-            "session",
-            "sonnet",
-            "fable",
-            "claude",
-            "claudeWeekly",
-            "extra",
-            "spark",
-            "sparkWeekly",
-            "rateLimitResets",
-        ] {
-            template.push(metric(suffix, false, demand, false));
-        }
-        return template;
-    }
-    let (shown, hidden): (Vec<MetricLayout>, &[&str]) = match upstream {
-        Sub2ApiUpstream::Claude => (
-            vec![
-                metric("session", true, always, true),
-                metric("weekly", true, always, true),
-                metric("trend", true, always, false),
-                metric("sonnet", false, demand, false),
-                metric("fable", false, demand, false),
-                metric("extra", false, demand, false),
-                metric("today", true, demand, false),
-                metric("yesterday", true, demand, false),
-                metric("last30", true, demand, false),
-            ],
-            &[
-                "daily",
-                "monthly",
-                "spark",
-                "sparkWeekly",
-                "rateLimitResets",
-                "claude",
-                "claudeWeekly",
-            ],
-        ),
-        Sub2ApiUpstream::Codex => (
-            vec![
-                metric("session", true, always, true),
-                metric("weekly", true, always, true),
-                metric("trend", true, always, false),
-                metric("spark", true, demand, false),
-                metric("sparkWeekly", true, demand, false),
-                metric("rateLimitResets", true, demand, false),
-                metric("today", true, demand, false),
-                metric("yesterday", true, demand, false),
-                metric("last30", true, demand, false),
-            ],
-            &[
-                "daily",
-                "monthly",
-                "sonnet",
-                "fable",
-                "extra",
-                "claude",
-                "claudeWeekly",
-            ],
-        ),
-        // Antigravity's Session and Weekly are its Gemini pool, as in the native provider.
-        Sub2ApiUpstream::Antigravity => (
-            vec![
-                metric("session", true, always, true),
-                metric("weekly", true, always, true),
-                metric("trend", true, always, false),
-                metric("claude", true, demand, false),
-                metric("claudeWeekly", true, demand, false),
-                metric("today", true, demand, false),
-                metric("yesterday", true, demand, false),
-                metric("last30", true, demand, false),
-            ],
-            &[
-                "daily",
-                "monthly",
-                "spark",
-                "sparkWeekly",
-                "rateLimitResets",
-                "sonnet",
-                "fable",
-                "extra",
-            ],
-        ),
-        // Grok's billing period is weekly or monthly; only the reported one has data.
-        Sub2ApiUpstream::Grok => (
-            vec![
-                metric("weekly", true, always, false),
-                metric("monthly", true, always, false),
-                metric("trend", true, always, false),
-                metric("today", true, demand, false),
-                metric("yesterday", true, demand, false),
-                metric("last30", true, demand, false),
-            ],
-            &[
-                "daily",
-                "session",
-                "spark",
-                "sparkWeekly",
-                "rateLimitResets",
-                "sonnet",
-                "fable",
-                "extra",
-                "claude",
-                "claudeWeekly",
-            ],
-        ),
-    };
-    let mut template = shown;
-    template.extend(
-        hidden
-            .iter()
-            .map(|suffix| metric(suffix, false, demand, false)),
-    );
-    template
+    CANONICAL_METRIC_SUFFIXES
+        .iter()
+        .map(|&suffix| {
+            let (enabled, section, pinned) = match mode {
+                Sub2ApiMode::Subscription => match suffix {
+                    "daily" | "weekly" => (true, always, true),
+                    "monthly" | "trend" => (true, always, false),
+                    "today" | "yesterday" | "last30" => (true, demand, false),
+                    _ => (false, demand, false),
+                },
+                Sub2ApiMode::Admin => match upstream {
+                    Sub2ApiUpstream::Claude => match suffix {
+                        "session" | "weekly" => (true, always, true),
+                        "trend" => (true, always, false),
+                        "rateLimitResets" | "today" | "yesterday" | "last30" => {
+                            (true, demand, false)
+                        }
+                        _ => (false, demand, false),
+                    },
+                    Sub2ApiUpstream::Codex => match suffix {
+                        "session" | "weekly" => (true, always, true),
+                        "trend" => (true, always, false),
+                        "spark" | "sparkWeekly" | "rateLimitResets" | "today" | "yesterday"
+                        | "last30" => (true, demand, false),
+                        _ => (false, demand, false),
+                    },
+                    // Antigravity's Session and Weekly are its Gemini pool, as in the native provider.
+                    Sub2ApiUpstream::Antigravity => match suffix {
+                        "session" | "weekly" => (true, always, true),
+                        "trend" => (true, always, false),
+                        "claude" | "claudeWeekly" | "today" | "yesterday" | "last30" => {
+                            (true, demand, false)
+                        }
+                        _ => (false, demand, false),
+                    },
+                    // Grok's billing period is weekly or monthly; only the reported one has data.
+                    Sub2ApiUpstream::Grok => match suffix {
+                        "weekly" | "monthly" | "trend" => (true, always, false),
+                        "today" | "yesterday" | "last30" => (true, demand, false),
+                        _ => (false, demand, false),
+                    },
+                },
+            };
+            MetricLayout {
+                id: format!("{provider_id}.{suffix}"),
+                enabled,
+                section,
+                pinned,
+            }
+        })
+        .collect()
 }
 
 pub(super) fn should_apply_metric_template(

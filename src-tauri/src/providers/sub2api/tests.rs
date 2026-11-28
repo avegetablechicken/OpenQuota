@@ -180,7 +180,7 @@ fn metric_support_follows_the_track() {
         "sub2api@2.spark",
         Some("claude")
     ));
-    assert!(!track_shows_metric(
+    assert!(track_shows_metric(
         "sub2api@2",
         "sub2api@2.rateLimitResets",
         Some("claude")
@@ -322,10 +322,15 @@ fn metric_templates_match_the_supported_native_provider_defaults() {
     );
     assert!(claude
         .iter()
-        .filter(|metric| metric.id.ends_with("spark")
-            || metric.id.ends_with("sparkWeekly")
-            || metric.id.ends_with("rateLimitResets"))
+        .filter(|metric| metric.id.ends_with("spark") || metric.id.ends_with("sparkWeekly"))
         .all(|metric| !metric.enabled));
+    assert!(
+        claude
+            .iter()
+            .find(|metric| metric.id.ends_with("rateLimitResets"))
+            .unwrap()
+            .enabled
+    );
     let codex = metric_template(
         "sub2api@2",
         super::Sub2ApiUpstream::Codex,
@@ -340,6 +345,31 @@ fn metric_templates_match_the_supported_native_provider_defaults() {
         .chain(codex.iter())
         .filter(|metric| metric.id.ends_with("extra"))
         .all(|metric| !metric.enabled));
+    // Rate Limit Resets always precedes Today / Yesterday / Last 30 Days on every track.
+    for (mode, upstream) in [
+        (super::Sub2ApiMode::Admin, super::Sub2ApiUpstream::Codex),
+        (super::Sub2ApiMode::Admin, super::Sub2ApiUpstream::Claude),
+        (
+            super::Sub2ApiMode::Admin,
+            super::Sub2ApiUpstream::Antigravity,
+        ),
+        (super::Sub2ApiMode::Admin, super::Sub2ApiUpstream::Grok),
+        (
+            super::Sub2ApiMode::Subscription,
+            super::Sub2ApiUpstream::Codex,
+        ),
+    ] {
+        let template = metric_template("sub2api@2", upstream, mode);
+        let pos = |suffix: &str| {
+            template
+                .iter()
+                .position(|metric| metric.id == format!("sub2api@2.{suffix}"))
+                .unwrap()
+        };
+        assert!(pos("rateLimitResets") < pos("today"));
+        assert!(pos("today") < pos("yesterday"));
+        assert!(pos("yesterday") < pos("last30"));
+    }
     // Every template lists every metric, and enables only what its upstream reports.
     let definition = definition_for("sub2api@2", "Sub2API 2");
     for upstream in [
@@ -387,7 +417,7 @@ fn claude_refresh_omits_missing_and_resets_expired_quotas() {
             "resets_at": "2026-08-29T06:00:00Z"
         }]
     });
-    let mapped = crate::providers::claude::map_sub2api_usage(&body).unwrap();
+    let mapped = crate::providers::claude::map_sub2api_usage_at(&body, Utc::now()).unwrap();
 
     let quotas = normalize_refreshed_quotas(
         super::Sub2ApiUpstream::Claude,
@@ -1371,11 +1401,18 @@ fn discovery_reads_every_page_and_rejects_non_advancing_pages() {
 fn refresh_keeps_all_accounts_and_rediscovers_with_a_cached_token() {
     let now = Utc::now();
     let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
+    let no_resets =
+        r#"{"code":0,"data":{"eligible":true,"available_count":0,"credits":[]}}"#.to_owned();
     let (base_url, _requests, worker) = serve_sequence(vec![
         r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
         r#"{"code":0,"data":{"items":[{"id":7,"name":"Same name"},{"id":8,"name":"Same name"}],"total":2}}"#.into(),
         // All quotas come first so they can be shown before usage history loads.
-        quota.clone(), quota, usage_data(7, now), usage_data(8, now),
+        quota.clone(),
+        no_resets.clone(),
+        quota,
+        no_resets,
+        usage_data(7, now),
+        usage_data(8, now),
         r#"{"code":0,"data":{"items":[{"id":9,"name":"Unavailable"}],"total":1}}"#.into(),
         r#"{"code":1}"#.into(),
         r#"{"code":0,"data":{"items":[],"total":0}}"#.into(),
@@ -1438,10 +1475,17 @@ fn refresh_keeps_all_accounts_and_rediscovers_with_a_cached_token() {
 fn quotas_of_every_account_are_previewed_before_any_usage_history_request() {
     let now = Utc::now();
     let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
+    let no_resets =
+        r#"{"code":0,"data":{"eligible":true,"available_count":0,"credits":[]}}"#.to_owned();
     let (base_url, requests, worker) = serve_sequence(vec![
         r#"{"code":0,"data":{"access_token":"token","expires_in":3600}}"#.into(),
         r#"{"code":0,"data":{"items":[{"id":7,"name":"First"},{"id":8,"name":"Second"}],"total":2}}"#.into(),
-        quota.clone(), quota, usage_data(7, now), usage_data(8, now),
+        quota.clone(),
+        no_resets.clone(),
+        quota,
+        no_resets,
+        usage_data(7, now),
+        usage_data(8, now),
     ]);
     let directory = tempdir().unwrap();
     let provider = Sub2ApiProvider::new(
@@ -1646,6 +1690,8 @@ async fn failed_refresh_preserves_all_cached_accounts_on_disk_and_recovers() {
     for failed_stage in 0..3 {
         let page = r#"{"code":0,"data":{"items":[{"id":7,"name":"First"},{"id":8,"name":"Second"}],"total":2}}"#.to_owned();
         let quota = format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#);
+        let no_resets =
+            r#"{"code":0,"data":{"eligible":true,"available_count":0,"credits":[]}}"#.to_owned();
         let now = Utc::now();
         let mut responses = vec![
             (
@@ -1654,16 +1700,22 @@ async fn failed_refresh_preserves_all_cached_accounts_on_disk_and_recovers() {
             ),
             (200, page.clone()),
             (200, quota.clone()),
+            (200, no_resets.clone()),
             (200, quota.clone()),
+            (200, no_resets.clone()),
             (200, usage_data(7, now)),
         ];
 
         responses.push((200, usage_data(8, now)));
 
         if failed_stage > 0 {
-            responses.extend([(200, page), (200, quota.clone())]);
+            responses.extend([(200, page), (200, quota.clone()), (200, no_resets.clone())]);
             if failed_stage == 2 {
-                responses.extend([(200, quota.clone()), (200, usage_data(7, now))]);
+                responses.extend([
+                    (200, quota.clone()),
+                    (200, no_resets.clone()),
+                    (200, usage_data(7, now)),
+                ]);
             }
         }
         responses.push((503, "temporary outage".into()));
@@ -1673,6 +1725,7 @@ async fn failed_refresh_preserves_all_cached_accounts_on_disk_and_recovers() {
                 r#"{"code":0,"data":{"items":[{"id":8,"name":"Recovered"}],"total":1}}"#.into(),
             ),
             (200, quota),
+            (200, no_resets),
             (200, usage_data(8, now)),
             (200, r#"{"code":0,"data":{"items":[],"total":0}}"#.into()),
         ]);
@@ -1835,7 +1888,7 @@ fn discovers_a_claude_account_and_maps_its_usage() {
     let usage_request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
     assert!(usage_request.starts_with("GET /api/v1/admin/accounts/1/usage HTTP/1.1"));
 
-    let mapped = crate::providers::claude::map_sub2api_usage(&body).unwrap();
+    let mapped = crate::providers::claude::map_sub2api_usage_at(&body, Utc::now()).unwrap();
     assert_eq!(mapped.plan.as_deref(), Some("Pro"));
     assert_eq!(
         mapped
@@ -1976,6 +2029,7 @@ fn claude_refresh_combines_quota_with_standard_cost_summary() {
         r#"{"code":0,"message":"success","data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
         r#"{"code":0,"message":"success","data":{"items":[{"id":7,"name":"Claude upstream"}],"total":1,"page":1,"page_size":1,"pages":1}}"#.into(),
         format!(r#"{{"code":0,"message":"success","data":{CLAUDE_USAGE_DATA}}}"#),
+        r#"{"code":0,"message":"success","data":{"eligible":true,"available_count":1,"credits":[{"label":"Opus reset","resets_left":2,"expires_at":"2099-12-10T22:00:00Z","clears":["five_hour","seven_day"],"redeemable":true}]}}"#.into(),
         usage_data(7, now),
     ];
     let (base_url, requests, worker) = serve_sequence(responses);
@@ -2010,10 +2064,18 @@ fn claude_refresh_combines_quota_with_standard_cost_summary() {
             .collect::<Vec<_>>(),
         ["session", "weekly", "sonnet", "fable"]
     );
+    assert_eq!(snapshot.value_metrics.len(), 1);
+    assert_eq!(snapshot.value_metrics[0].id, "sub2apiRateLimitResets");
+    assert_eq!(snapshot.value_metrics[0].values[0].number, 2.0);
+    assert_eq!(snapshot.value_metrics[0].expiries_at.len(), 2);
+    assert!(snapshot.value_metrics[0]
+        .reset_credits
+        .iter()
+        .all(|credit| !credit.redeemable));
     let history = snapshot.usage_histories.account.unwrap();
     assert_eq!(history.daily.len(), 2);
     assert_eq!(history.last_30_days.unwrap().tokens, 3500);
-    let request_paths = (0..4)
+    let request_paths = (0..5)
         .map(|_| {
             requests
                 .recv_timeout(Duration::from_secs(1))
@@ -2024,7 +2086,96 @@ fn claude_refresh_combines_quota_with_standard_cost_summary() {
                 .to_owned()
         })
         .collect::<Vec<_>>();
-    assert!(request_paths[3].starts_with("GET /api/v1/admin/accounts/7/stats?days=30 "));
+    assert!(request_paths[3].starts_with("GET /api/v1/admin/accounts/7/claude/reset-credits "));
+    assert!(request_paths[4].starts_with("GET /api/v1/admin/accounts/7/stats?days=30 "));
+}
+
+#[test]
+fn claude_refresh_degrades_gracefully_when_reset_credits_endpoint_is_unavailable() {
+    let now = Utc::now();
+    let (base_url, _requests, worker) = serve_sequence_with_status(vec![
+        (
+            200,
+            r#"{"code":0,"data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
+        ),
+        (
+            200,
+            r#"{"code":0,"data":{"items":[{"id":7,"name":"Older Sub2API"}],"total":1}}"#.into(),
+        ),
+        (200, format!(r#"{{"code":0,"data":{CLAUDE_USAGE_DATA}}}"#)),
+        (404, r#"{"code":404,"message":"not found"}"#.into()),
+        (200, usage_data(7, now)),
+    ]);
+    let directory = tempdir().unwrap();
+    let provider = Sub2ApiProvider::new(
+        "sub2api@2".into(),
+        default_display_name_for_slot("sub2api@2"),
+        directory.path().join("sub2api@2.configured"),
+        false,
+    );
+    let config = StoredConfig {
+        provider_source: None,
+        mode: super::Sub2ApiMode::Admin,
+        api_key: String::new(),
+        base_url,
+        codex_provider: String::new(),
+        custom_base_url: true,
+        email: "admin@example.com".into(),
+        password: "secret-password".into(),
+        upstream: super::Sub2ApiUpstream::Claude,
+        metric_template_version: super::METRIC_TEMPLATE_VERSION,
+    };
+
+    let snapshot = provider.refresh_snapshot(&config).unwrap();
+    worker.join().unwrap();
+
+    assert_eq!(snapshot.quotas.len(), 4);
+    assert!(snapshot.value_metrics.is_empty());
+}
+
+#[test]
+fn dedicated_claude_reset_status_overrides_embedded_usage_but_errors_allow_fallback() {
+    for (status, body, expected) in [
+        (200, r#"{"code":0,"data":{"eligible":false}}"#, 0),
+        (200, r#"{"code":0,"data":{"eligible":true}}"#, 0),
+        (404, r#"{"code":404,"message":"not found"}"#, 1),
+    ] {
+        let now = Utc::now();
+        let mut usage: serde_json::Value = serde_json::from_str(CLAUDE_USAGE_DATA).unwrap();
+        usage["cedar_ember"] = serde_json::json!({"eligible":true,"grants":[{"id":"grant","resets_left":2,"ends_at":"2099-12-10T22:00:00Z","clears":["five_hour","seven_day"]}]});
+        let (base_url, _requests, worker) = serve_sequence_with_status(vec![
+            (
+                200,
+                r#"{"code":0,"data":{"access_token":"admin-jwt","expires_in":3600}}"#.into(),
+            ),
+            (
+                200,
+                r#"{"code":0,"data":{"items":[{"id":7,"name":"Claude"}],"total":1}}"#.into(),
+            ),
+            (200, serde_json::json!({"code":0,"data":usage}).to_string()),
+            (status, body.into()),
+            (200, usage_data(7, now)),
+        ]);
+        let directory = tempdir().unwrap();
+        let provider = Sub2ApiProvider::new(
+            "sub2api".into(),
+            "Claude".into(),
+            directory.path().join("configured"),
+            false,
+        );
+        let config = admin_config(base_url, super::Sub2ApiUpstream::Claude);
+        let snapshot = provider.refresh_snapshot(&config).unwrap();
+        worker.join().unwrap();
+        assert_eq!(snapshot.value_metrics.len(), expected);
+        if expected > 0 {
+            assert_eq!(snapshot.value_metrics[0].id, "sub2apiRateLimitResets");
+            assert_eq!(snapshot.value_metrics[0].values[0].number, 2.0);
+            assert!(snapshot.value_metrics[0]
+                .reset_credits
+                .iter()
+                .all(|credit| !credit.redeemable));
+        }
+    }
 }
 
 #[test]

@@ -6,8 +6,8 @@ use crate::{
     hashing::sha256_hex,
     metric_policy::{MetricPolicy, MAX_STARS},
     models::{
-        AppSettings, MetricDefinition, MetricLayout, MetricSection, ProviderDefinition,
-        ProviderLayout,
+        AppSettings, MetricDefinition, MetricLayout, MetricSection, MetricSource,
+        ProviderDefinition, ProviderLayout,
     },
     providers::ProviderRegistry,
 };
@@ -64,7 +64,8 @@ pub fn normalize(
 ) {
     let catalog = registry.catalog();
     let migrating_to_multi_provider = settings.schema_version < 3;
-    settings.schema_version = 7;
+    let migrating_reset_metric_order = settings.schema_version < 9;
+    settings.schema_version = 9;
     settings.dismissed_update_version = settings
         .dismissed_update_version
         .take()
@@ -113,7 +114,12 @@ pub fn normalize(
         provider.detected = detected.contains(&definition.id);
         let provider_id = provider.id.clone();
         let policy = MetricPolicy::for_provider(registry, &provider_id);
-        normalize_metrics(&mut provider.metrics, &definition.metrics, &policy);
+        normalize_metrics(
+            &mut provider.metrics,
+            &definition.metrics,
+            &policy,
+            migrating_reset_metric_order,
+        );
         normalized.push(provider);
     }
     for definition in &catalog.providers {
@@ -294,9 +300,20 @@ pub(super) fn apply_metric_template(
     applied: &[MetricLayout],
     policy: &MetricPolicy,
 ) -> Vec<MetricLayout> {
+    let preserve_template_order = metrics.is_empty()
+        || (!applied.is_empty()
+            && metrics.len() == applied.len()
+            && metrics
+                .iter()
+                .zip(applied.iter())
+                .all(|(current, previous)| current.id == previous.id));
+    let template_ids = template
+        .iter()
+        .map(|metric| metric.id.as_str())
+        .collect::<Vec<_>>();
     let mut recorded = Vec::with_capacity(template.len());
     let mut adopted = Vec::new();
-    for default in template {
+    for (template_index, default) in template.iter().enumerate() {
         match metrics.iter_mut().find(|current| current.id == default.id) {
             Some(current) if !applied.contains(current) => {
                 recorded.extend(
@@ -308,10 +325,23 @@ pub(super) fn apply_metric_template(
                 continue;
             }
             Some(current) => current.clone_from(default),
-            None => metrics.push(default.clone()),
+            None => insert_metric_in_canonical_order(
+                metrics,
+                &template_ids,
+                template_index,
+                default.clone(),
+            ),
         }
         adopted.push(default.id.clone());
         recorded.push(default.clone());
+    }
+    if preserve_template_order {
+        metrics.sort_by_key(|metric| {
+            template
+                .iter()
+                .position(|default| default.id == metric.id)
+                .unwrap_or(usize::MAX)
+        });
     }
     let counts_toward_cap = |metric: &MetricLayout| metric.pinned && policy.shows(&metric.id);
     let mut pins = metrics
@@ -334,11 +364,63 @@ pub(super) fn apply_metric_template(
     recorded
 }
 
+pub(super) fn insert_metric_in_canonical_order(
+    metrics: &mut Vec<MetricLayout>,
+    canonical_ids: &[&str],
+    canonical_index: usize,
+    metric: MetricLayout,
+) {
+    if let Some(position) = canonical_ids[canonical_index + 1..]
+        .iter()
+        .find_map(|next_id| {
+            metrics
+                .iter()
+                .position(|existing| existing.id == *next_id && existing.section == metric.section)
+        })
+    {
+        metrics.insert(position, metric);
+        return;
+    }
+    if let Some(position) = canonical_ids[..canonical_index]
+        .iter()
+        .rev()
+        .find_map(|prev_id| {
+            metrics
+                .iter()
+                .position(|existing| existing.id == *prev_id && existing.section == metric.section)
+        })
+    {
+        metrics.insert(position + 1, metric);
+        return;
+    }
+    if let Some(position) = canonical_ids[canonical_index + 1..]
+        .iter()
+        .find_map(|next_id| metrics.iter().position(|existing| existing.id == *next_id))
+    {
+        metrics.insert(position, metric);
+        return;
+    }
+    metrics.push(metric);
+}
+
+fn is_migrated_reset_metric(definition: &MetricDefinition) -> bool {
+    matches!(
+        &definition.source,
+        MetricSource::Value { source_id, .. }
+            if source_id == "claudeRateLimitResets" || source_id == "sub2apiRateLimitResets"
+    )
+}
+
 fn normalize_metrics(
     metrics: &mut Vec<MetricLayout>,
     definitions: &[MetricDefinition],
     policy: &MetricPolicy,
+    migrating_reset_metric_order: bool,
 ) {
+    let canonical_ids = definitions
+        .iter()
+        .map(|definition| definition.id.as_str())
+        .collect::<Vec<_>>();
     let mut normalized = Vec::with_capacity(definitions.len());
     for metric in metrics.iter() {
         if definitions
@@ -351,14 +433,54 @@ fn normalize_metrics(
             normalized.push(metric.clone());
         }
     }
-    for definition in definitions {
+    for (index, definition) in definitions.iter().enumerate() {
         if !normalized.iter().any(|metric| metric.id == definition.id) {
-            normalized.push(MetricLayout {
-                id: definition.id.clone(),
-                enabled: definition.default_enabled,
-                section: definition.default_section,
-                pinned: definition.default_pinned,
+            insert_metric_in_canonical_order(
+                &mut normalized,
+                &canonical_ids,
+                index,
+                MetricLayout {
+                    id: definition.id.clone(),
+                    enabled: definition.default_enabled,
+                    section: definition.default_section,
+                    pinned: definition.default_pinned,
+                },
+            );
+        }
+    }
+    if migrating_reset_metric_order {
+        if let Some((canonical_index, definition)) = definitions
+            .iter()
+            .enumerate()
+            .find(|(_, definition)| is_migrated_reset_metric(definition))
+        {
+            let first_usage_position = definitions[canonical_index + 1..]
+                .iter()
+                .filter(|later| matches!(later.source, MetricSource::Usage { .. }))
+                .filter_map(|later| {
+                    normalized.iter().position(|metric| {
+                        metric.id == later.id && metric.section == MetricSection::OnDemand
+                    })
+                })
+                .min();
+            let reset_position = normalized.iter().position(|metric| {
+                metric.id == definition.id
+                    && metric.section == definition.default_section
+                    && metric.pinned == definition.default_pinned
             });
+            if let (Some(first_usage_position), Some(reset_position)) =
+                (first_usage_position, reset_position)
+            {
+                if reset_position > first_usage_position {
+                    let reset_metric = normalized.remove(reset_position);
+                    insert_metric_in_canonical_order(
+                        &mut normalized,
+                        &canonical_ids,
+                        canonical_index,
+                        reset_metric,
+                    );
+                }
+            }
         }
     }
     let mut pin_count = 0;

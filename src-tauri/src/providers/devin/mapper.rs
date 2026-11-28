@@ -111,6 +111,7 @@ fn map_user_status(
                     estimated: false,
                 }],
                 expiries_at: Vec::new(),
+                reset_credits: Vec::new(),
             }]
         })
         .unwrap_or_default();

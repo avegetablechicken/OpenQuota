@@ -5,7 +5,7 @@
   import { formatReset } from './pacing';
   import Icon from './Icon.svelte';
   import ResetCreditsDetail from './ResetCreditsDetail.svelte';
-  import type { ValueMetric } from './types';
+  import type { ResetCreditKind, ValueMetric } from './types';
 
   interface Props {
     label: string;
@@ -23,8 +23,25 @@
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
   let detailTrigger = $state<HTMLButtonElement>();
   let restoringTriggerFocus = false;
-  const showsResetDetail = $derived(metric?.id === 'rateLimitResets');
+  const claimProvider = $derived<'codex' | 'claude' | null>(
+    metric?.id === 'rateLimitResets'
+      ? 'codex'
+      : metric?.id === 'claudeRateLimitResets'
+        ? 'claude'
+        : null,
+  );
+  const showsResetDetail = $derived(claimProvider !== null);
   const hasEstimatedValue = $derived(metric?.values.some((value) => value.estimated) ?? false);
+  const hasNonFullReset = $derived(
+    metric?.resetCredits?.some((credit) => credit.kind !== 'full') ?? false,
+  );
+
+  function resetKindLabel(kind: ResetCreditKind) {
+    if (kind === 'fable') return 'Fable';
+    if (kind === 'partial') return 'Partial';
+    if (kind === 'full') return 'Full';
+    return 'Unknown';
+  }
 
   const reading = $derived(
     metric?.values
@@ -33,6 +50,26 @@
   );
   const tooltip = $derived.by(() => {
     if (!metric) return undefined;
+    if (!showsResetDetail && metric.resetCredits?.length) {
+      const sorted = [...metric.resetCredits].sort((left, right) => {
+        if (!left.expiresAt && !right.expiresAt) return 0;
+        if (!left.expiresAt) return 1;
+        if (!right.expiresAt) return -1;
+        return left.expiresAt.localeCompare(right.expiresAt);
+      });
+      const lines = sorted.map((credit, index) => {
+        const when = credit.expiresAt
+          ? formatReset(credit.expiresAt, now, resetDisplay, timeFormat).replace(
+              /^Resets(?: in)?\s*/,
+              '',
+            )
+          : 'No expiry';
+        return `${index + 1}. ${resetKindLabel(credit.kind)} · ${when}`;
+      });
+      return [resetDisplay === 'countdown' ? 'Resets expire in:' : 'Resets expire:', ...lines].join(
+        '\n',
+      );
+    }
     if (metric.expiriesAt.length && !showsResetDetail) {
       const sorted = [...metric.expiriesAt].sort();
       const lines = sorted.map((expiry, index) => {
@@ -47,7 +84,14 @@
       );
     }
     const count = metric.values[0]?.number ?? 0;
-    if (metric.id === 'rateLimitResets' && count > 0) return 'Expiry times unavailable';
+    if (
+      (metric.id === 'rateLimitResets' ||
+        metric.id === 'claudeRateLimitResets' ||
+        metric.id === 'sub2apiRateLimitResets') &&
+      count > 0
+    ) {
+      return 'Expiry times unavailable';
+    }
     if (metric.values.some((value) => Math.abs(value.number) >= 1000)) {
       return metric.values
         .map((value) =>
@@ -84,7 +128,8 @@
   }
   function placeDetail(target: HTMLElement) {
     const rect = target.getBoundingClientRect();
-    const estimatedHeight = Math.min(72 + (metric?.expiriesAt.length ?? 0) * 34, 340);
+    const rowCount = metric?.resetCredits?.length || metric?.expiriesAt.length || 0;
+    const estimatedHeight = Math.min(72 + rowCount * 34, 340);
     detailAnchor = { top: rect.top, bottom: rect.bottom };
     detailTop = computeFixedPopoverTop(detailAnchor, estimatedHeight, window.innerHeight, {
       preferred: 'below',
@@ -153,6 +198,11 @@
       {#if expirySeverity}<i class="expiry-dot expiry-dot--{expirySeverity}" aria-hidden="true"
         ></i>{/if}
       {reading}
+      {#if hasNonFullReset}
+        <span class="value-estimate" aria-hidden="true"
+          ><Icon name="about" size={11} strokeWidth={1.9} /></span
+        >
+      {/if}
       {#if hasEstimatedValue}
         <span
           class="value-estimate"
@@ -165,6 +215,11 @@
   {:else}
     <span class="value-reading" data-tooltip={tooltip}>
       {reading}
+      {#if hasNonFullReset}
+        <span class="value-estimate" aria-hidden="true"
+          ><Icon name="about" size={11} strokeWidth={1.9} /></span
+        >
+      {/if}
       {#if hasEstimatedValue}
         <span
           class="value-estimate"
@@ -177,11 +232,13 @@
   {/if}
 </div>
 
-{#if detailOpen && metric}
+{#if detailOpen && metric && claimProvider}
   <ResetCreditsDetail
     title={label}
+    provider={claimProvider}
     count={Math.max(0, Math.floor(metric.values[0]?.number ?? 0))}
     expiries={metric.expiriesAt}
+    resetCredits={metric.resetCredits ?? []}
     {now}
     {timeFormat}
     top={detailTop}

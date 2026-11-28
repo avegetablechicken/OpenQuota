@@ -157,6 +157,7 @@ pub(super) fn map_org_usage(body: &Value) -> Option<Vec<ValueMetric>> {
                     estimated: false,
                 }],
                 expiries_at: Vec::new(),
+                reset_credits: Vec::new(),
             },
             ValueMetric {
                 id: "orgSpend".into(),
@@ -168,6 +169,7 @@ pub(super) fn map_org_usage(body: &Value) -> Option<Vec<ValueMetric>> {
                     estimated: false,
                 }],
                 expiries_at: Vec::new(),
+                reset_credits: Vec::new(),
             },
         ]
     })
@@ -253,6 +255,7 @@ fn overage_metric(value: &Value) -> Option<ValueMetric> {
             estimated: false,
         }],
         expiries_at: Vec::new(),
+        reset_credits: Vec::new(),
     })
 }
 

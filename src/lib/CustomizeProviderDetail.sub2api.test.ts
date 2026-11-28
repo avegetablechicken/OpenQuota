@@ -101,7 +101,7 @@ const settings: AppSettings = {
 
 const visible = {
   codex: ['session', 'spark', 'sparkWeekly', 'rateLimitResets'],
-  claude: ['session', 'sonnet', 'fable'],
+  claude: ['session', 'sonnet', 'fable', 'rateLimitResets'],
 };
 
 function renderDetail(upstream: 'codex' | 'claude', renamableProviderIds: string[] = []) {
@@ -144,9 +144,7 @@ describe('CustomizeProviderDetail Sub2API metric availability', () => {
 
     expect(screen.queryByRole('checkbox', { name: 'Show Spark' })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: 'Show Spark Weekly' })).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('checkbox', { name: 'Show Rate Limit Resets' }),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Show Rate Limit Resets' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Sonnet' })).toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Show Fable' })).toBeEnabled();
     expect(screen.queryByRole('checkbox', { name: 'Show Extra Usage' })).not.toBeInTheDocument();

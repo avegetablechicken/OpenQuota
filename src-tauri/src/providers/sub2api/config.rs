@@ -10,7 +10,7 @@ use super::client::{normalize_base_url, Sub2ApiError};
 use super::template::{track_for_id, track_provider_id};
 
 pub(super) const PROVIDER_ID: &str = "sub2api";
-pub(super) const METRIC_TEMPLATE_VERSION: u8 = 1;
+pub(super) const METRIC_TEMPLATE_VERSION: u8 = 2;
 // Keep server-standard summaries separate from previous local price estimates.
 pub(super) const ADMIN_CACHE_KEY: &str = "sub2api-standard-summary-v1";
 pub(super) const SUBSCRIPTION_CACHE_KEY: &str = "sub2api-subscription-v1";
