@@ -167,7 +167,8 @@ impl SettingsService {
         self.credential_mutation.lock().await
     }
 
-    fn get_with_revisions(&self) -> (AppSettings, u64, u64) {
+    /// Settings with the revisions they were read at, as one consistent snapshot.
+    pub(crate) fn get_with_revisions(&self) -> (AppSettings, u64, u64) {
         self.settings
             .read()
             .map(|settings| {

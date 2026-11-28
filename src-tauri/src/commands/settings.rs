@@ -53,7 +53,8 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
         let notifications = app.state::<Arc<NotificationEvaluator>>().inner().clone();
 
         for _ in 0..3 {
-            let current = settings_service.get();
+            let (current, settings_revision, account_revision) =
+                settings_service.get_with_revisions();
             let mut next = current.clone();
             match &setting {
                 TraySetting::MenuBarStyle(value) => next.menu_bar_style = *value,
@@ -97,8 +98,8 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
                 settings_service.clone(),
                 notifications.clone(),
                 next,
-                settings_service.settings_revision(),
-                settings_service.account_revision(),
+                settings_revision,
+                account_revision,
                 SettingsSaveMode::Normal,
             )
             .await
