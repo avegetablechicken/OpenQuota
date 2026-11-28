@@ -332,6 +332,9 @@ fn editor_oauth_token(text: &str) -> Option<String> {
 fn yaml_value(text: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     let mut in_github = false;
+    // Only the host block's direct children count: gh's multi-account format also writes a
+    // token for every account nested under `users:`.
+    let mut child_indent = None;
     for line in text.lines() {
         if line
             .chars()
@@ -339,12 +342,20 @@ fn yaml_value(text: &str, key: &str) -> Option<String> {
             .is_some_and(|character| !character.is_whitespace())
         {
             in_github = line.trim() == "github.com:";
+            child_indent = None;
             continue;
         }
         if !in_github {
             continue;
         }
         let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if *child_indent.get_or_insert(indent) != indent {
+            continue;
+        }
         let Some(raw) = trimmed.strip_prefix(&prefix) else {
             continue;
         };
@@ -638,6 +649,16 @@ github.com:
 "#;
         assert_eq!(yaml_value(text, "oauth_token").as_deref(), Some("dotcom"));
         assert_eq!(yaml_value(text, "user").as_deref(), Some("octocat"));
+    }
+
+    #[test]
+    fn yaml_parser_takes_the_active_token_over_nested_account_tokens() {
+        let text = "github.com:\n    users:\n        alice:\n            oauth_token: gho_A\n        bob:\n            oauth_token: gho_B\n    oauth_token: gho_B\n    user: bob\n";
+        assert_eq!(yaml_value(text, "oauth_token").as_deref(), Some("gho_B"));
+        assert_eq!(yaml_value(text, "user").as_deref(), Some("bob"));
+
+        let nested_only = "github.com:\n    users:\n        alice:\n            oauth_token: gho_A\n    user: alice\n";
+        assert_eq!(yaml_value(nested_only, "oauth_token"), None);
     }
 
     #[test]
