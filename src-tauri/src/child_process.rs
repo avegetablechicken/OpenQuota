@@ -1,6 +1,7 @@
 use std::{
     io::{self, Read, Write},
     process::{Command, Output, Stdio},
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
 };
@@ -41,7 +42,7 @@ pub fn output_with_input_and_timeout(
     let stdin_writer = match (input, child.stdin.take()) {
         (Some(input), Some(mut stdin)) => {
             let input = zeroize::Zeroizing::new(input.to_vec());
-            Some(thread::spawn(move || {
+            Some(spawn_worker(move || {
                 stdin.write_all(&input)?;
                 stdin.flush()
             }))
@@ -56,12 +57,15 @@ pub fn output_with_input_and_timeout(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("child stderr was not captured"))?;
-    let stdout_reader = thread::spawn(move || read_all(stdout));
-    let stderr_reader = thread::spawn(move || read_all(stderr));
+    let stdout_reader = spawn_worker(move || read_all(stdout));
+    let stderr_reader = spawn_worker(move || read_all(stderr));
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "child timeout is too large"))?;
 
+    // The pipe workers are never joined unconditionally: a grandchild that
+    // inherited stdin/stdout/stderr keeps them blocked after the child exits,
+    // so they are awaited only until the deadline and otherwise left detached.
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -75,30 +79,31 @@ pub fn output_with_input_and_timeout(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = join_writer(stdin_writer);
-                let _ = join_reader(stdout_reader);
-                let _ = join_reader(stderr_reader);
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "background command timed out",
-                ));
+                return Err(timed_out());
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = join_writer(stdin_writer);
-                let _ = join_reader(stdout_reader);
-                let _ = join_reader(stderr_reader);
                 return Err(error);
             }
         }
     };
 
-    let written = join_writer(stdin_writer);
+    let written = stdin_writer.map_or(Ok(()), |writer| {
+        receive_by(&writer, deadline, "background input writer panicked")?
+    });
     let output = Output {
         status,
-        stdout: join_reader(stdout_reader)?,
-        stderr: join_reader(stderr_reader)?,
+        stdout: receive_by(
+            &stdout_reader,
+            deadline,
+            "background output reader panicked",
+        )??,
+        stderr: receive_by(
+            &stderr_reader,
+            deadline,
+            "background output reader panicked",
+        )??,
     };
     match written {
         Ok(()) => Ok(output),
@@ -109,24 +114,30 @@ pub fn output_with_input_and_timeout(
     }
 }
 
-fn join_writer(writer: Option<thread::JoinHandle<io::Result<()>>>) -> io::Result<()> {
-    writer.map_or(Ok(()), |writer| {
-        writer
-            .join()
-            .map_err(|_| io::Error::other("background input writer panicked"))?
-    })
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "background command timed out")
+}
+
+fn spawn_worker<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    receiver
+}
+
+fn receive_by<T>(receiver: &Receiver<T>, deadline: Instant, panicked: &str) -> io::Result<T> {
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(value) => Ok(value),
+        Err(RecvTimeoutError::Timeout) => Err(timed_out()),
+        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other(panicked.to_owned())),
+    }
 }
 
 fn read_all(mut reader: impl Read) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
     Ok(bytes)
-}
-
-fn join_reader(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
-    reader
-        .join()
-        .map_err(|_| io::Error::other("background output reader panicked"))?
 }
 
 #[cfg(target_os = "windows")]
@@ -200,6 +211,21 @@ mod unix_tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn deadline_holds_when_a_grandchild_keeps_the_output_pipes_open() {
+        for script in ["sleep 5 & sleep 5", "sleep 5 & echo done"] {
+            let started = Instant::now();
+            let error = output_with_timeout(
+                background_command("sh").args(["-c", script]),
+                Duration::from_millis(300),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{script}");
+            assert!(started.elapsed() < Duration::from_secs(2), "{script}");
+        }
     }
 
     #[test]
