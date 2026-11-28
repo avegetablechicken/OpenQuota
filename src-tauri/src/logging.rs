@@ -478,7 +478,8 @@ fn unix_path_regex() -> &'static Regex {
 
 fn windows_path_regex() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| Regex::new(r#"(?i)[A-Z]:(?:\\|/)[^\s"')]+"#).unwrap())
+    // The drive letter must start a word, so a URL scheme ("https://") is not a drive.
+    VALUE.get_or_init(|| Regex::new(r#"(?i)\b[A-Z]:(?:\\|/)[^\s"')]+"#).unwrap())
 }
 
 fn url_authority_regex() -> &'static Regex {
@@ -605,6 +606,18 @@ mod tests {
         assert!(!redacted.contains(r"C:\Users\someone"));
         assert!(!redacted.contains("sk-1234567890abcdef"));
         assert!(redacted.contains("[PATH]"));
+    }
+
+    #[test]
+    fn windows_path_redaction_leaves_urls_intact() {
+        assert_eq!(
+            redact_log_message("request to https://api.example.com/v1 failed"),
+            "request to https://api.example.com/v1 failed"
+        );
+        assert_eq!(
+            redact_log_message(r"open file:///C:/data/x and (D:\data)"),
+            "open file:///[PATH] and ([PATH])"
+        );
     }
 
     #[test]
