@@ -47,15 +47,13 @@ export class SettingsController {
 
   setState(state: SettingsViewState) {
     if (this.state && !doesNotPrecede(state, this.state)) return;
-    this.state = state;
+    this.#show(state);
     if (this.#pendingMutations === 0) this.#recordServerState(state);
   }
 
   acceptExternalState(state: SettingsViewState) {
     if (this.#draftActive) {
-      if (!this.#draftExternalState || doesNotPrecede(state, this.#draftExternalState)) {
-        this.#draftExternalState = state;
-      }
+      this.#deferUntilDraftEnds(state);
       return;
     }
     if (this.#pendingMutations === 0) this.setState(state);
@@ -72,7 +70,10 @@ export class SettingsController {
     const sequence = this.#mutationSequence;
     try {
       const state = await getAppSettings();
-      if (this.#pendingMutations === 0 && sequence === this.#mutationSequence) {
+      if (this.#draftActive) {
+        // A drag began while this read was in flight; its draft stays on screen.
+        this.#deferUntilDraftEnds(state);
+      } else if (this.#pendingMutations === 0 && sequence === this.#mutationSequence) {
         this.setState(state);
       } else {
         this.#externalRefreshPending = true;
@@ -128,7 +129,7 @@ export class SettingsController {
       try {
         const saved = await mutation(base.settingsRevision, base.accountRevision);
         if (this.#recordServerState(saved) && sequence === this.#mutationSequence) {
-          if (!this.state || doesNotPrecede(saved, this.state)) this.state = saved;
+          if (!this.state || doesNotPrecede(saved, this.state)) this.#show(saved);
         }
       } catch (error) {
         if (error instanceof CancelledSettingsMutation) throw error;
@@ -161,6 +162,18 @@ export class SettingsController {
     return completed;
   }
 
+  /** Shows a server response, or holds it while a drag draft is on screen. */
+  #show(state: SettingsViewState) {
+    if (this.#draftActive) this.#deferUntilDraftEnds(state);
+    else this.state = state;
+  }
+
+  #deferUntilDraftEnds(state: SettingsViewState) {
+    if (!this.#draftExternalState || doesNotPrecede(state, this.#draftExternalState)) {
+      this.#draftExternalState = state;
+    }
+  }
+
   #recordServerState(state: SettingsViewState) {
     if (this.#serverState && !doesNotPrecede(state, this.#serverState)) return false;
     this.#serverState = state;
@@ -175,7 +188,7 @@ export class SettingsController {
         latestAtFailure === this.#mutationSequence &&
         (!this.state || doesNotPrecede(state, this.state))
       ) {
-        this.state = state;
+        this.#show(state);
       }
     } catch {
       this.onError('Settings could not be saved or reloaded.');

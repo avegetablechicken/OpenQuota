@@ -207,6 +207,95 @@ describe('SettingsController', () => {
     expect(controller.state?.settingsRevision).toBe(1);
   });
 
+  it('keeps a drag draft on screen when a save from before the drag answers', async () => {
+    let finishSave: ((state: SettingsViewState) => void) | undefined;
+    mocks.saveAppSettings.mockImplementation(
+      () => new Promise<SettingsViewState>((resolve) => (finishSave = resolve)),
+    );
+    const controller = new SettingsController(vi.fn());
+    controller.setState(settingsView());
+    const save = controller.save(settingsView('light').settings);
+    await vi.waitFor(() => expect(mocks.saveAppSettings).toHaveBeenCalledTimes(1));
+
+    controller.beginDraft();
+    controller.setDraftSettings(settingsView('dark').settings);
+    finishSave?.(settingsView('light', 1));
+    await save;
+    expect(controller.state?.settings.theme).toBe('dark');
+
+    // A gesture that ends without a change shows the saved state it held back.
+    controller.endDraft();
+    expect(controller.state?.settings.theme).toBe('light');
+    expect(controller.state?.settingsRevision).toBe(1);
+  });
+
+  it('keeps a drag draft on screen when a refresh from before the drag answers', async () => {
+    let finishRead: ((state: SettingsViewState) => void) | undefined;
+    mocks.getAppSettings.mockImplementation(
+      () => new Promise<SettingsViewState>((resolve) => (finishRead = resolve)),
+    );
+    const controller = new SettingsController(vi.fn());
+    controller.setState(settingsView());
+    const refresh = controller.refreshIfIdle();
+
+    controller.beginDraft();
+    controller.setDraftSettings(settingsView('dark').settings);
+    finishRead?.(settingsView('light', 1));
+    await refresh;
+    expect(controller.state?.settings.theme).toBe('dark');
+
+    controller.endDraft();
+    expect(controller.state?.settings.theme).toBe('light');
+  });
+
+  it('defers external state queued before a drag when the save queue drains', async () => {
+    let finishSave: ((state: SettingsViewState) => void) | undefined;
+    mocks.saveAppSettings.mockImplementation(
+      () => new Promise<SettingsViewState>((resolve) => (finishSave = resolve)),
+    );
+    const controller = new SettingsController(vi.fn());
+    controller.setState(settingsView());
+    const save = controller.save(settingsView('light').settings);
+    await vi.waitFor(() => expect(mocks.saveAppSettings).toHaveBeenCalledTimes(1));
+    controller.acceptExternalState(settingsView('system', 2, 1));
+
+    controller.beginDraft();
+    controller.setDraftSettings(settingsView('dark').settings);
+    finishSave?.(settingsView('light', 1));
+    await save;
+    expect(controller.state?.settings.theme).toBe('dark');
+    expect(mocks.getAppSettings).not.toHaveBeenCalled();
+
+    controller.endDraft();
+    expect(controller.state?.settings.theme).toBe('system');
+    expect(controller.state?.settingsRevision).toBe(2);
+    expect(controller.state?.accountRevision).toBe(1);
+  });
+
+  it('defers a failed save reload until the drag ends', async () => {
+    let rejectSave: ((error: string) => void) | undefined;
+    mocks.saveAppSettings.mockImplementation(
+      () => new Promise<SettingsViewState>((_, reject) => (rejectSave = reject)),
+    );
+    mocks.getAppSettings.mockResolvedValue(settingsView('light', 1));
+    const onError = vi.fn();
+    const controller = new SettingsController(onError);
+    controller.setState(settingsView());
+    const save = controller.save(settingsView('light').settings);
+    await vi.waitFor(() => expect(mocks.saveAppSettings).toHaveBeenCalledTimes(1));
+
+    controller.beginDraft();
+    controller.setDraftSettings(settingsView('dark').settings);
+    rejectSave?.('Save failed');
+    await save;
+    expect(controller.state?.settings.theme).toBe('dark');
+    expect(onError).toHaveBeenCalledWith('Save failed');
+
+    controller.endDraft();
+    expect(controller.state?.settings.theme).toBe('light');
+    expect(controller.state?.settingsRevision).toBe(1);
+  });
+
   it('uses the same queue and revisions for non-save mutations', async () => {
     let finishSave: ((state: SettingsViewState) => void) | undefined;
     mocks.saveAppSettings.mockImplementation(
