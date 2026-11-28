@@ -60,8 +60,9 @@ function skipQuotedString(source, pos) {
 }
 
 function matchRawStringEnd(source, pos) {
+  if (pos > 0 && /[A-Za-z0-9_]/.test(source[pos - 1])) return -1;
   let cursor = pos;
-  if (source[cursor] === 'b') cursor++;
+  if (source[cursor] === 'b' || source[cursor] === 'c') cursor++;
   if (source[cursor] !== 'r') return -1;
   cursor++;
   let hashes = 0;
@@ -74,6 +75,36 @@ function matchRawStringEnd(source, pos) {
   const closing = `"${'#'.repeat(hashes)}`;
   const found = source.indexOf(closing, cursor);
   return found === -1 ? source.length : found + closing.length;
+}
+
+function matchCharLiteralEnd(source, pos) {
+  let cursor = pos;
+  if (source[cursor] === 'b') {
+    if ((pos > 0 && /[A-Za-z0-9_]/.test(source[pos - 1])) || source[cursor + 1] !== "'") {
+      return -1;
+    }
+    cursor++;
+  }
+  if (source[cursor] !== "'") return -1;
+  cursor++;
+  if (cursor >= source.length) return -1;
+  if (source[cursor] === '\\') {
+    cursor += 2;
+    while (cursor < source.length && source[cursor] !== "'" && source[cursor] !== '\n') cursor++;
+    return cursor < source.length && source[cursor] === "'" ? cursor + 1 : -1;
+  }
+  if (source[cursor] === "'" || source[cursor] === '\n' || source[cursor] === '\r') return -1;
+  cursor += source.codePointAt(cursor) > 0xffff ? 2 : 1;
+  return cursor < source.length && source[cursor] === "'" ? cursor + 1 : -1;
+}
+
+function matchCommentOrLiteralEnd(source, pos) {
+  if (source[pos] === '/' && source[pos + 1] === '/') return skipLineComment(source, pos);
+  if (source[pos] === '/' && source[pos + 1] === '*') return skipBlockComment(source, pos);
+  const rawEnd = matchRawStringEnd(source, pos);
+  if (rawEnd !== -1) return rawEnd;
+  if (source[pos] === '"') return skipQuotedString(source, pos);
+  return matchCharLiteralEnd(source, pos);
 }
 
 function skipWhitespaceCommentsAndAttrs(source, pos) {
@@ -94,15 +125,16 @@ function skipWhitespaceCommentsAndAttrs(source, pos) {
       let depth = 0;
       pos++;
       while (pos < source.length) {
-        if (source[pos] === '[') {
+        const skipped = matchCommentOrLiteralEnd(source, pos);
+        if (skipped !== -1) {
+          pos = skipped;
+        } else if (source[pos] === '[') {
           depth++;
           pos++;
         } else if (source[pos] === ']') {
           depth--;
           pos++;
           if (depth === 0) break;
-        } else if (source[pos] === '"') {
-          pos = skipQuotedString(source, pos);
         } else {
           pos++;
         }
@@ -120,34 +152,10 @@ function skipRustItem(source, pos) {
   let parenDepth = 0;
   let bracketDepth = 0;
   while (pos < source.length) {
-    if (source[pos] === '/' && source[pos + 1] === '/') {
-      pos = skipLineComment(source, pos);
+    const skipped = matchCommentOrLiteralEnd(source, pos);
+    if (skipped !== -1) {
+      pos = skipped;
       continue;
-    }
-    if (source[pos] === '/' && source[pos + 1] === '*') {
-      pos = skipBlockComment(source, pos);
-      continue;
-    }
-    const rawEnd = matchRawStringEnd(source, pos);
-    if (rawEnd !== -1) {
-      pos = rawEnd;
-      continue;
-    }
-    if (source[pos] === '"') {
-      pos = skipQuotedString(source, pos);
-      continue;
-    }
-    if (source[pos] === "'") {
-      if (source[pos + 1] === '\\') {
-        pos += 2;
-        while (pos < source.length && source[pos] !== "'") pos++;
-        if (pos < source.length) pos++;
-        continue;
-      }
-      if (pos + 2 < source.length && source[pos + 2] === "'") {
-        pos += 3;
-        continue;
-      }
     }
     const ch = source[pos++];
     if (ch === '(') parenDepth++;
@@ -169,28 +177,10 @@ function stripCfgTestItems(source) {
   let out = '';
   let pos = 0;
   while (pos < source.length) {
-    if (source[pos] === '/' && source[pos + 1] === '/') {
-      const end = skipLineComment(source, pos);
-      out += source.slice(pos, end);
-      pos = end;
-      continue;
-    }
-    if (source[pos] === '/' && source[pos + 1] === '*') {
-      const end = skipBlockComment(source, pos);
-      out += source.slice(pos, end);
-      pos = end;
-      continue;
-    }
-    const rawEnd = matchRawStringEnd(source, pos);
-    if (rawEnd !== -1) {
-      out += source.slice(pos, rawEnd);
-      pos = rawEnd;
-      continue;
-    }
-    if (source[pos] === '"') {
-      const end = skipQuotedString(source, pos);
-      out += source.slice(pos, end);
-      pos = end;
+    const skipped = matchCommentOrLiteralEnd(source, pos);
+    if (skipped !== -1) {
+      out += source.slice(pos, skipped);
+      pos = skipped;
       continue;
     }
     if (source[pos] === '#' && source[pos + 1] === '[') {
