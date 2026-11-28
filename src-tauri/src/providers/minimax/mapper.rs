@@ -30,11 +30,26 @@ pub fn api_error_message(body: &Value) -> Option<String> {
     }
 }
 
+/// MiniMax `base_resp` codes for an authentication failure or an invalid key.
+const AUTH_FAILURE_CODES: [f64; 2] = [1004.0, 2049.0];
+/// MiniMax `base_resp` codes for request-rate and token-rate limits.
+const RATE_LIMIT_CODES: [f64; 2] = [1002.0, 1039.0];
+
 pub fn map_usage(body: &Value) -> Result<MiniMaxMappedUsage, MiniMaxError> {
     if let Some(message) = api_error_message(body) {
         let normalized = message.to_ascii_lowercase();
         if normalized.contains("no token plan") {
             return Err(MiniMaxError::NoTokenPlan);
+        }
+        let code = number(
+            body.get("base_resp")
+                .and_then(|base| base.get("status_code")),
+        );
+        if code.is_some_and(|code| AUTH_FAILURE_CODES.contains(&code)) {
+            return Err(MiniMaxError::InvalidKey);
+        }
+        if code.is_some_and(|code| RATE_LIMIT_CODES.contains(&code)) {
+            return Err(MiniMaxError::RequestFailed(429));
         }
         return Err(MiniMaxError::InvalidResponse);
     }
@@ -316,5 +331,21 @@ mod tests {
             Err(MiniMaxError::InvalidResponse)
         ));
         assert!(map_usage(&json!({"base_resp":{"status_code":0}})).is_err());
+    }
+
+    #[test]
+    fn api_error_codes_classify_invalid_keys_and_rate_limits() {
+        for code in [1004, 2049] {
+            assert_eq!(
+                map_usage(&json!({"base_resp":{"status_code":code,"status_msg":"login fail"}})),
+                Err(MiniMaxError::InvalidKey)
+            );
+        }
+        for code in [1002, 1039] {
+            assert_eq!(
+                map_usage(&json!({"base_resp":{"status_code":code,"status_msg":"rate limit"}})),
+                Err(MiniMaxError::RequestFailed(429))
+            );
+        }
     }
 }
