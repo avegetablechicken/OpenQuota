@@ -1,3 +1,4 @@
+mod local_usage;
 mod snapshot;
 
 use std::{
@@ -98,23 +99,39 @@ impl ProviderService {
         let mut refresh_flights = HashMap::new();
         for definition in &registry.catalog().providers {
             let id = definition.id.clone();
-            let state = match storage.load_snapshot_for_identity(&id, registry.cache_identity(&id))
+            let mut state =
+                match storage.load_snapshot_for_identity(&id, registry.cache_identity(&id)) {
+                    Ok(Some(mut snapshot)) => {
+                        crate::app_debug!("cache", "loaded cached snapshot for {id}");
+                        crate::providers::sub2api::restore_subscription_windows(&mut snapshot);
+                        normalize_quota_availability(definition, &mut snapshot);
+                        ProviderViewState::from_cache(snapshot)
+                    }
+                    Ok(None) => ProviderViewState::default(),
+                    Err(error) => {
+                        crate::app_warn!(
+                            "cache",
+                            "cached snapshot for {id} could not be loaded: {error}"
+                        );
+                        ProviderViewState::default()
+                    }
+                };
+            if registry
+                .runtime(&id)
+                .is_some_and(|provider| provider.supports_local_usage())
             {
-                Ok(Some(mut snapshot)) => {
-                    crate::app_debug!("cache", "loaded cached snapshot for {id}");
-                    crate::providers::sub2api::restore_subscription_windows(&mut snapshot);
-                    normalize_quota_availability(definition, &mut snapshot);
-                    ProviderViewState::from_cache(snapshot)
-                }
-                Ok(None) => ProviderViewState::default(),
-                Err(error) => {
-                    crate::app_warn!(
+                match storage.load_local_usage(&id) {
+                    Ok(Some(local)) => {
+                        local_usage::merge_local(&mut state, &id, local);
+                        state.source = SnapshotSource::Cache;
+                    }
+                    Ok(None) => {}
+                    Err(error) => crate::app_warn!(
                         "cache",
-                        "cached snapshot for {id} could not be loaded: {error}"
-                    );
-                    ProviderViewState::default()
+                        "cached local usage for {id} could not be loaded: {error}"
+                    ),
                 }
-            };
+            }
             states.insert(id.clone(), state);
             refresh_flights.insert(id, Arc::new(RefreshFlight::new()));
         }
@@ -135,7 +152,7 @@ impl ProviderService {
         }
     }
 
-    /// Changes whenever a refresh publishes an early quota preview, before the refresh ends.
+    /// Changes whenever local history or quota data is published before the whole refresh ends.
     pub fn subscribe_previews(&self) -> tokio::sync::watch::Receiver<u64> {
         self.preview_revision.subscribe()
     }
@@ -311,6 +328,11 @@ impl ProviderService {
                     flight_state.data_revision,
                 )
             };
+            let mut local_worker = provider.supports_local_usage().then(|| {
+                let local_provider = provider.clone();
+                tauri::async_runtime::spawn_blocking(move || local_provider.refresh_local_usage())
+            });
+            let mut local_finished = local_worker.is_none();
             let worker_provider = provider.clone();
             // Unofficial providers relay through servers whose latency is unknown, so their
             // fast quota data is shown as soon as it arrives instead of waiting for history.
@@ -329,16 +351,30 @@ impl ProviderService {
             let deadline = tokio::time::sleep(self.refresh_timeout);
             tokio::pin!(deadline);
             let mut timed_out = false;
+            let mut online_result = None;
+            let mut online_finished = false;
             let refresh_result = loop {
+                if local_finished && online_result.is_some() {
+                    break online_result.take().unwrap();
+                }
                 tokio::select! {
-                    result = &mut worker => break match result {
-                        Ok(result) => result,
-                        Err(_) => {
-                            crate::app_error!(&tag, "refresh worker stopped unexpectedly");
-                            Err(ProviderError::new(
-                                ProviderErrorKind::Internal,
-                                "Provider refresh stopped unexpectedly.",
-                            ))
+                    result = &mut worker, if online_result.is_none() => {
+                        online_finished = true;
+                        online_result = Some(match result {
+                            Ok(result) => result,
+                            Err(_) => Err(ProviderError::new(ProviderErrorKind::Internal, "Provider refresh stopped unexpectedly.")),
+                        });
+                    },
+                    result = async { local_worker.as_mut().expect("local capability checked").await }, if !local_finished => {
+                        local_finished = true;
+                        let result = result.unwrap_or_else(|_| Some(Err(ProviderError::new(
+                            ProviderErrorKind::LocalData, "Local usage refresh stopped unexpectedly.",
+                        ))));
+                        let flight_state = flight.state.lock().unwrap_or_else(|error| error.into_inner());
+                        if flight_state.data_revision == data_revision {
+                            if let Some(result) = result {
+                                self.apply_local_usage_result(&provider_id, result);
+                            }
                         }
                     },
                     Some(preview) = preview_rx.recv() => {
@@ -354,16 +390,28 @@ impl ProviderService {
                             self.refresh_timeout.as_millis()
                         );
                         timed_out = true;
-                        break Err(ProviderError::new(
-                            ProviderErrorKind::Network,
-                            "Provider refresh timed out.",
-                        ));
+                        if !local_finished {
+                            let flight_state = flight.state.lock().unwrap_or_else(|error| error.into_inner());
+                            if flight_state.data_revision == data_revision {
+                                self.apply_local_usage_result(&provider_id, Err(ProviderError::new(
+                                    ProviderErrorKind::LocalData, "Local usage refresh timed out.",
+                                )));
+                            }
+                        }
+                        break online_result.take().unwrap_or_else(|| Err(ProviderError::new(
+                            ProviderErrorKind::Network, "Provider refresh timed out.",
+                        )));
                     }
                 }
             };
             // Dropping the receiver discards previews from a worker that outlived its deadline.
             drop(preview_rx);
-            let late_worker = timed_out.then_some(worker);
+            let late_worker = (timed_out && !online_finished).then_some(worker);
+            let late_local_worker = if timed_out && !local_finished {
+                local_worker
+            } else {
+                None
+            };
             let refresh_result = refresh_result.and_then(|refresh| {
                 validate_snapshot(&self.registry, &provider_id, refresh.snapshot.clone())?;
                 Ok(refresh)
@@ -399,7 +447,7 @@ impl ProviderService {
                 }
             }
 
-            let run_follow_up = if let Some(worker) = late_worker {
+            let run_follow_up = if late_worker.is_some() || late_local_worker.is_some() {
                 let completed_generation = if let Ok(mut flight_state) = flight.state.lock() {
                     let completed = flight_state.requested_generation.max(generation);
                     flight_state.completed_generation = completed;
@@ -410,16 +458,16 @@ impl ProviderService {
                 };
                 flight.completed_tx.send_replace(completed_generation);
 
-                match worker.await {
-                    Ok(_) => crate::app_debug!(
-                        &tag,
-                        "timed-out refresh worker finished; discarded late result"
-                    ),
-                    Err(_) => crate::app_debug!(
-                        &tag,
-                        "timed-out refresh worker stopped; discarded late failure"
-                    ),
+                if let Some(worker) = late_worker {
+                    let _ = worker.await;
                 }
+                if let Some(worker) = late_local_worker {
+                    let _ = worker.await;
+                }
+                crate::app_debug!(
+                    &tag,
+                    "timed-out refresh workers drained; discarded late results"
+                );
 
                 if let Ok(mut flight_state) = flight.state.lock() {
                     flight_state.runner_active = false;
@@ -543,7 +591,23 @@ impl ProviderService {
         provider_id: &str,
         result: Result<ProviderRefresh, ProviderError>,
     ) -> ProviderViewState {
+        let result = result.and_then(|refresh| {
+            if refresh.snapshot.refreshed_at == chrono::DateTime::UNIX_EPOCH {
+                if let Some(error) = self
+                    .provider_state(provider_id)
+                    .snapshot
+                    .and_then(|snapshot| snapshot.usage_histories.local_device_status)
+                    .and_then(|status| status.error)
+                {
+                    return Err(ProviderError::new(ProviderErrorKind::LocalData, error));
+                }
+            }
+            Ok(refresh)
+        });
         let result = result.map(|mut refresh| {
+            if let Some(previous) = self.provider_state(provider_id).snapshot {
+                local_usage::carry_local(&previous, &mut refresh.snapshot);
+            }
             if let Some(definition) = self.registry.definition(provider_id) {
                 normalize_quota_availability(definition, &mut refresh.snapshot);
             }
@@ -620,6 +684,9 @@ impl ProviderService {
             .load_snapshot_for_identity(provider_id, identity)
         {
             carry_usage_histories(&previous, &mut snapshot);
+        }
+        if let Some(previous) = self.provider_state(provider_id).snapshot {
+            local_usage::carry_local(&previous, &mut snapshot);
         }
         if let Some(definition) = self.registry.definition(provider_id) {
             normalize_quota_availability(definition, &mut snapshot);

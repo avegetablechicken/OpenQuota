@@ -20,7 +20,6 @@ use crate::{
         UsagePeriodSelection,
     },
     pricing::PricingStore,
-    providers::local_usage::log_usage::scan_or_cached_usage,
     storage::Storage,
 };
 
@@ -172,19 +171,8 @@ impl AntigravityProvider {
 
     fn refresh_inner(&self) -> Result<ProviderSnapshot, AntigravityError> {
         let mut snapshot = self.refresh_quota()?;
-        let mut warnings = Vec::new();
-        let pricing = self.pricing.current();
         let now = Utc::now();
-        let usage = scan_or_cached_usage(
-            &self.storage,
-            "antigravity",
-            crate::providers::CacheIdentity::Unscoped,
-            "Antigravity",
-            || scan_local_usage(&self.storage, now, &pricing),
-            &mut warnings,
-        );
-        snapshot.usage_histories = UsageHistories::local_device(usage);
-        snapshot.warnings.extend(warnings);
+        snapshot.usage_histories = UsageHistories::default();
         snapshot.refreshed_at = now;
         Ok(snapshot)
     }
@@ -536,6 +524,23 @@ fn has_refresh_source(
 impl crate::providers::UsageProvider for AntigravityProvider {
     fn definition(&self) -> ProviderDefinition {
         definition()
+    }
+
+    fn supports_local_usage(&self) -> bool {
+        true
+    }
+
+    fn refresh_local_usage(
+        &self,
+    ) -> Option<Result<crate::providers::ScannedUsage, crate::providers::ProviderError>> {
+        Some(
+            scan_local_usage(&self.storage, Utc::now(), &self.pricing.current()).map_err(|error| {
+                crate::providers::ProviderError::from_display(
+                    crate::models::ProviderErrorKind::LocalData,
+                    error,
+                )
+            }),
+        )
     }
 
     fn has_local_credentials(&self) -> bool {

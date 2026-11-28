@@ -196,7 +196,8 @@ fn snapshot_usage_changed(previous: &ProviderSnapshot, current: &ProviderSnapsho
             .any(|(previous, current)| quota_usage_changed(previous, current))
         || previous.value_metrics != current.value_metrics
         || previous.status_metrics != current.status_metrics
-        || previous.usage_histories != current.usage_histories
+        || previous.usage_histories.local_device != current.usage_histories.local_device
+        || previous.usage_histories.account != current.usage_histories.account
         || match (&previous.accounts, &current.accounts) {
             (None, None) => false,
             (Some(previous), Some(current)) => {
@@ -282,6 +283,17 @@ pub(super) fn merge_refresh_result(
 
 pub(super) fn update_staleness_from_snapshot_age(state: &mut ProviderViewState) {
     state.stale = state.snapshot.as_ref().is_some_and(|snapshot| {
-        Utc::now().signed_duration_since(snapshot.refreshed_at) >= STALE_AFTER
+        let refreshed_at = if snapshot.refreshed_at == chrono::DateTime::UNIX_EPOCH {
+            snapshot
+                .usage_histories
+                .local_device_status
+                .as_ref()
+                .and_then(|status| status.refreshed_at)
+        } else {
+            Some(snapshot.refreshed_at)
+        };
+        refreshed_at
+            .filter(|at| *at != chrono::DateTime::UNIX_EPOCH)
+            .is_some_and(|at| Utc::now().signed_duration_since(at) >= STALE_AFTER)
     });
 }

@@ -20,6 +20,7 @@ pub mod test_http;
 pub mod zai;
 
 pub use detection::{detect_local_credentials, CredentialProbeResults, CredentialProbeStatus};
+pub use local_usage::log_usage::ScannedUsage;
 pub use registry::ProviderRegistry;
 
 use crate::models::{ApiKeyStatus, ProviderDefinition, ProviderErrorKind, ProviderSnapshot};
@@ -108,6 +109,17 @@ pub trait UsageProvider: Send + Sync {
     fn definition(&self) -> ProviderDefinition;
     fn has_local_credentials(&self) -> bool;
     fn refresh(&self) -> Result<ProviderSnapshot, ProviderError>;
+
+    /// Runtime capability, independent of UI source-note text.
+    fn supports_local_usage(&self) -> bool {
+        false
+    }
+
+    /// Local-device history is independent of credentials and online quota requests.
+    /// Providers declaring supports_local_usage must return Some; the default is never scheduled.
+    fn refresh_local_usage(&self) -> Option<Result<ScannedUsage, ProviderError>> {
+        None
+    }
 
     fn display_name(&self) -> String {
         self.definition().display_name

@@ -130,7 +130,6 @@ use self::{
     local_usage::scan_local_usage,
     mapper::{map_usage_at, retain_known_resets},
 };
-use crate::providers::local_usage::log_usage::scan_or_cached_usage;
 
 #[derive(Debug, Error)]
 pub enum ClaudeError {
@@ -295,7 +294,6 @@ impl ClaudeProvider {
             candidates.len()
         );
         let now = Utc::now();
-        let pricing = self.pricing.current();
         // The generation describes the saved logins, so it is taken before unsaved renewals
         // replace them.
         let mut credential_generation = ClaudeCredentialGeneration::from_candidates(&candidates);
@@ -307,7 +305,6 @@ impl ClaudeProvider {
                 &mut credential,
                 config,
                 now,
-                &pricing,
                 &mut credential_generation,
                 identity,
             ) {
@@ -335,21 +332,10 @@ impl ClaudeProvider {
         credential: &mut ClaudeCredential,
         config: &auth::ClaudeOAuthConfig,
         now: chrono::DateTime<Utc>,
-        pricing: &ModelPricing,
         credential_generation: &mut ClaudeCredentialGeneration,
         identity: Option<&str>,
     ) -> Result<ProviderSnapshot, ClaudeError> {
         let mut warnings = Vec::new();
-        let usage = scan_or_cached_usage(
-            &self.storage,
-            self.provider_id(),
-            identity
-                .map(crate::providers::CacheIdentity::Resolved)
-                .unwrap_or(crate::providers::CacheIdentity::Unresolved),
-            "Claude",
-            || (self.local_usage_scan)(&self.storage, now, pricing),
-            &mut warnings,
-        );
 
         if credential.inference_only {
             return Ok(ProviderSnapshot {
@@ -361,7 +347,7 @@ impl ClaudeProvider {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: Vec::new(),
-                usage_histories: UsageHistories::local_device(usage),
+                usage_histories: UsageHistories::default(),
                 warnings,
                 refreshed_at: now,
             });
@@ -380,7 +366,7 @@ impl ClaudeProvider {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: Vec::new(),
-                usage_histories: UsageHistories::local_device(usage),
+                usage_histories: UsageHistories::default(),
                 warnings,
                 refreshed_at: now,
             });
@@ -410,12 +396,11 @@ impl ClaudeProvider {
         if let Some(until) = cooldown_until {
             let retry = until.signed_duration_since(now).num_seconds().max(0) as u64;
             if let Some(mut snapshot) = self.last_good.lock().ok().and_then(|value| value.clone()) {
-                snapshot.usage_histories = UsageHistories::local_device(usage);
+                snapshot.usage_histories = UsageHistories::default();
                 snapshot.warnings.push(
                     "Claude live usage is rate limited; showing the last successful limits.".into(),
                 );
                 snapshot.notices = vec![rate_limit_notice(retry, true)];
-                snapshot.refreshed_at = now;
                 return Ok(snapshot);
             }
             warnings.push(format!(
@@ -431,7 +416,7 @@ impl ClaudeProvider {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: vec![rate_limit_notice(retry, false)],
-                usage_histories: UsageHistories::local_device(usage),
+                usage_histories: UsageHistories::default(),
                 warnings,
                 refreshed_at: now,
             });
@@ -465,13 +450,12 @@ impl ClaudeProvider {
                 *until = Some(now + Duration::seconds(retry as i64));
             }
             if let Some(mut snapshot) = self.last_good.lock().ok().and_then(|value| value.clone()) {
-                snapshot.usage_histories = UsageHistories::local_device(usage);
+                snapshot.usage_histories = UsageHistories::default();
                 snapshot.warnings.push(format!(
                     "Claude live usage is rate limited; retrying in about {}.",
                     retry_minutes(retry)
                 ));
                 snapshot.notices = vec![rate_limit_notice(retry, true)];
-                snapshot.refreshed_at = now;
                 return Ok(snapshot);
             }
             warnings.push(format!(
@@ -487,7 +471,7 @@ impl ClaudeProvider {
                 value_metrics: Vec::new(),
                 status_metrics: Vec::new(),
                 notices: vec![rate_limit_notice(retry, false)],
-                usage_histories: UsageHistories::local_device(usage),
+                usage_histories: UsageHistories::default(),
                 warnings,
                 refreshed_at: now,
             });
@@ -535,7 +519,7 @@ impl ClaudeProvider {
             value_metrics: mapped.value_metrics,
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage_histories: UsageHistories::local_device(usage),
+            usage_histories: UsageHistories::default(),
             warnings,
             refreshed_at: now,
         };
@@ -729,6 +713,19 @@ fn provider_error(error: ClaudeError) -> crate::providers::ProviderError {
 impl crate::providers::UsageProvider for ClaudeProvider {
     fn definition(&self) -> ProviderDefinition {
         definition()
+    }
+
+    fn supports_local_usage(&self) -> bool {
+        true
+    }
+
+    fn refresh_local_usage(
+        &self,
+    ) -> Option<Result<crate::providers::ScannedUsage, crate::providers::ProviderError>> {
+        Some(
+            (self.local_usage_scan)(&self.storage, Utc::now(), &self.pricing.current())
+                .map_err(provider_error),
+        )
     }
 
     fn has_local_credentials(&self) -> bool {

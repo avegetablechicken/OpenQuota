@@ -190,18 +190,15 @@ impl ZaiProvider {
         if account_usage.is_none() {
             warnings.push("Z.ai account usage history is temporarily unavailable.".into());
         }
-        let local_usage = self
-            .local_usage
-            .as_ref()
-            .map(|local| local.history("zai", "Z.ai", now, &mut warnings))
-            .unwrap_or_default();
+
         let value_metrics = account_usage
             .as_ref()
             .and_then(ZaiAccountUsage::credits_metric)
             .into_iter()
             .collect();
         let usage_histories = UsageHistories {
-            local_device: Some(local_usage),
+            local_device_status: None,
+            local_device: None,
             account: account_usage.map(|usage| usage.history),
         };
         Ok(ProviderSnapshot {
@@ -281,6 +278,18 @@ fn account_usage_range(now: DateTime<Utc>) -> (String, String) {
 impl UsageProvider for ZaiProvider {
     fn definition(&self) -> ProviderDefinition {
         definition()
+    }
+
+    fn supports_local_usage(&self) -> bool {
+        self.local_usage.is_some()
+    }
+
+    fn refresh_local_usage(&self) -> Option<Result<crate::providers::ScannedUsage, ProviderError>> {
+        self.local_usage.as_ref().map(|local| {
+            local.scan("zai", "Z.ai").map_err(|error| {
+                ProviderError::from_display(crate::models::ProviderErrorKind::LocalData, error)
+            })
+        })
     }
 
     fn has_local_credentials(&self) -> bool {
@@ -473,10 +482,7 @@ mod tests {
         );
         assert_eq!(snapshot.quotas[2].format, QuotaFormat::Count);
         assert_eq!(snapshot.quotas[2].unit.as_deref(), Some("searches"));
-        assert_eq!(
-            snapshot.usage_histories.local_device,
-            Some(crate::models::UsageHistory::default())
-        );
+        assert_eq!(snapshot.usage_histories.local_device, None);
         assert!(snapshot.status_metrics.is_empty());
         assert!(snapshot.warnings.is_empty());
     }

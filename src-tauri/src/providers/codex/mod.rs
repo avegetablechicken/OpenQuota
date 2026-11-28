@@ -32,7 +32,6 @@ use self::{
     local_usage::scan_local_usage,
     mapper::{idle_session_candidates, map_usage, moving_idle_session, StartOnUseWindow},
 };
-use crate::providers::local_usage::log_usage::scan_or_cached_usage;
 
 const IDLE_SESSION_CONFIRMATION_DELAY: Duration = Duration::from_millis(1100);
 
@@ -306,17 +305,6 @@ impl CodexProvider {
             }
         }
         let account_usage = self.fetch_account_usage(auth, now, account_identity, &mut warnings);
-        let pricing = self.pricing.current();
-        let usage = scan_or_cached_usage(
-            &self.storage,
-            "codex",
-            account_identity
-                .map(crate::providers::CacheIdentity::Resolved)
-                .unwrap_or(crate::providers::CacheIdentity::Unresolved),
-            "Codex",
-            || scan_local_usage(&self.storage, now, &pricing),
-            &mut warnings,
-        );
         Self::ensure_candidate_source_current(auth, account_identity)?;
         Ok(ProviderSnapshot {
             upstream_provider_id: None,
@@ -328,7 +316,8 @@ impl CodexProvider {
             status_metrics: Vec::new(),
             notices: Vec::new(),
             usage_histories: UsageHistories {
-                local_device: Some(usage),
+                local_device_status: None,
+                local_device: None,
                 account: account_usage,
             },
             warnings,
@@ -533,6 +522,19 @@ impl crate::providers::UsageProvider for CodexProvider {
         definition()
     }
 
+    fn supports_local_usage(&self) -> bool {
+        true
+    }
+
+    fn refresh_local_usage(
+        &self,
+    ) -> Option<Result<crate::providers::ScannedUsage, crate::providers::ProviderError>> {
+        Some(
+            scan_local_usage(&self.storage, Utc::now(), &self.pricing.current())
+                .map_err(provider_error),
+        )
+    }
+
     fn has_local_credentials(&self) -> bool {
         CodexAuthState::has_local_credentials()
     }
@@ -670,6 +672,7 @@ mod account_tests {
             status_metrics: Vec::new(),
             notices: Vec::new(),
             usage_histories: UsageHistories {
+                local_device_status: None,
                 local_device: Some(UsageHistory::default()),
                 account: Some(cached.clone()),
             },

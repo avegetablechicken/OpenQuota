@@ -18,7 +18,6 @@ use crate::{
         ProviderSnapshot, UsageHistories, UsagePeriodSelection,
     },
     pricing::PricingStore,
-    providers::local_usage::log_usage::scan_or_cached_usage,
     storage::Storage,
 };
 
@@ -232,15 +231,6 @@ impl GrokProvider {
             .ok()
             .as_ref()
             .and_then(plan_name);
-        let pricing = self.pricing.current();
-        let usage = scan_or_cached_usage(
-            &self.storage,
-            "grok",
-            crate::providers::CacheIdentity::Unscoped,
-            "Grok",
-            || self.log_usage.scan(&self.storage, now, &pricing),
-            &mut warnings,
-        );
         Ok(ProviderSnapshot {
             upstream_provider_id: None,
             accounts: None,
@@ -250,7 +240,7 @@ impl GrokProvider {
             value_metrics: Vec::new(),
             status_metrics: mapped.status_metrics,
             notices: Vec::new(),
-            usage_histories: UsageHistories::local_device(usage),
+            usage_histories: UsageHistories::default(),
             warnings,
             refreshed_at: now,
         })
@@ -294,6 +284,20 @@ impl GrokProvider {
 impl UsageProvider for GrokProvider {
     fn definition(&self) -> ProviderDefinition {
         definition()
+    }
+
+    fn supports_local_usage(&self) -> bool {
+        true
+    }
+
+    fn refresh_local_usage(
+        &self,
+    ) -> Option<Result<crate::providers::ScannedUsage, crate::providers::ProviderError>> {
+        Some(
+            self.log_usage
+                .scan(&self.storage, (self.now)(), &self.pricing.current())
+                .map_err(|error| ProviderError::from_display(ProviderErrorKind::LocalData, error)),
+        )
     }
 
     fn has_local_credentials(&self) -> bool {

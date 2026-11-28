@@ -1560,3 +1560,627 @@ fn successful_retry_clears_failure_backoff() {
         .unwrap()
         .contains_key("recovering"));
 }
+
+/// Exercises the service contract shared by all local-history providers, without credentials,
+/// real home directories, or network calls.
+struct IndependentUsageProvider {
+    id: &'static str,
+    online_failure: AtomicUsize,
+    local_failure: AtomicUsize,
+    tokens: AtomicUsize,
+    online_gate: Mutex<bool>,
+    local_gate: Mutex<bool>,
+    gate_changed: Condvar,
+}
+
+impl IndependentUsageProvider {
+    fn new(id: &'static str) -> Self {
+        Self {
+            id,
+            online_failure: AtomicUsize::new(0),
+            local_failure: AtomicUsize::new(0),
+            tokens: AtomicUsize::new(42),
+            online_gate: Mutex::new(false),
+            local_gate: Mutex::new(false),
+            gate_changed: Condvar::new(),
+        }
+    }
+    fn release(&self) {
+        *self.online_gate.lock().unwrap() = false;
+        self.gate_changed.notify_all();
+    }
+}
+
+impl UsageProvider for IndependentUsageProvider {
+    fn supports_local_usage(&self) -> bool {
+        true
+    }
+    fn definition(&self) -> ProviderDefinition {
+        let mut definition = test_definition(self.id);
+        definition.local_usage_source_note = Some("Test device logs".into());
+        definition
+    }
+    fn has_local_credentials(&self) -> bool {
+        false
+    }
+    fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
+        let gate = self.online_gate.lock().unwrap();
+        let _ = self
+            .gate_changed
+            .wait_timeout_while(gate, TEST_WAIT_TIMEOUT, |held| *held)
+            .unwrap();
+        match self.online_failure.load(Ordering::SeqCst) {
+            0 => Ok(test_snapshot(self.id)),
+            1 => Err(ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Login expired",
+            )),
+            _ => Err(ProviderError::new(ProviderErrorKind::Network, "Offline")),
+        }
+    }
+    fn refresh_local_usage(&self) -> Option<Result<crate::providers::ScannedUsage, ProviderError>> {
+        let gate = self.local_gate.lock().unwrap();
+        let _ = self
+            .gate_changed
+            .wait_timeout_while(gate, TEST_WAIT_TIMEOUT, |held| *held)
+            .unwrap();
+        Some(if self.local_failure.load(Ordering::SeqCst) != 0 {
+            Err(ProviderError::new(
+                ProviderErrorKind::LocalData,
+                "Logs unreadable",
+            ))
+        } else {
+            Ok(crate::providers::ScannedUsage {
+                history: UsageHistory {
+                    daily: vec![crate::models::DailyUsage {
+                        date: Utc::now().date_naive().to_string(),
+                        tokens: self.tokens.load(Ordering::SeqCst) as u64,
+                        estimated_cost_usd: Some(0.5),
+                        estimate_complete: true,
+                    }],
+                    ..Default::default()
+                },
+                warnings: vec!["Local attribution warning".into()],
+            })
+        })
+    }
+}
+
+fn independent_service(
+    provider: Arc<IndependentUsageProvider>,
+    storage: Arc<Storage>,
+) -> Arc<ProviderService> {
+    Arc::new(ProviderService::new(
+        Arc::new(ProviderRegistry::new(vec![provider]).unwrap()),
+        storage,
+    ))
+}
+
+#[test]
+fn local_history_refreshes_without_login_for_every_local_card_and_survives_restart() {
+    for id in [
+        "antigravity",
+        "codex",
+        "claude",
+        "grok",
+        "kimi",
+        "minimax",
+        "zai",
+        "opencode",
+    ] {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("state.db")).unwrap());
+        let provider = Arc::new(IndependentUsageProvider::new(id));
+        provider.online_failure.store(1, Ordering::SeqCst);
+        let service = independent_service(provider.clone(), storage.clone());
+        let state = refresh_with_test_timeout(&service, id, true);
+        assert_eq!(state.error_kind, Some(ProviderErrorKind::Authentication));
+        let snapshot = state.snapshot.unwrap();
+        assert_eq!(
+            snapshot
+                .usage_histories
+                .local_device
+                .as_ref()
+                .unwrap()
+                .daily[0]
+                .tokens,
+            42
+        );
+        assert!(snapshot
+            .usage_histories
+            .local_device_status
+            .as_ref()
+            .unwrap()
+            .refreshed_at
+            .is_some());
+        assert_eq!(snapshot.refreshed_at, chrono::DateTime::UNIX_EPOCH);
+        assert!(snapshot.quotas.is_empty());
+        assert!(snapshot.usage_histories.account.is_none());
+        drop(service);
+        let restarted = independent_service(provider, storage);
+        assert_eq!(
+            restarted.state().providers[id]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .usage_histories,
+            snapshot.usage_histories
+        );
+    }
+}
+
+#[test]
+fn each_refresh_part_keeps_its_own_cache_and_timestamp_and_recovers() {
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.db")).unwrap());
+    let provider = Arc::new(IndependentUsageProvider::new("codex"));
+    let service = independent_service(provider.clone(), storage.clone());
+    let first = refresh_with_test_timeout(&service, "codex", true)
+        .snapshot
+        .unwrap();
+    provider.online_failure.store(2, Ordering::SeqCst);
+    provider.tokens.store(84, Ordering::SeqCst);
+    let second = refresh_with_test_timeout(&service, "codex", true);
+    assert_eq!(second.error_kind, Some(ProviderErrorKind::Network));
+    let second = second.snapshot.unwrap();
+    assert_eq!(second.refreshed_at, first.refreshed_at);
+    assert_eq!(
+        second.usage_histories.local_device.as_ref().unwrap().daily[0].tokens,
+        84
+    );
+    let last_local = second
+        .usage_histories
+        .local_device_status
+        .as_ref()
+        .unwrap()
+        .refreshed_at;
+
+    provider.online_failure.store(0, Ordering::SeqCst);
+    provider.local_failure.store(1, Ordering::SeqCst);
+    let third = refresh_with_test_timeout(&service, "codex", true);
+    assert!(third.error.is_none());
+    let third = third.snapshot.unwrap();
+    assert!(third.refreshed_at >= second.refreshed_at);
+    assert_eq!(
+        third.usage_histories.local_device,
+        second.usage_histories.local_device
+    );
+    let status = third.usage_histories.local_device_status.as_ref().unwrap();
+    assert_eq!(status.refreshed_at, last_local);
+    assert!(status.error.as_ref().unwrap().contains("Logs unreadable"));
+    assert_eq!(status.warnings, ["Local attribution warning"]);
+    assert!(storage
+        .load_local_usage("codex")
+        .unwrap()
+        .unwrap()
+        .account
+        .is_none());
+
+    provider.local_failure.store(0, Ordering::SeqCst);
+    provider.tokens.store(0, Ordering::SeqCst);
+    let recovered = refresh_with_test_timeout(&service, "codex", true)
+        .snapshot
+        .unwrap();
+    assert!(recovered
+        .usage_histories
+        .local_device_status
+        .unwrap()
+        .error
+        .is_none());
+    assert_eq!(
+        recovered.usage_histories.local_device.unwrap().daily[0].tokens,
+        0
+    );
+}
+
+#[test]
+fn local_history_is_published_before_online_finishes_and_late_results_cannot_undo_invalidation() {
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.db")).unwrap());
+    let provider = Arc::new(IndependentUsageProvider::new("codex"));
+    *provider.online_gate.lock().unwrap() = true;
+    let service = independent_service(provider.clone(), storage.clone());
+    let runner = {
+        let service = service.clone();
+        thread::spawn(move || refresh_with_test_timeout(&service, "codex", true))
+    };
+    wait_until(
+        "local history should publish before online completes",
+        || {
+            service.state().providers["codex"]
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.usage_histories.local_device.is_some())
+        },
+    );
+    assert!(service.state().providers["codex"].refreshing);
+    service.clear_provider_data("codex").unwrap();
+    provider.release();
+    runner.join().unwrap();
+    assert!(service.state().providers["codex"].snapshot.is_none());
+    assert!(storage.load_local_usage("codex").unwrap().is_none());
+    assert!(storage
+        .load_snapshot_for_identity("codex", crate::providers::CacheIdentity::Unscoped)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn online_timeout_keeps_new_local_history_without_freshening_cached_quotas() {
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.db")).unwrap());
+    let provider = Arc::new(IndependentUsageProvider::new("codex"));
+    *provider.online_gate.lock().unwrap() = true;
+    let old = test_snapshot("codex");
+    storage.save_snapshot(&old).unwrap();
+    let service = Arc::new(ProviderService::with_refresh_timeout(
+        Arc::new(ProviderRegistry::new(vec![provider.clone()]).unwrap()),
+        storage,
+        Duration::from_millis(100),
+    ));
+    let state = refresh_with_test_timeout(&service, "codex", true);
+    provider.release();
+    assert_eq!(state.error_kind, Some(ProviderErrorKind::Network));
+    let snapshot = state.snapshot.unwrap();
+    assert_eq!(snapshot.refreshed_at, old.refreshed_at);
+    assert_eq!(
+        snapshot.usage_histories.local_device.unwrap().daily[0].tokens,
+        42
+    );
+}
+
+#[test]
+fn local_timeout_does_not_block_online_result_or_publish_late_local_data() {
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.db")).unwrap());
+    let provider = Arc::new(IndependentUsageProvider::new("codex"));
+    *provider.local_gate.lock().unwrap() = true;
+    let service = Arc::new(ProviderService::with_refresh_timeout(
+        Arc::new(ProviderRegistry::new(vec![provider.clone()]).unwrap()),
+        storage.clone(),
+        Duration::from_millis(300),
+    ));
+    let runner = {
+        let service = service.clone();
+        thread::spawn(move || refresh_with_test_timeout(&service, "codex", true))
+    };
+    let state = runner.join().unwrap();
+    assert!(state.error.is_none());
+    let snapshot = state.snapshot.unwrap();
+    assert!(snapshot.usage_histories.local_device.is_none());
+    assert!(snapshot
+        .usage_histories
+        .local_device_status
+        .unwrap()
+        .error
+        .unwrap()
+        .contains("timed out"));
+    *provider.local_gate.lock().unwrap() = false;
+    provider.gate_changed.notify_all();
+    wait_until("local worker drains", || {
+        !service.refresh_flights["codex"]
+            .state
+            .lock()
+            .unwrap()
+            .runner_active
+    });
+    assert!(service.state().providers["codex"]
+        .snapshot
+        .as_ref()
+        .unwrap()
+        .usage_histories
+        .local_device
+        .is_none());
+    assert!(storage
+        .load_local_usage("codex")
+        .unwrap()
+        .unwrap()
+        .local_device
+        .is_none());
+}
+
+#[test]
+fn local_refresh_timestamps_do_not_speed_up_adaptive_polling() {
+    let mut before = UsageViewState::default();
+    let mut snapshot = test_snapshot("codex");
+    snapshot.usage_histories.local_device = Some(UsageHistory::default());
+    snapshot.usage_histories.local_device_status = Some(crate::models::LocalUsageStatus {
+        refreshed_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+        ..Default::default()
+    });
+    before
+        .providers
+        .insert("codex".into(), ProviderViewState::from_cache(snapshot));
+    let mut after = before.clone();
+    after
+        .providers
+        .get_mut("codex")
+        .unwrap()
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .usage_histories
+        .local_device_status
+        .as_mut()
+        .unwrap()
+        .refreshed_at = Some(Utc::now());
+    assert!(!usage_data_changed(&before, &after, &["codex".into()]));
+}
+
+struct ReviewRefreshProvider {
+    inner: IndependentUsageProvider,
+    local_capability: bool,
+    calls: AtomicUsize,
+    account: bool,
+    online_done: AtomicUsize,
+}
+impl UsageProvider for ReviewRefreshProvider {
+    fn cache_identity(&self) -> crate::providers::CacheIdentity<'_> {
+        crate::providers::CacheIdentity::Unresolved
+    }
+    fn definition(&self) -> ProviderDefinition {
+        self.inner.definition()
+    }
+    fn has_local_credentials(&self) -> bool {
+        true
+    }
+    fn supports_local_usage(&self) -> bool {
+        self.local_capability
+    }
+    fn refresh_local_usage(&self) -> Option<Result<crate::providers::ScannedUsage, ProviderError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            self.local_capability,
+            "unsupported local worker must never run"
+        );
+        self.inner.refresh_local_usage()
+    }
+    fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
+        self.inner.refresh()
+    }
+    fn refresh_for_service(&self) -> Result<ProviderRefresh, ProviderError> {
+        let mut snapshot = self.refresh()?;
+        snapshot.plan = Some("new-account-plan".into());
+        snapshot.usage_histories.account = Some(UsageHistory {
+            unknown_models: vec!["new account history".into()],
+            ..Default::default()
+        });
+        self.online_done.store(1, Ordering::SeqCst);
+        Ok(ProviderRefresh {
+            snapshot,
+            cache_identity: Some("new-identity".into()),
+            account: self.account.then(|| AccountRefresh {
+                family: "codex",
+                provider_id: "codex",
+                identity: "new-identity".into(),
+            }),
+        })
+    }
+}
+fn review_provider(local_capability: bool, account: bool) -> Arc<ReviewRefreshProvider> {
+    Arc::new(ReviewRefreshProvider {
+        inner: IndependentUsageProvider::new("codex"),
+        local_capability,
+        account,
+        calls: AtomicUsize::new(0),
+        online_done: AtomicUsize::new(0),
+    })
+}
+
+#[test]
+fn completed_online_result_waits_for_account_activation_and_keeps_new_account_history() {
+    for fail_activation in [false, true] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        let storage = Arc::new(Storage::open(&path).unwrap());
+        let provider = review_provider(true, true);
+        *provider.inner.local_gate.lock().unwrap() = true;
+        let registry = Arc::new(ProviderRegistry::new(vec![provider.clone()]).unwrap());
+        let (settings, _) =
+            SettingsService::new_deferred(storage.clone(), registry.clone()).unwrap();
+        let settings = Arc::new(settings);
+        settings
+            .activate_account("codex", "codex", "old-identity")
+            .unwrap();
+        let mut old = test_snapshot("codex");
+        old.plan = Some("old-account-plan".into());
+        old.usage_histories.account = Some(UsageHistory {
+            unknown_models: vec!["old account history".into()],
+            ..Default::default()
+        });
+        storage
+            .save_snapshot_for_identity(&old, Some("old-identity"))
+            .unwrap();
+        if fail_activation {
+            rusqlite::Connection::open(&path).unwrap().execute_batch(
+                "CREATE TRIGGER fail_account BEFORE INSERT ON provider_account_records BEGIN SELECT RAISE(FAIL, 'activation blocked'); END;"
+            ).unwrap();
+        }
+        let service = Arc::new(ProviderService::new_with_settings(
+            registry,
+            storage.clone(),
+            settings,
+        ));
+        let runner = {
+            let service = service.clone();
+            thread::spawn(move || refresh_with_test_timeout(&service, "codex", true))
+        };
+        wait_until("online worker should finish", || {
+            provider.online_done.load(Ordering::SeqCst) == 1
+        });
+        assert_eq!(
+            service.state().providers["codex"]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .plan,
+            old.plan
+        );
+        assert!(storage
+            .load_snapshot_for_identity(
+                "codex",
+                crate::providers::CacheIdentity::Resolved("new-identity")
+            )
+            .unwrap()
+            .is_none());
+        *provider.inner.local_gate.lock().unwrap() = false;
+        provider.inner.gate_changed.notify_all();
+        let state = runner.join().unwrap();
+        let snapshot = state.snapshot.unwrap();
+        if fail_activation {
+            assert_eq!(state.error_kind, Some(ProviderErrorKind::Storage));
+            assert_eq!(snapshot.plan, old.plan);
+            assert_eq!(
+                snapshot.usage_histories.account,
+                old.usage_histories.account
+            );
+            assert!(storage
+                .load_snapshot_for_identity(
+                    "codex",
+                    crate::providers::CacheIdentity::Resolved("new-identity")
+                )
+                .unwrap()
+                .is_none());
+        } else {
+            assert!(state.error.is_none());
+            assert_eq!(
+                snapshot.usage_histories.account.unwrap().unknown_models,
+                ["new account history"]
+            );
+            let saved = storage
+                .load_snapshot_for_identity(
+                    "codex",
+                    crate::providers::CacheIdentity::Resolved("new-identity"),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                saved.usage_histories.account.unwrap().unknown_models,
+                ["new account history"]
+            );
+        }
+    }
+}
+
+#[test]
+fn source_note_without_capability_never_launches_or_caches_a_local_worker() {
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.db")).unwrap());
+    let provider = review_provider(false, false);
+    *provider.inner.online_gate.lock().unwrap() = true;
+    let registry = Arc::new(ProviderRegistry::new(vec![provider.clone()]).unwrap());
+    let service = Arc::new(ProviderService::with_refresh_timeout(
+        registry.clone(),
+        storage.clone(),
+        Duration::from_millis(50),
+    ));
+    let state = refresh_with_test_timeout(&service, "codex", true);
+    provider.inner.release();
+    assert_eq!(state.error_kind, Some(ProviderErrorKind::Network));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(storage.load_local_usage("codex").unwrap().is_none());
+    // Also ignore bad records left by the earlier unconditional-worker implementation.
+    let bad = UsageHistories {
+        local_device_status: Some(crate::models::LocalUsageStatus {
+            error: Some("stale error".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    storage.save_local_usage("codex", &bad).unwrap();
+    let restarted = ProviderService::new(registry, storage);
+    assert!(restarted.state().providers["codex"].snapshot.is_none());
+}
+
+#[test]
+fn first_failure_has_no_successful_timestamp_and_is_not_outdated() {
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.db")).unwrap());
+    let provider = Arc::new(IndependentUsageProvider::new("codex"));
+    provider.online_failure.store(1, Ordering::SeqCst);
+    provider.local_failure.store(1, Ordering::SeqCst);
+    let service = independent_service(provider, storage);
+    let state = refresh_with_test_timeout(&service, "codex", true);
+    assert!(state.error.is_some());
+    assert!(!state.stale);
+    let history = state.snapshot.unwrap().usage_histories;
+    assert!(history.local_device.is_none());
+    assert!(history.local_device_status.unwrap().refreshed_at.is_none());
+}
+
+#[test]
+fn legacy_local_history_survives_online_commit_and_failed_scan() {
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.db")).unwrap());
+    let provider = Arc::new(IndependentUsageProvider::new("codex"));
+    provider.local_failure.store(1, Ordering::SeqCst);
+    let mut old = test_snapshot("codex");
+    old.usage_histories.local_device = Some(UsageHistory {
+        unknown_models: vec!["legacy history".into()],
+        ..Default::default()
+    });
+    storage.save_snapshot(&old).unwrap();
+    let service = independent_service(provider, storage);
+    // Commit online data first to exercise migration even when scan order changes.
+    service.apply_refresh_result(
+        "codex",
+        Ok(ProviderRefresh {
+            snapshot: test_snapshot("codex"),
+            cache_identity: None,
+            account: None,
+        }),
+    );
+    let state = refresh_with_test_timeout(&service, "codex", true);
+    let history = state.snapshot.unwrap().usage_histories;
+    assert_eq!(history.local_device, old.usage_histories.local_device);
+    assert_eq!(
+        history.local_device_status.unwrap().refreshed_at,
+        Some(old.refreshed_at)
+    );
+}
+
+#[test]
+fn scan_and_cache_write_failures_preserve_the_scan_error() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let storage = Arc::new(Storage::open(&path).unwrap());
+    let provider = Arc::new(IndependentUsageProvider::new("codex"));
+    provider.local_failure.store(1, Ordering::SeqCst);
+    rusqlite::Connection::open(&path).unwrap().execute_batch(
+        "CREATE TRIGGER fail_cache BEFORE INSERT ON local_usage_snapshots BEGIN SELECT RAISE(FAIL, 'cache blocked'); END;"
+    ).unwrap();
+    let service = independent_service(provider, storage);
+    let state = refresh_with_test_timeout(&service, "codex", true);
+    let message = state
+        .snapshot
+        .unwrap()
+        .usage_histories
+        .local_device_status
+        .unwrap()
+        .error
+        .unwrap();
+    assert!(message.contains("Logs unreadable"));
+    assert!(message.contains("cache also could not be saved"));
+    assert!(!message.contains("Local usage refreshed"));
+}
+
+#[test]
+fn malformed_local_cache_does_not_hide_a_valid_online_snapshot() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let storage = Arc::new(Storage::open(&path).unwrap());
+    let old = test_snapshot("codex");
+    storage.save_snapshot(&old).unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO local_usage_snapshots VALUES ('codex', 'not json')",
+            [],
+        )
+        .unwrap();
+    let service = independent_service(Arc::new(IndependentUsageProvider::new("codex")), storage);
+    assert_eq!(
+        service.state().providers["codex"].snapshot.as_ref(),
+        Some(&old)
+    );
+}

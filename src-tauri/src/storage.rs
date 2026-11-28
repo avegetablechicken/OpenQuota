@@ -71,6 +71,10 @@ impl Storage {
                refreshed_at TEXT NOT NULL,
                identity_key TEXT
              );
+             CREATE TABLE IF NOT EXISTS local_usage_snapshots (
+               provider_id TEXT PRIMARY KEY,
+               payload TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS daily_usage (
                provider_id TEXT NOT NULL,
                scope TEXT NOT NULL,
@@ -226,27 +230,72 @@ impl Storage {
             ],
         )?;
         transaction.execute(
-            "DELETE FROM daily_usage WHERE provider_id = ?1",
+            "DELETE FROM daily_usage WHERE provider_id = ?1 AND scope = 'account'",
             [&snapshot.provider_id],
         )?;
-        for (scope, history) in [
-            (
-                "localDevice",
-                snapshot.usage_histories.local_device.as_ref(),
-            ),
-            ("account", snapshot.usage_histories.account.as_ref()),
-        ] {
-            for day in history.into_iter().flat_map(|history| &history.daily) {
-                Self::insert_day(&transaction, &snapshot.provider_id, scope, day)?;
-            }
+        for day in snapshot
+            .usage_histories
+            .account
+            .iter()
+            .flat_map(|history| &history.daily)
+        {
+            Self::insert_day(&transaction, &snapshot.provider_id, "account", day)?;
         }
         transaction.commit()?;
         Ok(())
     }
 
+    pub fn save_local_usage(
+        &self,
+        provider_id: &str,
+        usage: &crate::models::UsageHistories,
+    ) -> Result<(), StorageError> {
+        // Never persist account history through the device-only cache.
+        let mut local = usage.clone();
+        local.account = None;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO local_usage_snapshots(provider_id, payload) VALUES (?1, ?2)
+             ON CONFLICT(provider_id) DO UPDATE SET payload = excluded.payload",
+            params![provider_id, serde_json::to_string(&local)?],
+        )?;
+        transaction.execute(
+            "DELETE FROM daily_usage WHERE provider_id = ?1 AND scope = 'localDevice'",
+            [provider_id],
+        )?;
+        for day in local.local_device.iter().flat_map(|history| &history.daily) {
+            Self::insert_day(&transaction, provider_id, "localDevice", day)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn load_local_usage(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<crate::models::UsageHistories>, StorageError> {
+        let payload: Option<String> = self
+            .connection()?
+            .query_row(
+                "SELECT payload FROM local_usage_snapshots WHERE provider_id = ?1",
+                [provider_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // UsageHistories supports the legacy wire form via the snapshot deserializer.
+        payload
+            .map(|payload| serde_json::from_str(&payload).map_err(StorageError::from))
+            .transpose()
+    }
+
     pub fn delete_snapshot(&self, provider_id: &str) -> Result<(), StorageError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM local_usage_snapshots WHERE provider_id = ?1",
+            [provider_id],
+        )?;
         transaction.execute(
             "DELETE FROM provider_snapshots WHERE provider_id = ?1",
             [provider_id],
@@ -1034,5 +1083,102 @@ mod tests {
         storage
             .save_log_events("codex", PathBuf::from("new.jsonl").as_path(), 10, 20, "[]")
             .unwrap();
+    }
+    #[test]
+    fn device_cache_updates_only_device_history_and_can_be_cleared() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("state.db")).unwrap();
+        let day = |tokens| DailyUsage {
+            date: "2026-11-28".into(),
+            tokens,
+            estimated_cost_usd: Some(1.0),
+            estimate_complete: true,
+        };
+        // The account index belongs to a separate online refresh.
+        storage
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO daily_usage VALUES ('codex', 'account', '2026-11-28', 900, 1.0, 1)",
+                [],
+            )
+            .unwrap();
+        let mut local = crate::models::UsageHistories::local_device(UsageHistory {
+            daily: vec![day(42)],
+            ..Default::default()
+        });
+        local.account = Some(UsageHistory {
+            daily: vec![day(999)],
+            ..Default::default()
+        });
+        storage.save_local_usage("codex", &local).unwrap();
+        let cached = storage.load_local_usage("codex").unwrap().unwrap();
+        assert!(cached.account.is_none());
+        assert_eq!(cached.local_device.unwrap().daily[0].tokens, 42);
+        let connection = storage.connection().unwrap();
+        let counts: Vec<(String, i64)> = connection
+            .prepare("SELECT scope, tokens FROM daily_usage ORDER BY scope")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            counts,
+            [("account".into(), 900), ("localDevice".into(), 42)]
+        );
+        drop(connection);
+        // A successful empty scan replaces old local data, not the independent account rows.
+        storage
+            .save_local_usage(
+                "codex",
+                &crate::models::UsageHistories::local_device(UsageHistory::default()),
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .connection()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM daily_usage", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        storage.delete_snapshot("codex").unwrap();
+        assert!(storage.load_local_usage("codex").unwrap().is_none());
+    }
+    #[test]
+    fn online_snapshot_without_device_history_never_deletes_device_index() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("state.db")).unwrap();
+        let local = crate::models::UsageHistories::local_device(UsageHistory {
+            daily: vec![DailyUsage {
+                date: "2026-11-28".into(),
+                tokens: 42,
+                estimated_cost_usd: Some(1.0),
+                estimate_complete: true,
+            }],
+            ..Default::default()
+        });
+        storage.save_local_usage("codex", &local).unwrap();
+        let online: ProviderSnapshot = serde_json::from_value(serde_json::json!({
+            "providerId": "codex", "plan": "Plus", "quotas": [], "warnings": [],
+            "refreshedAt": "2026-11-28T12:00:00Z"
+        }))
+        .unwrap();
+        storage
+            .save_snapshot_for_identity(&online, Some("new-account"))
+            .unwrap();
+        assert_eq!(storage.connection().unwrap().query_row(
+            "SELECT tokens FROM daily_usage WHERE provider_id = 'codex' AND scope = 'localDevice'", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 42);
+        assert_eq!(
+            storage
+                .load_local_usage("codex")
+                .unwrap()
+                .unwrap()
+                .local_device,
+            local.local_device
+        );
     }
 }

@@ -10,18 +10,17 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use crate::{
-    models::UsageHistory,
     pricing::{ModelPricing, PricingStore},
     providers::{
         antigravity, claude, codex, grok, kimi,
         local_usage::{
             card_usage::DailyUsageAccumulator,
             gemini_cli,
-            log_usage::{scan_or_cached_usage, ScannedUsage},
+            log_usage::ScannedUsage,
             pi,
             zcode::{ZCodeProvider, ZCodeUsageScanner},
         },
-        opencode, CacheIdentity,
+        opencode,
     },
     storage::Storage,
 };
@@ -468,30 +467,23 @@ impl RoutedLocalUsage {
         Self { storage, pricing }
     }
 
-    pub(crate) fn history(
+    pub(crate) fn scan(
         &self,
         provider_id: &str,
         provider_name: &str,
-        now: DateTime<Utc>,
-        warnings: &mut Vec<String>,
-    ) -> UsageHistory {
+    ) -> Result<ScannedUsage, FoldInUnavailable> {
         let pricing = self.pricing.current();
-        let context = FoldContext {
-            storage: &self.storage,
-            now,
-            pricing: &pricing,
-        };
-        let card = Card {
-            id: provider_id,
-            name: provider_name,
-        };
-        scan_or_cached_usage(
-            &self.storage,
-            provider_id,
-            CacheIdentity::Unscoped,
-            provider_name,
-            || folded_history(&CLIENTS, &context, card),
-            warnings,
+        folded_history(
+            &CLIENTS,
+            &FoldContext {
+                storage: &self.storage,
+                now: Utc::now(),
+                pricing: &pricing,
+            },
+            Card {
+                id: provider_id,
+                name: provider_name,
+            },
         )
     }
 }

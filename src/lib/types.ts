@@ -119,7 +119,14 @@ export interface UsageHistory {
   otherUsage?: OtherUsageHistory | null;
 }
 
+export interface LocalUsageStatus {
+  refreshedAt: string | null;
+  error: string | null;
+  warnings: string[];
+}
+
 export interface UsageHistories {
+  localDeviceStatus?: LocalUsageStatus;
   localDevice?: UsageHistory;
   account?: UsageHistory;
 }

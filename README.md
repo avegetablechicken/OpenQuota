@@ -82,7 +82,8 @@ available in API-key-only sessions.
 - **Pinned metrics.** Keep important values visible in the tray or macOS menu bar.
 - **Used or left.** Display how much quota you have consumed or how much remains.
 - **Usage history.** Review today, yesterday, and the last 30 days of token usage and estimated
-  spend.
+  spend. Local-device history refreshes independently of online limits, even when a login has
+  expired or the provider is unreachable. Each source keeps its last successful data if it fails.
 - **Pacing alerts.** See whether your current usage is likely to last until the next reset.
 - **Custom layouts.** Reorder providers and metrics, hide rows, and choose what stays visible.
 - **Desktop integration.** Launch at login, use a global shortcut, and follow the system theme.

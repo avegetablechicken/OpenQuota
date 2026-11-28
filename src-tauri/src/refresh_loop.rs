@@ -48,7 +48,7 @@ pub fn spawn(
     });
 }
 
-/// Publishes quota previews that unofficial providers report while their refresh continues.
+/// Publishes independently completed local history and quota previews while a refresh continues.
 fn spawn_preview_publisher(
     app: AppHandle,
     service: Arc<ProviderService>,

@@ -120,9 +120,9 @@ fn weekly_status_plan_and_local_history_form_one_snapshot() {
     let directory = tempfile::tempdir().unwrap();
     let log_path = directory.path().join("unified.jsonl");
     fs::write(&log_path, include_str!("fixtures/usage.jsonl")).unwrap();
-    let (provider, _) = build_provider(&directory, server.client(), valid_auth(), log_path);
+    let (provider, storage) = build_provider(&directory, server.client(), valid_auth(), log_path);
 
-    let snapshot = provider.refresh_inner().unwrap();
+    let snapshot = service_refresh(provider, storage).snapshot.unwrap();
 
     assert_eq!(snapshot.plan.as_deref(), Some("SuperGrok Heavy"));
     assert_eq!(snapshot.quotas[0].id, "weekly");
@@ -359,12 +359,17 @@ fn local_scan_failure_keeps_cached_history_and_live_limits() {
         })
         .unwrap();
 
-    let snapshot = provider.refresh_inner().unwrap();
+    let snapshot = service_refresh(provider, storage).snapshot.unwrap();
 
     assert_eq!(snapshot.usage_histories.local_device, Some(cached_usage));
     assert_eq!(snapshot.quotas[0].used_percent, 99.0);
-    assert_eq!(snapshot.warnings.len(), 1);
-    assert!(snapshot.warnings[0].contains("Grok"));
+    assert!(snapshot
+        .usage_histories
+        .local_device_status
+        .unwrap()
+        .error
+        .unwrap()
+        .contains("Local usage"));
     server.finish();
 }
 
@@ -512,4 +517,17 @@ fn header(request: &str, expected_name: &str) -> Option<String> {
         name.eq_ignore_ascii_case(expected_name)
             .then(|| value.trim().to_owned())
     })
+}
+
+fn service_refresh(
+    provider: GrokProvider,
+    storage: Arc<Storage>,
+) -> crate::models::ProviderViewState {
+    let service = Arc::new(crate::service::ProviderService::new(
+        Arc::new(crate::providers::ProviderRegistry::single_for_test(
+            Arc::new(provider),
+        )),
+        storage,
+    ));
+    tauri::async_runtime::block_on(service.refresh("grok", true))
 }

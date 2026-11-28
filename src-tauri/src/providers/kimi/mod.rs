@@ -148,12 +148,8 @@ impl KimiProvider {
         let response = required_response(self.client.fetch(api_key))?;
         let mapped = map_usage(&response.body)?;
         let now = Utc::now();
-        let mut warnings = Vec::new();
-        let usage = self
-            .local_usage
-            .as_ref()
-            .map(|local| local.history("kimi", "Kimi", now, &mut warnings))
-            .unwrap_or_default();
+        let warnings = Vec::new();
+
         Ok(ProviderSnapshot {
             upstream_provider_id: None,
             accounts: None,
@@ -163,7 +159,7 @@ impl KimiProvider {
             value_metrics: Vec::new(),
             status_metrics: Vec::new(),
             notices: Vec::new(),
-            usage_histories: UsageHistories::local_device(usage),
+            usage_histories: UsageHistories::default(),
             warnings,
             refreshed_at: now,
         })
@@ -173,6 +169,18 @@ impl KimiProvider {
 impl UsageProvider for KimiProvider {
     fn definition(&self) -> ProviderDefinition {
         definition()
+    }
+
+    fn supports_local_usage(&self) -> bool {
+        self.local_usage.is_some()
+    }
+
+    fn refresh_local_usage(&self) -> Option<Result<crate::providers::ScannedUsage, ProviderError>> {
+        self.local_usage.as_ref().map(|local| {
+            local.scan("kimi", "Kimi").map_err(|error| {
+                ProviderError::from_display(crate::models::ProviderErrorKind::LocalData, error)
+            })
+        })
     }
 
     fn has_local_credentials(&self) -> bool {
@@ -294,10 +302,7 @@ mod tests {
         let snapshot = provider.refresh().unwrap();
         assert_eq!(snapshot.provider_id, "kimi");
         assert_eq!(snapshot.plan.as_deref(), Some("Basic"));
-        assert_eq!(
-            snapshot.usage_histories.local_device,
-            Some(crate::models::UsageHistory::default())
-        );
+        assert_eq!(snapshot.usage_histories.local_device, None);
         assert_eq!(
             snapshot
                 .quotas

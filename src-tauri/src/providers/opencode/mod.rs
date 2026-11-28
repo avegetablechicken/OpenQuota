@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::{
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind, ProviderLink,
-        ProviderSnapshot, UsageHistories, UsageHistory, UsagePeriodSelection,
+        ProviderSnapshot, UsageHistories, UsagePeriodSelection,
     },
     pricing::{ModelPricing, PricingStore},
 };
@@ -126,7 +126,7 @@ pub(crate) enum OpenCodeError {
 impl From<OpenCodeError> for ProviderError {
     fn from(error: OpenCodeError) -> Self {
         let kind = match error {
-            OpenCodeError::NotDetected | OpenCodeError::InvalidAuth => {
+            OpenCodeError::InvalidAuth | OpenCodeError::NotDetected => {
                 ProviderErrorKind::Authentication
             }
             OpenCodeError::GoSubscriptionRequired => ProviderErrorKind::Permission,
@@ -183,78 +183,42 @@ impl OpenCodeProvider {
 
     fn refresh_snapshot(&self) -> Result<ProviderSnapshot, OpenCodeError> {
         let now = (self.now)();
-        let (go_api_key, go_key_error) = match self.paths.go_api_key() {
-            Ok(key) => (key, None),
-            Err(error) => (None, Some(error)),
-        };
-        let go_usage = go_api_key
-            .as_deref()
-            .map(|key| {
-                self.client
-                    .as_ref()
-                    .map_err(|error| *error)
-                    .and_then(|client| client.fetch_go_usage(key))
-                    .and_then(|response| map_go_usage(response, now))
-            })
-            .transpose();
-        let pricing = self.pricing.current();
-        let scan = self.scanner.scan(now, &pricing);
-
-        let scan = match scan {
-            Ok(scan) => scan,
-            Err(error) => match go_usage {
-                Ok(Some(quotas)) => {
-                    return Ok(snapshot(
-                        Some("Go".into()),
-                        quotas,
-                        UsageHistory::default(),
-                        vec!["OpenCode local usage data is temporarily unavailable.".into()],
-                        now,
-                    ));
-                }
-                _ => return Err(error),
-            },
-        };
-
-        let Some(scan) = scan else {
-            return match go_usage {
-                Ok(Some(quotas)) => Ok(snapshot(
-                    Some("Go".into()),
-                    quotas,
-                    UsageHistory::default(),
-                    Vec::new(),
-                    now,
-                )),
-                Ok(None) => Err(go_key_error.unwrap_or(OpenCodeError::NotDetected)),
-                Err(error) => Err(error),
-            };
-        };
-        let mut warnings = scan.warnings;
-        if go_key_error.is_some() {
-            warnings.push(
-                "OpenCode Go login data could not be read; local database usage is still shown."
-                    .into(),
-            );
-        }
-        let (plan, quotas) = match go_usage {
-            Ok(Some(quotas)) => (Some("Go".into()), quotas),
-            Ok(None) => (None, Vec::new()),
-            Err(OpenCodeError::GoSubscriptionRequired) if scan.usage.last_30_days.is_some() => {
-                warnings.push(
-                    "OpenCode Go subscription required. Local usage is still shown while OpenCode Go quota data is unavailable."
-                        .to_string(),
-                );
-                (None, Vec::new())
+        let Some(key) = self.paths.go_api_key()? else {
+            if self.paths.database_files()?.is_empty() {
+                return Err(OpenCodeError::NotDetected);
             }
-            Err(error) => return Err(error),
+            // No online source has been refreshed. Local success/failure determines availability.
+            return Ok(snapshot(None, Vec::new(), Vec::new(), DateTime::UNIX_EPOCH));
         };
-        Ok(snapshot(plan, quotas, scan.usage, warnings, now))
+        let client = self.client.as_ref().map_err(|error| *error)?;
+        let quotas = map_go_usage(client.fetch_go_usage(&key)?, now)?;
+        Ok(snapshot(Some("Go".into()), quotas, Vec::new(), now))
     }
 }
 
 impl UsageProvider for OpenCodeProvider {
     fn definition(&self) -> ProviderDefinition {
         definition()
+    }
+
+    fn supports_local_usage(&self) -> bool {
+        true
+    }
+
+    fn refresh_local_usage(&self) -> Option<Result<crate::providers::ScannedUsage, ProviderError>> {
+        Some(
+            self.scanner
+                .scan((self.now)(), &self.pricing.current())
+                .map(|scan| {
+                    // A missing optional local source is normal for Go-only users.
+                    scan.map(|scan| crate::providers::ScannedUsage {
+                        history: scan.usage,
+                        warnings: scan.warnings,
+                    })
+                    .unwrap_or_default()
+                })
+                .map_err(ProviderError::from),
+        )
     }
 
     fn has_local_credentials(&self) -> bool {
@@ -272,7 +236,6 @@ impl UsageProvider for OpenCodeProvider {
 fn snapshot(
     plan: Option<String>,
     quotas: Vec<crate::models::QuotaWindow>,
-    usage: UsageHistory,
     warnings: Vec<String>,
     refreshed_at: DateTime<Utc>,
 ) -> ProviderSnapshot {
@@ -285,7 +248,7 @@ fn snapshot(
         value_metrics: Vec::new(),
         status_metrics: Vec::new(),
         notices: Vec::new(),
-        usage_histories: UsageHistories::local_device(usage),
+        usage_histories: UsageHistories::default(),
         warnings,
         refreshed_at,
     }

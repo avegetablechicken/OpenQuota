@@ -264,9 +264,21 @@ pub struct UsageHistory {
     pub other_usage: Option<OtherUsageHistory>,
 }
 
+/// Freshness and errors for device logs, independently of the online quota snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalUsageStatus {
+    pub refreshed_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageHistories {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_device_status: Option<LocalUsageStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_device: Option<UsageHistory>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +288,7 @@ pub struct UsageHistories {
 impl UsageHistories {
     pub fn local_device(history: UsageHistory) -> Self {
         Self {
+            local_device_status: None,
             local_device: Some(history),
             account: None,
         }
@@ -283,6 +296,7 @@ impl UsageHistories {
 
     pub fn account(history: UsageHistory) -> Self {
         Self {
+            local_device_status: None,
             local_device: None,
             account: Some(history),
         }
@@ -323,6 +337,8 @@ impl LegacyUsageHistory {
 enum UsageHistoriesWire {
     Legacy(Box<LegacyUsageHistory>),
     Current {
+        #[serde(default, rename = "localDeviceStatus")]
+        local_device_status: Option<LocalUsageStatus>,
         #[serde(default, rename = "localDevice")]
         local_device: Option<Box<UsageHistory>>,
         #[serde(default)]
@@ -337,13 +353,21 @@ where
     Ok(match UsageHistoriesWire::deserialize(deserializer)? {
         UsageHistoriesWire::Legacy(history) => history.into_histories(),
         UsageHistoriesWire::Current {
+            local_device_status,
             local_device,
             account,
         } => UsageHistories {
+            local_device_status,
             local_device: local_device.map(|history| *history),
             account: account.map(|history| *history),
         },
     })
+}
+
+impl<'de> Deserialize<'de> for UsageHistories {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_usage_histories(deserializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

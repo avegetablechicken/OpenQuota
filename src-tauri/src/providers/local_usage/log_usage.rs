@@ -282,64 +282,6 @@ pub struct ScannedUsage {
     pub warnings: Vec<String>,
 }
 
-pub trait IntoScannedUsage {
-    fn into_scanned_usage(self) -> ScannedUsage;
-}
-
-impl IntoScannedUsage for UsageHistory {
-    fn into_scanned_usage(self) -> ScannedUsage {
-        ScannedUsage {
-            history: self,
-            warnings: Vec::new(),
-        }
-    }
-}
-
-impl IntoScannedUsage for ScannedUsage {
-    fn into_scanned_usage(self) -> ScannedUsage {
-        self
-    }
-}
-
-/// Keeps provider quotas usable when supplementary local history cannot be refreshed. A prior
-/// persisted history is reused when available; otherwise the provider still returns its live data
-/// with an explicit warning instead of failing the entire refresh.
-pub fn scan_or_cached_usage<T, E>(
-    storage: &Storage,
-    provider_id: &str,
-    identity: crate::providers::CacheIdentity<'_>,
-    provider_name: &str,
-    scan: impl FnOnce() -> Result<T, E>,
-    warnings: &mut Vec<String>,
-) -> UsageHistory
-where
-    T: IntoScannedUsage,
-{
-    match scan() {
-        Ok(scanned) => {
-            let scanned = scanned.into_scanned_usage();
-            warnings.extend(scanned.warnings);
-            scanned.history
-        }
-        Err(_) => {
-            let tag = format!("plugin:{provider_id}");
-            crate::app_warn!(
-                &tag,
-                "local usage history could not be refreshed; keeping live provider data"
-            );
-            warnings.push(format!(
-                "Local {provider_name} usage history could not be refreshed; cached history is shown when available."
-            ));
-            storage
-                .load_snapshot_for_identity(provider_id, identity)
-                .ok()
-                .flatten()
-                .and_then(|snapshot| snapshot.usage_histories.local_device)
-                .unwrap_or_default()
-        }
-    }
-}
-
 fn system_time_nanos(value: SystemTime) -> i64 {
     match value.duration_since(UNIX_EPOCH) {
         Ok(duration) => (duration.as_secs() as i64)
@@ -415,41 +357,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        load_file, parse_log_timestamp, scan_or_cached_usage, FileEvents, LocalLogs, LogCacheError,
-        LogFileFingerprint, LogFormat,
+        load_file, parse_log_timestamp, FileEvents, LocalLogs, LogCacheError, LogFileFingerprint,
+        LogFormat,
     };
-    use crate::{
-        models::{DailyUsage, ProviderSnapshot, UsageHistory},
-        storage::Storage,
-    };
-
-    fn cached_usage() -> UsageHistory {
-        UsageHistory {
-            daily: vec![DailyUsage {
-                date: "2026-07-18".into(),
-                tokens: 42,
-                estimated_cost_usd: Some(0.5),
-                estimate_complete: true,
-            }],
-            ..UsageHistory::default()
-        }
-    }
-
-    fn codex_snapshot(usage: UsageHistory) -> ProviderSnapshot {
-        ProviderSnapshot {
-            upstream_provider_id: None,
-            accounts: None,
-            provider_id: "codex".into(),
-            plan: None,
-            quotas: Vec::new(),
-            value_metrics: Vec::new(),
-            status_metrics: Vec::new(),
-            notices: Vec::new(),
-            usage_histories: crate::models::UsageHistories::local_device(usage),
-            warnings: Vec::new(),
-            refreshed_at: Utc::now(),
-        }
-    }
+    use crate::storage::Storage;
 
     #[test]
     fn timestamp_variants_resolve_to_the_same_absolute_instant() {
@@ -470,95 +381,6 @@ mod tests {
     fn timestamp_parser_rejects_non_timestamp_text() {
         assert_eq!(parse_log_timestamp(""), None);
         assert_eq!(parse_log_timestamp("tomorrow"), None);
-    }
-
-    #[test]
-    fn failed_scan_keeps_cached_history_without_hiding_live_provider_data() {
-        let directory = tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
-        let cached_usage = cached_usage();
-        storage
-            .save_snapshot(&codex_snapshot(cached_usage.clone()))
-            .unwrap();
-        let mut warnings = Vec::new();
-
-        let usage = scan_or_cached_usage(
-            &storage,
-            "codex",
-            crate::providers::CacheIdentity::Unscoped,
-            "Codex",
-            || Err::<UsageHistory, ()>(()),
-            &mut warnings,
-        );
-
-        assert_eq!(usage, cached_usage);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("Codex"));
-    }
-
-    #[test]
-    fn successful_scan_forwards_card_warnings() {
-        let directory = tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
-        let expected = cached_usage();
-        let mut warnings = Vec::new();
-
-        let usage = scan_or_cached_usage(
-            &storage,
-            "antigravity",
-            crate::providers::CacheIdentity::Unscoped,
-            "Antigravity",
-            || {
-                Ok::<_, ()>(super::ScannedUsage {
-                    history: expected.clone(),
-                    warnings: vec!["unverified cli warning".into()],
-                })
-            },
-            &mut warnings,
-        );
-
-        assert_eq!(usage, expected);
-        assert_eq!(warnings, ["unverified cli warning"]);
-    }
-
-    #[test]
-    fn failed_scan_does_not_reuse_history_from_a_different_account() {
-        let directory = tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
-        let cached_usage = cached_usage();
-        storage
-            .save_snapshot_for_identity(&codex_snapshot(cached_usage.clone()), Some("account-a"))
-            .unwrap();
-
-        let mut warnings = Vec::new();
-        let other_account = scan_or_cached_usage(
-            &storage,
-            "codex",
-            crate::providers::CacheIdentity::Resolved("account-b"),
-            "Codex",
-            || Err::<UsageHistory, ()>(()),
-            &mut warnings,
-        );
-        let same_account = scan_or_cached_usage(
-            &storage,
-            "codex",
-            crate::providers::CacheIdentity::Resolved("account-a"),
-            "Codex",
-            || Err::<UsageHistory, ()>(()),
-            &mut warnings,
-        );
-        let unresolved_account = scan_or_cached_usage(
-            &storage,
-            "codex",
-            crate::providers::CacheIdentity::Unresolved,
-            "Codex",
-            || Err::<UsageHistory, ()>(()),
-            &mut warnings,
-        );
-
-        assert_eq!(other_account, UsageHistory::default());
-        assert_eq!(same_account, cached_usage);
-        assert_eq!(unresolved_account, same_account);
     }
 
     thread_local! {

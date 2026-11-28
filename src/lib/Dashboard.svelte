@@ -300,9 +300,12 @@
         .filter(({ snapshot }) => shouldShowProviderForMode(snapshot.usageHistories, usageViewMode))
         .map(({ provider, state, snapshot, accountId, displayName, upstreamAccountName, key }) => {
           const error = state?.error ? providerMessage(provider.id, state.error) : null;
-          const warnings = snapshot.warnings.map((warning) =>
-            providerMessage(provider.id, warning),
-          );
+          const localStatus = snapshot.usageHistories.localDeviceStatus;
+          const warnings = [
+            ...snapshot.warnings,
+            ...(localStatus?.warnings ?? []),
+            ...(localStatus?.error ? [localStatus.error] : []),
+          ].map((warning) => providerMessage(provider.id, warning));
           const eligibleMetrics = provider.metrics.filter((metric) => {
             if (
               !metric.enabled ||
@@ -376,7 +379,7 @@
       .filter((provider) => providerSupportsSpend(provider.id))
       .flatMap((provider) => {
         const usageHistories = viewState.providers[provider.id]?.snapshot?.usageHistories;
-        return usageHistories && Object.keys(usageHistories).length > 0
+        return usageHistories && availableUsageScopes(usageHistories).length > 0
           ? [{ id: provider.id, usageHistories }]
           : [];
       }),
@@ -559,7 +562,12 @@
   function dismissDetection() {
     onSettingsChange({ ...settings, detectionNoticeDismissed: true });
   }
-  function stalenessTooltip(refreshedAt: string) {
+  function stalenessTooltip(snapshot: ProviderSnapshot) {
+    const refreshedAt =
+      Date.parse(snapshot.refreshedAt) === 0
+        ? (snapshot.usageHistories.localDeviceStatus?.refreshedAt ?? snapshot.refreshedAt)
+        : snapshot.refreshedAt;
+    if (Date.parse(refreshedAt) === 0) return 'Last update time unavailable';
     const elapsedSeconds = Math.max(0, Math.floor((now - Date.parse(refreshedAt)) / 1000));
     if (!Number.isFinite(elapsedSeconds)) return 'Last update time unavailable';
     if (elapsedSeconds < 60) return 'Last updated moments ago';
@@ -740,10 +748,8 @@
               >{/if}
             {#if state?.snapshot && state.stale}<span
                 class="status-badge"
-                data-tooltip={stalenessTooltip(state.snapshot.refreshedAt)}
-                >Outdated<span class="sr-only"
-                  >. {stalenessTooltip(state.snapshot.refreshedAt)}</span
-                ></span
+                data-tooltip={stalenessTooltip(state.snapshot)}
+                >Outdated<span class="sr-only">. {stalenessTooltip(state.snapshot)}</span></span
               >{/if}
             <span
               class="provider-status-slot"

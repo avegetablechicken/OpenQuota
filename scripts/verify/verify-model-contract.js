@@ -23,6 +23,8 @@ const contracts = [
   'ModelUsageBreakdown',
   'DailyUsage',
   'UsageHistory',
+  'UsageHistories',
+  'LocalUsageStatus',
   'ProviderSnapshot',
   'ProviderViewState',
   'UsageViewState',

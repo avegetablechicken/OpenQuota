@@ -757,7 +757,10 @@ fn malformed_auth_does_not_blank_valid_database_usage() {
         pricing_store(directory.path()),
         now(),
     );
-    let snapshot = provider.refresh().unwrap();
+    let state = service_refresh(provider, directory.path());
+    assert_eq!(state.error_kind, Some(ProviderErrorKind::CredentialStorage));
+    assert!(!state.error.unwrap().contains("secret"));
+    let snapshot = state.snapshot.unwrap();
     assert_eq!(
         snapshot
             .usage_histories
@@ -768,8 +771,6 @@ fn malformed_auth_does_not_blank_valid_database_usage() {
             .estimated_cost_usd,
         Some(1.0)
     );
-    assert_eq!(snapshot.warnings.len(), 1);
-    assert!(!snapshot.warnings[0].contains("secret"));
 }
 
 #[test]
@@ -781,9 +782,10 @@ fn absent_and_unreadable_sources_map_to_distinct_safe_categories() {
         pricing_store(directory.path()),
         now(),
     )
-    .refresh()
-    .unwrap_err();
-    assert_eq!(absent.kind(), ProviderErrorKind::Authentication);
+    .refresh_local_usage()
+    .unwrap()
+    .unwrap();
+    assert_eq!(absent, crate::providers::ScannedUsage::default());
 
     fs::write(directory.path().join("opencode.db"), b"corrupt").unwrap();
     let unreadable = OpenCodeProvider::with_dependencies(
@@ -792,7 +794,8 @@ fn absent_and_unreadable_sources_map_to_distinct_safe_categories() {
         pricing_store(directory.path()),
         now(),
     )
-    .refresh()
+    .refresh_local_usage()
+    .unwrap()
     .unwrap_err();
     assert_eq!(unreadable.kind(), ProviderErrorKind::LocalData);
     assert!(!unreadable
@@ -824,16 +827,21 @@ fn account_usage_endpoint_populates_quotas_without_local_history() {
         now(),
     );
 
-    let snapshot = provider.refresh().unwrap();
+    let state = service_refresh(provider, directory.path());
+    assert!(state.error.is_none());
+    let snapshot = state.snapshot.unwrap();
 
     assert_eq!(snapshot.plan.as_deref(), Some("Go"));
     assert_eq!(snapshot.quotas[0].used_percent, 31.0);
     assert_eq!(snapshot.quotas[1].used_percent, 100.0);
-    assert!(snapshot
-        .usage_histories
-        .local_device
-        .as_ref()
-        .is_some_and(|history| history.today.is_none()));
+    assert_eq!(
+        snapshot.usage_histories.local_device,
+        Some(crate::models::UsageHistory::default())
+    );
+    let local_status = snapshot.usage_histories.local_device_status.unwrap();
+    assert!(local_status.error.is_none());
+    assert!(local_status.warnings.is_empty());
+    assert!(snapshot.warnings.is_empty());
 }
 
 #[test]
@@ -865,15 +873,17 @@ fn unavailable_account_quota_keeps_local_history_and_explains_the_error() {
         now(),
     );
 
-    let snapshot = provider.refresh().unwrap();
+    let state = service_refresh(provider, directory.path());
+    assert_eq!(state.error_kind, Some(ProviderErrorKind::Permission));
+    assert_eq!(
+        state.error.as_deref(),
+        Some("OpenCode Go subscription required.")
+    );
+    let snapshot = state.snapshot.unwrap();
 
     assert!(snapshot.plan.is_none());
     assert!(snapshot.quotas.is_empty());
     assert!(snapshot.usage_histories.local_device.is_some());
-    assert!(snapshot
-        .warnings
-        .iter()
-        .any(|warning| { warning.contains("OpenCode Go subscription required.") }));
 }
 
 #[test]
@@ -929,9 +939,20 @@ fn transient_account_quota_failure_is_propagated_with_local_history() {
         now(),
     );
 
-    let error = provider.refresh().unwrap_err();
-
-    assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+    let state = service_refresh(provider, directory.path());
+    assert_eq!(state.error_kind, Some(ProviderErrorKind::RateLimited));
+    assert_eq!(
+        state
+            .snapshot
+            .unwrap()
+            .usage_histories
+            .local_device
+            .unwrap()
+            .today
+            .unwrap()
+            .estimated_cost_usd,
+        Some(1.0)
+    );
 }
 
 #[test]
@@ -1036,4 +1057,114 @@ fn partially_priced_others_steps_keep_their_unpriced_tokens() {
     assert_eq!(other.priced_tokens, 100);
     assert_eq!(other.estimated_cost_usd, Some(0.5));
     assert!(!other.estimate_complete);
+}
+
+fn service_refresh(
+    provider: OpenCodeProvider,
+    directory: &Path,
+) -> crate::models::ProviderViewState {
+    let storage =
+        Arc::new(crate::storage::Storage::open(&directory.join("openquota-state.db")).unwrap());
+    let service = Arc::new(crate::service::ProviderService::new(
+        Arc::new(crate::providers::ProviderRegistry::single_for_test(
+            Arc::new(provider),
+        )),
+        storage,
+    ));
+    tauri::async_runtime::block_on(service.refresh("opencode", true))
+}
+
+#[test]
+fn missing_go_key_does_not_freshen_unreadable_or_absent_local_history() {
+    let directory = tempdir().unwrap();
+    let make = || {
+        OpenCodeProvider::with_dependencies(
+            OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
+            test_client("http://127.0.0.1:1"),
+            pricing_store(directory.path()),
+            now(),
+        )
+    };
+    let missing = service_refresh(make(), directory.path());
+    assert_eq!(missing.error_kind, Some(ProviderErrorKind::Authentication));
+    assert_eq!(
+        missing.error.as_deref(),
+        Some("OpenCode was not detected. Sign in to OpenCode Go or use OpenCode locally first.")
+    );
+    assert!(missing
+        .snapshot
+        .unwrap()
+        .usage_histories
+        .local_device_status
+        .unwrap()
+        .error
+        .is_none());
+    assert!(!missing.stale);
+    let mut local =
+        crate::models::UsageHistories::local_device(crate::models::UsageHistory::default());
+    let old = chrono::Utc::now() - chrono::Duration::hours(2);
+    local.local_device_status = Some(crate::models::LocalUsageStatus {
+        refreshed_at: Some(old),
+        error: None,
+        warnings: vec![],
+    });
+    crate::storage::Storage::open(&directory.path().join("openquota-state.db"))
+        .unwrap()
+        .save_local_usage("opencode", &local)
+        .unwrap();
+    fs::write(directory.path().join("opencode.db"), b"corrupt").unwrap();
+    let failed = service_refresh(make(), directory.path());
+    assert_eq!(failed.error_kind, Some(ProviderErrorKind::LocalData));
+    assert!(failed.stale);
+    let snapshot = failed.snapshot.unwrap();
+    assert_eq!(snapshot.refreshed_at, chrono::DateTime::UNIX_EPOCH);
+    assert_eq!(
+        snapshot
+            .usage_histories
+            .local_device_status
+            .unwrap()
+            .refreshed_at,
+        Some(old)
+    );
+}
+
+#[test]
+fn readable_local_database_needs_no_go_login() {
+    let directory = tempdir().unwrap();
+    let connection = create_database(&directory.path().join("opencode.db"), false);
+    insert_message(
+        &connection,
+        "session",
+        "message",
+        timestamp(),
+        &exact_message("opencode", "priced-model", 1.0, 100, 0),
+    );
+    drop(connection);
+    let provider = OpenCodeProvider::with_dependencies(
+        OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
+        test_client("http://127.0.0.1:1"),
+        pricing_store(directory.path()),
+        now(),
+    );
+    let state = service_refresh(provider, directory.path());
+    assert!(state.error.is_none());
+    let snapshot = state.snapshot.unwrap();
+    assert_eq!(snapshot.refreshed_at, chrono::DateTime::UNIX_EPOCH);
+    assert!(snapshot.quotas.is_empty());
+    assert!(snapshot
+        .usage_histories
+        .local_device_status
+        .unwrap()
+        .error
+        .is_none());
+    assert_eq!(
+        snapshot
+            .usage_histories
+            .local_device
+            .unwrap()
+            .today
+            .unwrap()
+            .estimated_cost_usd,
+        Some(1.0)
+    );
 }

@@ -173,6 +173,18 @@ impl ProviderRegistry {
             .get(metric_index)
     }
 
+    /// A single runtime under test need not be the app's fallback-enabled provider.
+    #[cfg(test)]
+    pub(crate) fn single_for_test(provider: Arc<dyn UsageProvider>) -> Self {
+        let definition = provider.definition();
+        let id = definition.id.clone();
+        let mut catalog_definition = definition;
+        catalog_definition.fallback_enabled = true;
+        let mut registry = Self::from_definitions(vec![catalog_definition]).unwrap();
+        registry.runtimes.insert(id, provider);
+        registry
+    }
+
     #[cfg(test)]
     pub fn from_definitions(
         definitions: Vec<ProviderDefinition>,
