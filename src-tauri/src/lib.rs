@@ -107,11 +107,14 @@ fn spawn_startup_credential_detection(
         if outcome.newly_enabled_provider_ids.is_empty() {
             return;
         }
+        let watch = commands::settings::SettingsWatch::new(&settings);
         service
             .refresh_enabled_with_progress(&outcome.newly_enabled_provider_ids, true, |state| {
+                watch.emit_if_changed(&app, &settings);
                 commands::usage::publish_refresh_progress(&app, &settings, state);
             })
             .await;
+        watch.emit_if_changed(&app, &settings);
         let state = service.state();
         let _ = app.emit("usage-state", &state);
         notifications::finish_refresh(&app, &state, &settings, &notifications);
