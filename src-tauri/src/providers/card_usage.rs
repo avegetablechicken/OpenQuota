@@ -194,8 +194,8 @@ pub(super) struct Landed {
     /// Some observation was added to the Card's own series. This decides whether a client is
     /// named in the Card's source note.
     pub own_series: bool,
-    /// Some observation was given to the Card's Others. Others drops usage with no tokens and no
-    /// cost, so this can be true while Others stays empty.
+    /// Some observation was added to the Card's Others. Others drops usage with no tokens and no
+    /// cost, which does not count.
     pub others: bool,
 }
 
@@ -213,15 +213,16 @@ fn add_settled(
 ) -> Option<Bucket> {
     let tokens = observation.total_tokens;
     if settled.others {
-        accumulator.add_partially_priced_other(
-            date,
-            tokens,
-            settled.priced_tokens,
-            settled.cost,
-            settled.estimated,
-            observation.model.unwrap_or("Unattributed"),
-        );
-        return Some(Bucket::Others);
+        return accumulator
+            .add_partially_priced_other(
+                date,
+                tokens,
+                settled.priced_tokens,
+                settled.cost,
+                settled.estimated,
+                observation.model.unwrap_or("Unattributed"),
+            )
+            .then_some(Bucket::Others);
     }
     let (family, model) = label(pricing, observation.model);
     match settled.cost {
@@ -260,8 +261,7 @@ fn record_home(
         return None;
     }
     if served_by_local_runtime(&observation) {
-        add_others(observation, date, None, accumulator);
-        return Some(Bucket::Others);
+        return add_others(observation, date, None, accumulator);
     }
     let Some(model) = observation.model else {
         return own_series(accumulator);
@@ -283,26 +283,28 @@ fn record_home(
                     &observation,
                 )
             });
-            add_others(observation, date, cost, accumulator);
-            Some(Bucket::Others)
+            add_others(observation, date, cost, accumulator)
         }
     }
 }
 
-/// Adds to the home Card's Others, priced at `cost` when there is one.
+/// Adds to the home Card's Others, priced at `cost` when there is one; `None` when Others
+/// dropped it.
 fn add_others(
     observation: UsageObservation<'_>,
     date: NaiveDate,
     cost: Option<f64>,
     accumulator: &mut DailyUsageAccumulator,
-) {
-    accumulator.add_other(
-        date,
-        observation.total_tokens,
-        cost,
-        observation.recorded_cost.is_none(),
-        priced_model(&observation).unwrap_or("Unattributed"),
-    );
+) -> Option<Bucket> {
+    accumulator
+        .add_other(
+            date,
+            observation.total_tokens,
+            cost,
+            observation.recorded_cost.is_none(),
+            priced_model(&observation).unwrap_or("Unattributed"),
+        )
+        .then_some(Bucket::Others)
 }
 
 /// How a model's usage is labelled on a Card: by its display family, keeping the model as
@@ -363,8 +365,10 @@ fn add_own_series(
             .and_then(|model| estimate(pricing, card, home, model, &observation)),
     };
     let cost = observation.recorded_cost.or(estimated);
-    // Usage with no tokens and nothing to pay is not usage, unless its label must stay visible.
-    if tokens == 0 && cost.is_none_or(|cost| cost <= 0.0) && !observation.keep_when_empty {
+    // Usage with no tokens and nothing to pay is not usage, unless the label of an unpriced
+    // model must stay visible; a priced one would only leave an empty $0 day.
+    let keep_label = observation.keep_when_empty && cost.is_none();
+    if tokens == 0 && cost.is_none_or(|cost| cost <= 0.0) && !keep_label {
         return false;
     }
     let (family, model) = label(pricing, priced_model(&observation));
@@ -372,7 +376,7 @@ fn add_own_series(
         accumulator.add_exact_variant(date, tokens, exact, &family, model);
     } else if let Some(cost) = estimated {
         accumulator.add_variant(date, tokens, cost, &family, model);
-    } else if tokens > 0 || observation.keep_when_empty {
+    } else if tokens > 0 || keep_label {
         accumulator.add_unpriced(date, tokens, &family, model);
     } else {
         return false;
@@ -457,7 +461,7 @@ pub(super) mod test_support {
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
 
-    use super::{record, record_settled, Settled, UsageObservation};
+    use super::{record, record_settled, Landed, PriceSource, Settled, UsageObservation};
     use crate::{
         pricing::{is_local_runtime_model, test_bundled_pricing, ModelPricing, TokenBreakdown},
         providers::card_usage::DailyUsageAccumulator,
@@ -728,6 +732,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn usage_others_drops_does_not_count_as_landed() {
+        let pricing = test_bundled_pricing();
+        let landed = |observation| {
+            let mut accumulator = DailyUsageAccumulator::default();
+            record(
+                [observation],
+                "codex",
+                "codex",
+                now(),
+                &pricing,
+                &mut accumulator,
+            )
+        };
+        for model in ["ollama/llama3", "totally-unknown-model"] {
+            assert_eq!(
+                landed(UsageObservation::new(
+                    now(),
+                    Some(model),
+                    tokens(0, 0),
+                    None
+                )),
+                Landed::default(),
+                "{model}"
+            );
+            assert!(
+                landed(UsageObservation::new(
+                    now(),
+                    Some(model),
+                    tokens(5, 0),
+                    None
+                ))
+                .others,
+                "{model}"
+            );
+        }
+
+        let settled = Settled {
+            others: true,
+            cost: None,
+            estimated: false,
+            priced_tokens: 0,
+            complete: false,
+            unpriced_marker_only: false,
+        };
+        let mut accumulator = DailyUsageAccumulator::default();
+        let empty = UsageObservation::new(now(), Some("foreign"), tokens(0, 0), None);
+        assert_eq!(
+            record_settled([(empty, settled)], now(), true, &pricing, &mut accumulator),
+            Landed::default()
+        );
+    }
+
+    #[test]
+    fn an_empty_observation_priced_at_nothing_leaves_no_day() {
+        let pricing = test_bundled_pricing();
+        // ChatGPT plans price auto-review at $0 from 2026-10-06.
+        let at = Utc.with_ymd_and_hms(2026, 10, 7, 8, 0, 0).unwrap();
+        let observation = UsageObservation {
+            keep_when_empty: true,
+            price_source: PriceSource::CodexLogs { chatgpt_plan: true },
+            ..UsageObservation::new(at, Some("codex-auto-review"), tokens(0, 0), None)
+        };
+        let mut accumulator = DailyUsageAccumulator::default();
+        let landed = record(
+            [observation],
+            "codex",
+            "codex",
+            at,
+            &pricing,
+            &mut accumulator,
+        );
+        assert_eq!(landed, Landed::default());
+        let history = accumulator.build(at, "test");
+        assert!(history.daily.is_empty());
+        assert!(history.unknown_models.is_empty());
     }
 
     #[test]

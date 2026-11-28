@@ -1694,7 +1694,7 @@ mod tests {
 "#;
         const SOURCES: &str = r#"
 deepseek-chat 110: pi=true oh_my_pi=false
-deepseek-chat 0: pi=true oh_my_pi=false
+deepseek-chat 0: pi=false oh_my_pi=false
  110: pi=false oh_my_pi=true
  0: pi=false oh_my_pi=false
 gpt-5.5 0: pi=false oh_my_pi=false

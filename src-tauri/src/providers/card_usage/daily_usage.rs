@@ -261,11 +261,12 @@ impl DailyUsageAccumulator {
         cost: Option<f64>,
         cost_estimated: bool,
         model: &str,
-    ) {
-        self.add_partially_priced_other(date, tokens, tokens, cost, cost_estimated, model);
+    ) -> bool {
+        self.add_partially_priced_other(date, tokens, tokens, cost, cost_estimated, model)
     }
 
-    /// Adds Others usage whose cost covers only `priced_tokens` of its `tokens`.
+    /// Adds Others usage whose cost covers only `priced_tokens` of its `tokens`. Usage with no
+    /// tokens and nothing to pay is dropped; the result says whether the usage was kept.
     pub(super) fn add_partially_priced_other(
         &mut self,
         date: NaiveDate,
@@ -274,10 +275,10 @@ impl DailyUsageAccumulator {
         cost: Option<f64>,
         cost_estimated: bool,
         model: &str,
-    ) {
+    ) -> bool {
         let cost = cost.filter(|value| value.is_finite() && *value >= 0.0);
         if tokens == 0 && cost.is_none_or(|value| value == 0.0) {
-            return;
+            return false;
         }
         self.other_days
             .entry(date)
@@ -294,6 +295,7 @@ impl DailyUsageAccumulator {
                 estimated_cost_usd: cost,
                 cost_estimated: cost.is_some() && cost_estimated,
             });
+        true
     }
 
     /// Builds the three spend periods. Idle or unknown-marker-only periods stay unbacked (`None`),
