@@ -21,7 +21,7 @@ use super::{
     model_scope::{card_for_model, normalize_provider_model},
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 10;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 11;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum PiUsageSource {

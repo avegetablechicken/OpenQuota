@@ -219,13 +219,16 @@ fn load_file<T>(
 where
     T: Serialize + DeserializeOwned,
 {
+    let missing = || -> Result<FileEvents<T>, LogCacheError> {
+        crate::logging::local_usage_file_recovered(provider_id, path);
+        storage.remove_log_events(provider_id, path)?;
+        Ok(FileEvents::Missing)
+    };
     let metadata = match fs::metadata(path) {
+        // A directory, pipe or device is not a log, and reading a pipe could block.
+        Ok(metadata) if !metadata.is_file() => return unreadable(storage, provider_id, path),
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            crate::logging::local_usage_file_recovered(provider_id, path);
-            storage.remove_log_events(provider_id, path)?;
-            return Ok(FileEvents::Missing);
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return missing(),
         Err(_) => return unreadable(storage, provider_id, path),
     };
     let Some(fingerprint) = LogFileFingerprint::from_metadata(&metadata) else {
@@ -248,8 +251,11 @@ where
         return Ok(FileEvents::Loaded(events));
     }
 
-    let Ok(content) = fs::read_to_string(path) else {
-        return unreadable(storage, provider_id, path);
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        // Deleted or rotated since its metadata was read.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return missing(),
+        Err(_) => return unreadable(storage, provider_id, path),
     };
     crate::logging::local_usage_file_recovered(provider_id, path);
     crate::app_debug!("cache", "local usage cache miss for {provider_id}");
@@ -772,6 +778,33 @@ mod tests {
         assert_eq!(texts(&recovered), ["a", "b"]);
         let remembered = logs.load(&fixture.storage, now(), files()).unwrap();
         assert!(Arc::ptr_eq(&recovered, &remembered));
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_file_is_unreadable_even_with_a_cached_row() {
+        let fixture = Fixture::new();
+        let directory = fixture.directory.path().join("sessions.jsonl");
+        fs::create_dir(&directory).unwrap();
+        let fingerprint =
+            LogFileFingerprint::from_metadata(&fs::metadata(&directory).unwrap()).unwrap();
+        fixture
+            .storage
+            .save_log_events(
+                "test",
+                &directory,
+                fingerprint.size,
+                fingerprint.modified_nanos,
+                &format!(
+                    r#"{{"schema_version":1,"events":[{{"at":"{LATE}","text":"stale","tag":0}}]}}"#
+                ),
+            )
+            .unwrap();
+        let loaded = load_file::<Line>(&fixture.storage, "test", &directory, 1, |_| {
+            panic!("a directory is not parsed")
+        })
+        .unwrap();
+        assert_eq!(loaded, FileEvents::Unreadable);
+        assert!(fixture.cached("test", &directory).is_none());
     }
 
     #[test]
