@@ -39,6 +39,8 @@ const contracts = [
   'BootstrapState',
   'Sub2ApiConfigState',
   'ReusableCredential',
+  // A Rust model the TypeScript side names differently, as [Rust name, TypeScript name].
+  ['MetricPolicyView', 'MetricPolicy'],
 ];
 
 function camelCase(value) {
@@ -76,13 +78,14 @@ function typeScriptFields(name, visiting = new Set()) {
 }
 
 for (const contract of contracts) {
-  const rust = rustFields(contract);
-  const typeScript = typeScriptFields(contract);
+  const [rustName, typeScriptName] = Array.isArray(contract) ? contract : [contract, contract];
+  const rust = rustFields(rustName);
+  const typeScript = typeScriptFields(typeScriptName);
   const missing = [...rust].filter((field) => !typeScript.has(field));
   const extra = [...typeScript].filter((field) => !rust.has(field));
   if (missing.length > 0 || extra.length > 0) {
     throw new Error(
-      `${contract} field mismatch; missing in TypeScript: ${missing.join(', ') || 'none'}; ` +
+      `${rustName} field mismatch; missing in TypeScript: ${missing.join(', ') || 'none'}; ` +
         `extra in TypeScript: ${extra.join(', ') || 'none'}`,
     );
   }
