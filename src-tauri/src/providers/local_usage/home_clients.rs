@@ -17,7 +17,7 @@ use crate::{
         local_usage::{
             card_usage::DailyUsageAccumulator,
             gemini_cli,
-            log_usage::scan_or_cached_usage,
+            log_usage::{scan_or_cached_usage, ScannedUsage},
             pi,
             zcode::{ZCodeProvider, ZCodeUsageScanner},
         },
@@ -98,7 +98,7 @@ pub(crate) fn card_history<E: From<FoldInUnavailable>>(
     card: Card<'_>,
     native_source: &str,
     scan_native: impl FnOnce(&mut DailyUsageAccumulator) -> Result<bool, E>,
-) -> Result<UsageHistory, E> {
+) -> Result<ScannedUsage, E> {
     let mut accumulator = DailyUsageAccumulator::default();
     let native_contributed = scan_native(&mut accumulator)?;
     Ok(history(
@@ -116,7 +116,7 @@ pub(crate) fn folded_history(
     clients: &[&dyn HomeClient],
     context: &FoldContext<'_>,
     card: Card<'_>,
-) -> Result<UsageHistory, FoldInUnavailable> {
+) -> Result<ScannedUsage, FoldInUnavailable> {
     let accumulator = DailyUsageAccumulator::default();
     history(clients, context, card, None, false, accumulator)
 }
@@ -131,14 +131,18 @@ fn history(
     native_source: Option<&str>,
     native_contributed: bool,
     mut accumulator: DailyUsageAccumulator,
-) -> Result<UsageHistory, FoldInUnavailable> {
+) -> Result<ScannedUsage, FoldInUnavailable> {
     let folded = fold(clients, context, card, &mut accumulator);
     // Usage in Others names no client but still counts as this refresh's history.
     if !native_contributed && folded.sources.is_empty() && accumulator.is_empty() && folded.failed {
         return Err(FoldInUnavailable);
     }
     let source_note = source_note(native_source, &folded.sources);
-    Ok(accumulator.build(context.now, &source_note))
+    let warnings = accumulator.warnings();
+    Ok(ScannedUsage {
+        history: accumulator.build(context.now, &source_note),
+        warnings,
+    })
 }
 
 struct Folded {
@@ -712,7 +716,7 @@ mod tests {
                 ..Fake::new("Gemini CLI", Some(vec![]))
             };
             let clients: [&dyn HomeClient; 2] = [&others_only, &failing];
-            let history = card_history(
+            let scanned = card_history(
                 &clients,
                 context,
                 card("antigravity"),
@@ -720,7 +724,7 @@ mod tests {
                 |_| Ok::<_, FoldInUnavailable>(false),
             )
             .unwrap();
-            let others = history.other_usage.unwrap().today.unwrap();
+            let others = scanned.history.other_usage.unwrap().today.unwrap();
             assert_eq!(others.tokens, 120);
         });
     }

@@ -8,7 +8,9 @@ use std::{
 use rusqlite::{types::ValueRef, Connection, OpenFlags, Row};
 use serde_json::Value;
 
-use crate::pricing::ModelPricing;
+use crate::{
+    pricing::ModelPricing, providers::local_usage::session_model::SessionModelTracker,
+};
 
 use super::record::{
     parse_message, parse_part, ParsedMessage, ParsedPart, UsageRecord, EPOCH_MILLISECONDS_THRESHOLD,
@@ -229,16 +231,32 @@ fn load_messages(
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
-        let Some(message) =
-            parse_message(session_id, message_id, column_timestamp, &value, card_id)
-        else {
+        let Some(message) = parse_message(session_id, message_id, column_timestamp, &value) else {
             continue;
         };
         if message.timestamp.timestamp_millis() >= cutoff_ms {
             messages.push(message);
         }
     }
-    Ok(messages)
+    messages.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.message_id.cmp(&right.message_id))
+    });
+    let mut trackers = HashMap::<(String, String), SessionModelTracker>::new();
+    let resolved = messages
+        .into_iter()
+        .filter_map(|mut message| {
+            let key = (
+                message.session_id.clone(),
+                message.provider_id.trim().to_ascii_lowercase(),
+            );
+            let explicit = message.explicit_model.take();
+            let resolved = trackers.entry(key).or_default().resolve(explicit);
+            message.resolve_for_card(resolved.model, resolved.inherited, card_id)
+        })
+        .collect();
+    Ok(resolved)
 }
 
 fn load_parts(

@@ -9,13 +9,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
-    models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
     providers::local_usage::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, UsageObservation},
         home_clients::{self, Card, FoldContext, HomeClient},
-        log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
+        log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat, ScannedUsage},
     },
     storage::Storage,
 };
@@ -51,7 +50,7 @@ impl GrokLogUsageScanner {
         storage: &Storage,
         now: DateTime<Utc>,
         pricing: &ModelPricing,
-    ) -> Result<UsageHistory, GrokError> {
+    ) -> Result<ScannedUsage, GrokError> {
         scan_path(storage, &self.path, self.clients, now, pricing)
     }
 }
@@ -131,7 +130,7 @@ fn scan_path(
     clients: &[&dyn HomeClient],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
-) -> Result<UsageHistory, GrokError> {
+) -> Result<ScannedUsage, GrokError> {
     let events = load_events(storage, path, now)?;
 
     home_clients::card_history(
@@ -236,7 +235,11 @@ fn model_id(message: &str, context: &Map<String, Value>) -> Option<String> {
 }
 
 #[cfg(test)]
-fn aggregate(events: &[TokenEvent], now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
+fn aggregate(
+    events: &[TokenEvent],
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+) -> crate::models::UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(events, now, pricing, &mut accumulator);
     accumulator.build(now, SOURCE_NOTE)
@@ -435,7 +438,7 @@ mod tests {
         let missing = scanner
             .scan(&storage, now(), &test_bundled_pricing())
             .unwrap();
-        assert!(missing.daily.is_empty());
+        assert!(missing.history.daily.is_empty());
 
         fs::create_dir_all(&log).unwrap();
         let error = scanner

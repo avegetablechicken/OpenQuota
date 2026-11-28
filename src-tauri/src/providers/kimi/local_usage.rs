@@ -16,17 +16,23 @@ use crate::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, UsageObservation},
         log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
+        session_model::{SessionModelCli, SessionModelTracker},
     },
     storage::Storage,
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct KimiTokenEvent {
     timestamp: DateTime<Utc>,
     provider: Option<String>,
     model: Option<String>,
+    /// Same-provider session context, kept separate from the request model in the cache.
+    #[serde(default)]
+    session_model: Option<String>,
+    #[serde(default)]
+    model_inherited: bool,
     input: u64,
     cache_write: u64,
     cache_read: u64,
@@ -122,12 +128,16 @@ impl LogFormat for KimiLogs {
         event.timestamp
     }
 
-    /// An event that names no model, not even through its request, gets the default model.
+    /// Resolve same-provider session context after loading the raw cache, then the current
+    /// configured default. Configuration changes must not require reparsing the wire file.
     fn attach(event: &mut KimiTokenEvent, fallback_model: &Option<String>) {
         if event.model.is_none() {
-            event.model = fallback_model
-                .as_deref()
-                .map(|model| normalize_kimi_model(model, event.provider.as_deref()));
+            event.model_inherited = event.session_model.is_some();
+            event.model = event.session_model.clone().or_else(|| {
+                fallback_model
+                    .as_deref()
+                    .map(|model| normalize_kimi_model(model, event.provider.as_deref()))
+            });
         }
     }
 
@@ -286,6 +296,18 @@ struct LastRequestContext {
 }
 
 impl LastRequestContext {
+    fn model_for(&self, provider: Option<&str>) -> Option<String> {
+        if provider.is_some_and(|provider| {
+            !self
+                .provider
+                .as_deref()
+                .is_some_and(|last| provider.eq_ignore_ascii_case(last))
+        }) {
+            return None;
+        }
+        self.model_alias.clone().or_else(|| self.model.clone())
+    }
+
     /// The last request's provider, for a usage line that names no provider of its own. A line
     /// naming a different model belongs to another request, so it does not inherit it.
     fn provider_for(&self, model: Option<&str>) -> Option<String> {
@@ -337,6 +359,20 @@ fn parse_jsonl(content: &str) -> Vec<KimiTokenEvent> {
         }
     }
 
+    let mut trackers = HashMap::<String, SessionModelTracker>::new();
+    for event in &mut events {
+        // Unknown providers are not a shared identity; never infer across their records.
+        let Some(provider) = event.provider.as_deref() else {
+            continue;
+        };
+        let resolved = trackers
+            .entry(provider.trim().to_ascii_lowercase())
+            .or_default()
+            .resolve(event.model.clone());
+        if resolved.inherited {
+            event.session_model = resolved.model;
+        }
+    }
     events
 }
 
@@ -353,11 +389,10 @@ fn parse_usage_record(
     let timestamp = parse_timestamp_value(map.get("time").or_else(|| map.get("timestamp")))?;
     let usage = map.get("usage").and_then(Value::as_object)?;
     let (input, cache_write, cache_read, output) = extract_token_counts(usage)?;
+    let explicit_provider = non_empty_str(map.get("provider"));
     let raw_model = non_empty_str(map.get("model"))
-        .or_else(|| last_request.model_alias.clone())
-        .or_else(|| last_request.model.clone());
-    let provider = non_empty_str(map.get("provider"))
-        .or_else(|| last_request.provider_for(raw_model.as_deref()));
+        .or_else(|| last_request.model_for(explicit_provider.as_deref()));
+    let provider = explicit_provider.or_else(|| last_request.provider_for(raw_model.as_deref()));
     let model = raw_model
         .as_deref()
         .map(|model| normalize_kimi_model(model, provider.as_deref()));
@@ -366,6 +401,8 @@ fn parse_usage_record(
         timestamp,
         provider,
         model,
+        session_model: None,
+        model_inherited: false,
         input,
         cache_write,
         cache_read,
@@ -393,12 +430,11 @@ fn parse_legacy_status_update(
             .or_else(|| payload.get("timestamp"))
             .or_else(|| payload.get("time")),
     )?;
+    let explicit_provider = non_empty_str(payload.get("provider"));
     let raw_model = non_empty_str(payload.get("model"))
         .or_else(|| non_empty_str(message.get("model")))
-        .or_else(|| last_request.model_alias.clone())
-        .or_else(|| last_request.model.clone());
-    let provider = non_empty_str(payload.get("provider"))
-        .or_else(|| last_request.provider_for(raw_model.as_deref()));
+        .or_else(|| last_request.model_for(explicit_provider.as_deref()));
+    let provider = explicit_provider.or_else(|| last_request.provider_for(raw_model.as_deref()));
     let model = raw_model
         .as_deref()
         .map(|model| normalize_kimi_model(model, provider.as_deref()));
@@ -407,6 +443,8 @@ fn parse_legacy_status_update(
         timestamp,
         provider,
         model,
+        session_model: None,
+        model_inherited: false,
         input,
         cache_write,
         cache_read,
@@ -556,6 +594,7 @@ fn aggregate_into(
 fn observation(event: &KimiTokenEvent) -> UsageObservation<'_> {
     UsageObservation {
         provider_hint: event.provider.as_deref(),
+        session_model_cli: event.model_inherited.then_some(SessionModelCli::KimiCode),
         ..UsageObservation::new(
             event.timestamp,
             event.model.as_deref(),

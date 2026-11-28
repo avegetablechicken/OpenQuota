@@ -274,19 +274,53 @@ where
     Ok(FileEvents::Loaded(events))
 }
 
+/// Local usage history returned by a card scan together with any card-level warnings (such as
+/// unverified session-model attribution).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScannedUsage {
+    pub history: UsageHistory,
+    pub warnings: Vec<String>,
+}
+
+pub trait IntoScannedUsage {
+    fn into_scanned_usage(self) -> ScannedUsage;
+}
+
+impl IntoScannedUsage for UsageHistory {
+    fn into_scanned_usage(self) -> ScannedUsage {
+        ScannedUsage {
+            history: self,
+            warnings: Vec::new(),
+        }
+    }
+}
+
+impl IntoScannedUsage for ScannedUsage {
+    fn into_scanned_usage(self) -> ScannedUsage {
+        self
+    }
+}
+
 /// Keeps provider quotas usable when supplementary local history cannot be refreshed. A prior
 /// persisted history is reused when available; otherwise the provider still returns its live data
 /// with an explicit warning instead of failing the entire refresh.
-pub fn scan_or_cached_usage<E>(
+pub fn scan_or_cached_usage<T, E>(
     storage: &Storage,
     provider_id: &str,
     identity: crate::providers::CacheIdentity<'_>,
     provider_name: &str,
-    scan: impl FnOnce() -> Result<UsageHistory, E>,
+    scan: impl FnOnce() -> Result<T, E>,
     warnings: &mut Vec<String>,
-) -> UsageHistory {
+) -> UsageHistory
+where
+    T: IntoScannedUsage,
+{
     match scan() {
-        Ok(usage) => usage,
+        Ok(scanned) => {
+            let scanned = scanned.into_scanned_usage();
+            warnings.extend(scanned.warnings);
+            scanned.history
+        }
         Err(_) => {
             let tag = format!("plugin:{provider_id}");
             crate::app_warn!(
@@ -460,6 +494,31 @@ mod tests {
         assert_eq!(usage, cached_usage);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Codex"));
+    }
+
+    #[test]
+    fn successful_scan_forwards_card_warnings() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        let expected = cached_usage();
+        let mut warnings = Vec::new();
+
+        let usage = scan_or_cached_usage(
+            &storage,
+            "antigravity",
+            crate::providers::CacheIdentity::Unscoped,
+            "Antigravity",
+            || {
+                Ok::<_, ()>(super::ScannedUsage {
+                    history: expected.clone(),
+                    warnings: vec!["unverified cli warning".into()],
+                })
+            },
+            &mut warnings,
+        );
+
+        assert_eq!(usage, expected);
+        assert_eq!(warnings, ["unverified cli warning"]);
     }
 
     #[test]

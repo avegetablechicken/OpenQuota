@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
     storage::Storage,
 };
@@ -19,17 +18,20 @@ use crate::providers::local_usage::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, UsageObservation},
     home_clients::{self, Card, FoldContext, HomeClient},
-    log_usage::{parse_log_timestamp, LocalLogs, LogFormat},
+    log_usage::{parse_log_timestamp, LocalLogs, LogFormat, ScannedUsage},
+    session_model::{SessionModelCli, SessionModelTracker},
 };
 
 pub(super) const USAGE_SOURCE_NOTE: &str = "From your Antigravity transcripts (estimated)";
-const LOG_CACHE_SCHEMA_VERSION: u8 = 1;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AntigravityTokenEvent {
     pub timestamp: DateTime<Utc>,
     pub step_index: Option<u64>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub model_inherited: bool,
     pub input: u64,
     pub cache_write: u64,
     pub cache_read: u64,
@@ -150,7 +152,7 @@ pub fn scan_local_usage(
     storage: &Storage,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
-) -> Result<UsageHistory, AntigravityError> {
+) -> Result<ScannedUsage, AntigravityError> {
     let roots = default_roots();
     scan_roots(storage, &roots, now, pricing, &home_clients::CLIENTS)
 }
@@ -161,7 +163,7 @@ fn scan_roots(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     clients: &[&dyn HomeClient],
-) -> Result<UsageHistory, AntigravityError> {
+) -> Result<ScannedUsage, AntigravityError> {
     let events = load_local_events(storage, roots, now)?;
 
     home_clients::card_history(
@@ -317,14 +319,18 @@ fn expand_home(value: &str, home: &Path) -> PathBuf {
 pub fn parse_jsonl(content: &str) -> Vec<AntigravityTokenEvent> {
     let mut events: Vec<AntigravityTokenEvent> = Vec::new();
     let mut by_step = HashMap::<u64, usize>::new();
+    let mut model_tracker = SessionModelTracker::default();
 
     for line in content.lines() {
         if !line.contains("_tokens") {
             continue;
         }
-        let Some(event) = parse_line(line) else {
+        let Some(mut event) = parse_line(line) else {
             continue;
         };
+        let resolved = model_tracker.resolve(event.model.take());
+        event.model = resolved.model;
+        event.model_inherited = resolved.inherited;
         if let Some(step_index) = event.step_index {
             if let Some(&existing_index) = by_step.get(&step_index) {
                 if event.total_tokens() >= events[existing_index].total_tokens() {
@@ -380,6 +386,7 @@ fn parse_line(line: &str) -> Option<AntigravityTokenEvent> {
         timestamp,
         step_index,
         model,
+        model_inherited: false,
         input,
         cache_write,
         cache_read,
@@ -436,12 +443,17 @@ fn aggregate_routed_into(
 }
 
 fn observation(event: &AntigravityTokenEvent) -> UsageObservation<'_> {
-    UsageObservation::new(
-        event.timestamp,
-        event.model.as_deref(),
-        event.pricing_tokens(),
-        None,
-    )
+    UsageObservation {
+        session_model_cli: event
+            .model_inherited
+            .then_some(SessionModelCli::Antigravity),
+        ..UsageObservation::new(
+            event.timestamp,
+            event.model.as_deref(),
+            event.pricing_tokens(),
+            None,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -539,6 +551,106 @@ mod tests {
     }
 
     #[test]
+    fn inherits_active_session_model_for_checkpoint_steps_without_model() {
+        let content = concat!(
+            r#"{"step_index":0,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-11-26T12:00:00Z","input_tokens":100,"cache_read_tokens":200,"output_tokens":30}"#,
+            "\n",
+            r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T12:54:28Z","model":"gemini-4-neon-high","input_tokens":22092,"cache_read_tokens":491058,"output_tokens":249}"#,
+            "\n",
+            r#"{"step_index":2,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-11-26T12:54:47Z","input_tokens":3413,"cache_read_tokens":513151,"output_tokens":3437}"#,
+            "\n",
+            r#"{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T12:56:00Z","model":"claude-opus-4-6-thinking","input_tokens":500,"cache_read_tokens":1000,"output_tokens":50}"#,
+            "\n",
+            r#"{"step_index":4,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-11-26T12:57:00Z","input_tokens":120,"cache_read_tokens":1550,"output_tokens":80}"#,
+            "\n"
+        );
+
+        let events = parse_jsonl(content);
+        assert_eq!(events.len(), 5);
+        assert_eq!(events[0].model, None);
+        assert_eq!(events[1].model.as_deref(), Some("gemini-4-neon-high"));
+        assert_eq!(events[2].model.as_deref(), Some("gemini-4-neon-high"));
+        assert_eq!(events[2].total_tokens(), 520_001);
+        assert_eq!(events[3].model.as_deref(), Some("claude-opus-4-6-thinking"));
+        assert_eq!(events[4].model.as_deref(), Some("claude-opus-4-6-thinking"));
+    }
+
+    #[test]
+    fn checkpoint_steps_do_not_mark_antigravity_usage_unattributed() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        let root = directory.path().join(".gemini").join("antigravity-cli");
+        let now = local_noon(2026, 11, 26);
+        let planner_ts = (now - chrono::Duration::minutes(2)).to_rfc3339();
+        let checkpoint_ts = (now - chrono::Duration::minutes(1)).to_rfc3339();
+
+        let body = format!(
+            concat!(
+                r#"{{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"{planner_ts}","model":"gemini-4-neon-high","input_tokens":100000,"cache_read_tokens":200000,"output_tokens":10000}}"#,
+                "\n",
+                r#"{{"step_index":2,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"{checkpoint_ts}","input_tokens":5000,"cache_read_tokens":300000,"output_tokens":3000}}"#,
+                "\n"
+            ),
+            planner_ts = planner_ts,
+            checkpoint_ts = checkpoint_ts,
+        );
+        write_transcript(&root, "conv-compact", "transcript.jsonl", &body);
+
+        let scanned = scan_roots(
+            &storage,
+            std::slice::from_ref(&root),
+            now,
+            &test_bundled_pricing(),
+            &[],
+        )
+        .unwrap();
+
+        assert!(scanned.warnings.is_empty());
+        let today = scanned.history.today.expect("today usage should exist");
+        assert_eq!(today.tokens, 618_000);
+        assert!(today.estimate_complete);
+        assert!(today.unknown_models.is_empty());
+        assert!(scanned.history.unknown_models.is_empty());
+    }
+
+    #[test]
+    fn whitelisted_antigravity_checkpoint_routed_to_claude_emits_no_warning() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
+        let root = directory.path().join(".gemini").join("antigravity-cli");
+        let now = local_noon(2026, 11, 26);
+        let planner_ts = (now - chrono::Duration::minutes(2)).to_rfc3339();
+        let checkpoint_ts = (now - chrono::Duration::minutes(1)).to_rfc3339();
+
+        let body = format!(
+            concat!(
+                r#"{{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"{planner_ts}","model":"claude-sonnet-4-6","input_tokens":100000,"cache_read_tokens":0,"output_tokens":10000}}"#,
+                "\n",
+                r#"{{"step_index":2,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"{checkpoint_ts}","input_tokens":5000,"cache_read_tokens":100000,"output_tokens":2000}}"#,
+                "\n"
+            ),
+            planner_ts = planner_ts,
+            checkpoint_ts = checkpoint_ts,
+        );
+        write_transcript(&root, "conv-claude-compact", "transcript.jsonl", &body);
+
+        let mut claude_accumulator = DailyUsageAccumulator::default();
+        assert!(scan_routed_roots_into(
+            &storage,
+            std::slice::from_ref(&root),
+            now,
+            &test_bundled_pricing(),
+            "claude",
+            &mut claude_accumulator,
+        )
+        .unwrap());
+        assert!(claude_accumulator.warnings().is_empty());
+        let claude_today = claude_accumulator.build(now, "test").today.unwrap();
+        assert_eq!(claude_today.tokens, 217_000);
+        assert!(claude_today.unknown_models.is_empty());
+    }
+
+    #[test]
     fn scans_prices_known_models_and_keeps_unpriced_tokens_visible() {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("openquota.db")).unwrap();
@@ -562,8 +674,9 @@ mod tests {
         write_transcript(&root, "conv-1", "transcript.jsonl", &body);
 
         let pricing = test_bundled_pricing();
-        let history =
-            scan_roots(&storage, std::slice::from_ref(&root), now, &pricing, &[]).unwrap();
+        let history = scan_roots(&storage, std::slice::from_ref(&root), now, &pricing, &[])
+            .unwrap()
+            .history;
 
         let today = history.today.expect("today usage should exist");
         assert_eq!(today.tokens, 310_000);
@@ -656,7 +769,9 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert!(files[0].to_string_lossy().contains("antigravity-cli"));
 
-        let history = scan_roots(&storage, &roots, now, &test_bundled_pricing(), &[]).unwrap();
+        let history = scan_roots(&storage, &roots, now, &test_bundled_pricing(), &[])
+            .unwrap()
+            .history;
         assert_eq!(history.today.unwrap().tokens, 38_000);
     }
 
@@ -691,7 +806,8 @@ mod tests {
             &test_bundled_pricing(),
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .history;
         // shared_step (11_000) counted once + fork_step (15_500) = 26_500.
         assert_eq!(history.today.unwrap().tokens, 26_500);
     }
@@ -724,6 +840,7 @@ mod tests {
                 timestamp: now() - Duration::days(days_ago),
                 step_index: None,
                 model: model.map(str::to_owned),
+                model_inherited: false,
                 input,
                 cache_write: 0,
                 cache_read: 0,

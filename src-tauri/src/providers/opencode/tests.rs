@@ -539,6 +539,71 @@ fn model_names_route_opencode_sessions_across_all_model_family_cards_and_others(
 }
 
 #[test]
+fn missing_model_in_opencode_session_inherits_within_session_and_warns_as_unverified() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("opencode.db");
+    let connection = create_database(&path, false);
+    insert_message(
+        &connection,
+        "s1",
+        "m1",
+        timestamp(),
+        &serde_json::json!({
+            "role": "assistant",
+            "providerID": "anthropic",
+            "modelID": "claude-sonnet-4-5",
+            "tokens": { "input": 1000, "output": 100 }
+        })
+        .to_string(),
+    );
+    insert_message(
+        &connection,
+        "s1",
+        "m2",
+        timestamp() + 1_000,
+        &serde_json::json!({
+            "role": "assistant",
+            "providerID": "anthropic",
+            "tokens": { "input": 500, "output": 50 }
+        })
+        .to_string(),
+    );
+    insert_message(
+        &connection,
+        "s2",
+        "m3",
+        timestamp() + 2_000,
+        &serde_json::json!({
+            "role": "assistant",
+            "providerID": "anthropic",
+            "tokens": { "input": 200, "output": 20 }
+        })
+        .to_string(),
+    );
+    drop(connection);
+
+    let scanner = OpenCodeUsageScanner::for_paths(vec![path]);
+    let mut accumulator = DailyUsageAccumulator::default();
+    assert!(scanner
+        .scan_into(
+            now(),
+            &crate::pricing::test_bundled_pricing(),
+            "claude",
+            &mut accumulator
+        )
+        .unwrap());
+    let warnings = accumulator.warnings();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("OpenCode"));
+    assert!(warnings[0].contains("unverified"));
+
+    let today = accumulator.build(now(), "test").today.unwrap();
+    // m1 (1100) + m2 inherited (550) + m3 in separate session s2 (220, still Unattributed) = 1870.
+    assert_eq!(today.tokens, 1_870);
+    assert_eq!(today.unknown_models, ["Unattributed"]);
+}
+
+#[test]
 fn data_only_message_schema_is_supported_and_orphans_are_ignored_when_sessions_exist() {
     let directory = tempdir().unwrap();
     let variant_path = directory.path().join("opencode-variant.db");

@@ -569,6 +569,7 @@ fn event_fast_tier_defaults_to_two_x_multiplier() {
     let event = TokenEvent {
         timestamp: Utc::now(),
         model: "test-model".into(),
+        model_inherited: false,
         input: 1_000_000,
         cached: 0,
         output: 0,
@@ -607,6 +608,7 @@ fn missing_cache_rate_provenance_uses_full_input_price() {
     let event = TokenEvent {
         timestamp: Utc::now(),
         model: "test-model".into(),
+        model_inherited: false,
         input: 1_000_000,
         cached: 1_000_000,
         output: 0,
@@ -636,6 +638,7 @@ fn pro_model_overrides_an_explicit_legacy_cache_discount() {
     let event = TokenEvent {
         timestamp: Utc::now(),
         model: "gpt-5.5-pro".into(),
+        model_inherited: false,
         input: 100_000,
         cached: 100_000,
         output: 0,
@@ -663,6 +666,7 @@ fn codex_long_context_rates_start_above_272k_prompt_tokens() {
     let event = |input| TokenEvent {
         timestamp: Utc::now(),
         model: "gpt-5.4".into(),
+        model_inherited: false,
         input,
         cached: 0,
         output: 0,
@@ -746,6 +750,7 @@ fn fast_alias_uses_unscaled_base_rates_and_one_codex_multiplier() {
     let event = TokenEvent {
         timestamp: Utc::now(),
         model: "gpt-5.5-fast".into(),
+        model_inherited: false,
         input: 100_000,
         cached: 0,
         output: 0,
@@ -773,6 +778,7 @@ fn fast_only_catalog_model_keeps_its_existing_rate_without_a_second_multiplier()
     let event = TokenEvent {
         timestamp: Utc::now(),
         model: "vendor-model-fast".into(),
+        model_inherited: false,
         input: 100_000,
         cached: 0,
         output: 0,
@@ -809,6 +815,7 @@ mod characterization {
         TokenEvent {
             timestamp: now() - Duration::days(days_ago),
             model: model.to_owned(),
+            model_inherited: false,
             input,
             cached: 0,
             output,

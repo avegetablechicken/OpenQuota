@@ -11,8 +11,11 @@ use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
 use crate::pricing::{is_local_runtime_model, ModelPricing, ServiceTier, TokenBreakdown};
 
-use super::model_scope::{
-    card_for_model, is_local_runtime_provider, native_log_disposition, LocalModelDisposition,
+use super::{
+    model_scope::{
+        card_for_model, is_local_runtime_provider, native_log_disposition, LocalModelDisposition,
+    },
+    session_model::SessionModelCli,
 };
 
 pub(in crate::providers) mod codex;
@@ -47,6 +50,10 @@ pub(in crate::providers) struct UsageObservation<'a> {
     pub keep_when_empty: bool,
     /// How usage priced under its home Card is estimated.
     pub price_source: PriceSource,
+    /// Set when `model` was inherited from an earlier event in the same session rather than logged
+    /// explicitly on this event. Non-whitelisted CLIs emit a warning on whichever Card receives
+    /// this observation.
+    pub session_model_cli: Option<SessionModelCli>,
 }
 
 /// Where an observation lands and what it costs, when its Home client settled both itself
@@ -100,6 +107,7 @@ impl<'a> UsageObservation<'a> {
             recorded_cost,
             keep_when_empty: false,
             price_source: PriceSource::CardRates,
+            session_model_cli: None,
         }
     }
 }
@@ -138,13 +146,19 @@ pub(in crate::providers) fn record<'a>(
         };
         if target_card == home_card {
             match record_home(observation, date, home_card, pricing, accumulator) {
-                Some(Bucket::OwnSeries) => landed.own_series = true,
-                Some(Bucket::Others) => landed.others = true,
+                Some(Bucket::OwnSeries) => {
+                    record_unverified_session_model(&observation, accumulator);
+                    landed.own_series = true;
+                }
+                Some(Bucket::Others) => {
+                    record_unverified_session_model(&observation, accumulator);
+                    landed.others = true;
+                }
                 None => {}
             }
-        } else {
-            landed.own_series |=
-                record_routed(observation, date, target_card, pricing, accumulator);
+        } else if record_routed(observation, date, target_card, pricing, accumulator) {
+            record_unverified_session_model(&observation, accumulator);
+            landed.own_series = true;
         }
     }
     landed
@@ -173,12 +187,27 @@ pub(in crate::providers) fn record_settled<'a>(
             continue;
         };
         match add_settled(observation, settled, date, pricing, accumulator) {
-            Some(Bucket::OwnSeries) => landed.own_series = true,
-            Some(Bucket::Others) => landed.others = true,
+            Some(Bucket::OwnSeries) => {
+                record_unverified_session_model(&observation, accumulator);
+                landed.own_series = true;
+            }
+            Some(Bucket::Others) => {
+                record_unverified_session_model(&observation, accumulator);
+                landed.others = true;
+            }
             None => {}
         }
     }
     landed
+}
+
+fn record_unverified_session_model(
+    observation: &UsageObservation<'_>,
+    accumulator: &mut DailyUsageAccumulator,
+) {
+    if let Some(cli) = observation.session_model_cli {
+        accumulator.add_unverified_session_model_cli(cli);
+    }
 }
 
 /// The observation's local date, when it falls inside the Scan window and not in the future.
@@ -922,5 +951,108 @@ mod tests {
                 "{cost:?}, complete {complete}"
             );
         }
+    }
+
+    #[test]
+    fn session_model_warnings_follow_cli_whitelist_across_cards_and_routing() {
+        use super::SessionModelCli;
+
+        let pricing = test_bundled_pricing();
+
+        // Whitelisted CLI (Antigravity) inheriting a Claude model routed to the Claude Card -> no warning.
+        let mut claude_from_antigravity = DailyUsageAccumulator::default();
+        let ag_routed = UsageObservation {
+            session_model_cli: Some(SessionModelCli::Antigravity),
+            ..UsageObservation::new(now(), Some("claude-sonnet-4-5"), tokens(1_000, 100), None)
+        };
+        assert!(
+            record(
+                [ag_routed],
+                "antigravity",
+                "claude",
+                now(),
+                &pricing,
+                &mut claude_from_antigravity,
+            )
+            .own_series
+        );
+        assert!(claude_from_antigravity.warnings().is_empty());
+
+        // Whitelisted CLI (Codex CLI) inheriting a Gemini model routed to Antigravity -> no warning.
+        let mut ag_from_codex = DailyUsageAccumulator::default();
+        let codex_routed = UsageObservation {
+            session_model_cli: Some(SessionModelCli::CodexCli),
+            ..UsageObservation::new(now(), Some("gemini-3-pro"), tokens(1_000, 100), None)
+        };
+        assert!(
+            record(
+                [codex_routed],
+                "codex",
+                "antigravity",
+                now(),
+                &pricing,
+                &mut ag_from_codex,
+            )
+            .own_series
+        );
+        assert!(ag_from_codex.warnings().is_empty());
+
+        // Unverified CLI (Claude Code) inheriting a Gemini model routed to Antigravity ->
+        // warns on Antigravity (the receiving Card), NOT on Claude.
+        let claude_routed = UsageObservation {
+            session_model_cli: Some(SessionModelCli::ClaudeCode),
+            ..UsageObservation::new(now(), Some("gemini-3-pro"), tokens(1_000, 100), None)
+        };
+        let mut claude_home = DailyUsageAccumulator::default();
+        record(
+            [claude_routed],
+            "claude",
+            "claude",
+            now(),
+            &pricing,
+            &mut claude_home,
+        );
+        assert!(claude_home.warnings().is_empty());
+
+        let mut ag_from_claude = DailyUsageAccumulator::default();
+        assert!(
+            record(
+                [claude_routed],
+                "claude",
+                "antigravity",
+                now(),
+                &pricing,
+                &mut ag_from_claude,
+            )
+            .own_series
+        );
+        assert_eq!(ag_from_claude.warnings().len(), 1);
+        assert!(ag_from_claude.warnings()[0].contains("Claude Code"));
+        assert!(ag_from_claude.warnings()[0].contains("unverified"));
+
+        // Out-of-window and zero-token inherited observations never trigger warnings.
+        let mut ignored = DailyUsageAccumulator::default();
+        let old = UsageObservation {
+            session_model_cli: Some(SessionModelCli::GeminiCli),
+            ..UsageObservation::new(
+                now() - Duration::days(35),
+                Some("gemini-3-pro"),
+                tokens(1_000, 100),
+                None,
+            )
+        };
+        let empty = UsageObservation {
+            session_model_cli: Some(SessionModelCli::GeminiCli),
+            ..UsageObservation::new(now(), Some("gemini-3-pro"), tokens(0, 0), None)
+        };
+        record(
+            [old, empty],
+            "antigravity",
+            "antigravity",
+            now(),
+            &pricing,
+            &mut ignored,
+        );
+        assert!(ignored.warnings().is_empty());
     }
 }

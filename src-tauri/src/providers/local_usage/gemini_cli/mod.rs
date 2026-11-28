@@ -14,11 +14,12 @@ use crate::{
     providers::local_usage::{
         card_usage::{self, DailyUsageAccumulator, UsageObservation},
         log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
+        session_model::{inherit_in_session, SessionModelCli},
     },
     storage::Storage,
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 1;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct GeminiCliTokenEvent {
@@ -26,6 +27,8 @@ struct GeminiCliTokenEvent {
     session_id: Option<String>,
     timestamp: DateTime<Utc>,
     model: Option<String>,
+    #[serde(default)]
+    model_inherited: bool,
     input: u64,
     cache_read: u64,
     output: u64,
@@ -229,7 +232,7 @@ fn parse_chat_file(content: &str) -> Vec<GeminiCliTokenEvent> {
                 .or_else(|| root.get("startTime"))
                 .and_then(Value::as_str)
                 .and_then(parse_log_timestamp);
-            return messages
+            let mut events = messages
                 .iter()
                 .filter_map(|item| {
                     parse_message_record(
@@ -238,7 +241,11 @@ fn parse_chat_file(content: &str) -> Vec<GeminiCliTokenEvent> {
                         fallback_timestamp,
                     )
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            inherit_in_session(&mut events, |event| {
+                (&mut event.model, &mut event.model_inherited)
+            });
+            return events;
         }
         // Single-object message record fallback (including single-line wrapped JSONL logs).
         let record = root
@@ -293,6 +300,9 @@ fn parse_chat_file(content: &str) -> Vec<GeminiCliTokenEvent> {
             events.push(event);
         }
     }
+    inherit_in_session(&mut events, |event| {
+        (&mut event.model, &mut event.model_inherited)
+    });
     events
 }
 
@@ -325,6 +335,7 @@ fn parse_message_record(
         session_id,
         timestamp,
         model,
+        model_inherited: false,
         input,
         cache_read,
         output,
@@ -406,8 +417,9 @@ fn aggregate_into(
     accumulator: &mut DailyUsageAccumulator,
 ) -> bool {
     card_usage::record(
-        events.iter().map(|event| {
-            UsageObservation::new(
+        events.iter().map(|event| UsageObservation {
+            session_model_cli: event.model_inherited.then_some(SessionModelCli::GeminiCli),
+            ..UsageObservation::new(
                 event.timestamp,
                 event.model.as_deref(),
                 event.pricing_tokens(),

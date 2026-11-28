@@ -1,13 +1,16 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 };
 
 use chrono::{DateTime, Days, Local, NaiveDate, Utc};
 
-use crate::models::{
-    DailyUsage, ModelUsageBreakdown, ModelUsageEntry, ModelUsageVariant, OtherModelUsage,
-    OtherUsageHistory, OtherUsagePeriod, UsageHistory, UsagePeriod,
+use crate::{
+    models::{
+        DailyUsage, ModelUsageBreakdown, ModelUsageEntry, ModelUsageVariant, OtherModelUsage,
+        OtherUsageHistory, OtherUsagePeriod, UsageHistory, UsagePeriod,
+    },
+    providers::local_usage::session_model::{unverified_inheritance_warning, SessionModelCli},
 };
 
 /// Provider-neutral accumulator for local-log usage. Claude, Codex, and pi keep their own parsing
@@ -18,6 +21,7 @@ pub struct DailyUsageAccumulator {
     days: BTreeMap<NaiveDate, DayAccumulator>,
     unknown_models_by_day: BTreeMap<NaiveDate, HashSet<String>>,
     other_days: BTreeMap<NaiveDate, BTreeMap<String, OtherModelUsage>>,
+    unverified_session_model_clis: BTreeSet<SessionModelCli>,
 }
 
 #[derive(Default)]
@@ -134,6 +138,20 @@ impl DailyUsageAccumulator {
     /// Nothing was recorded: no usage, no Others and no unknown-model marker.
     pub fn is_empty(&self) -> bool {
         self.days.is_empty() && self.unknown_models_by_day.is_empty() && self.other_days.is_empty()
+    }
+
+    pub(super) fn add_unverified_session_model_cli(&mut self, cli: SessionModelCli) {
+        if !cli.is_verified() {
+            self.unverified_session_model_clis.insert(cli);
+        }
+    }
+
+    /// Card-level warnings collected while accumulating usage (such as unverified session-model
+    /// inheritance from a non-whitelisted CLI).
+    pub fn warnings(&self) -> Vec<String> {
+        unverified_inheritance_warning(&self.unverified_session_model_clis)
+            .into_iter()
+            .collect()
     }
 
     /// Adds usage whose dollar cost was derived from a pricing estimate.

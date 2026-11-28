@@ -157,6 +157,7 @@ fn cached_non_codex_events_are_filtered_during_aggregation() {
         card_id: "codex".into(),
         provider: "openai".into(),
         model: "qwen3.8:27b - mlx".into(),
+        model_inherited: false,
         carried_cost: Some(0.0),
         tokens: PiTokenBreakdown {
             input: 100,
@@ -194,6 +195,33 @@ fn carried_cost_is_exact_zero_cost_is_priced_and_unknowns_are_reported() {
     assert!(!period.estimate_complete);
     assert!((period.estimated_cost_usd.unwrap() - 0.502_43).abs() < 0.000_001);
     assert_eq!(period.unknown_models, ["claude-missing-model"]);
+}
+
+#[test]
+fn missing_model_in_pi_session_inherits_within_same_provider_and_warns_as_unverified() {
+    let content = [
+        line("m1", "anthropic", "claude-priced-model", "0"),
+        line("m2", "anthropic", "", "0"),
+        line("m3", "openai", "", "0"),
+    ]
+    .join("\n");
+    let events = super::parse_jsonl(&content, PiUsageSource::Pi);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[1].model, "claude-priced-model");
+    assert!(events[1].model_inherited);
+    // A different provider in the same session does not inherit anthropic's model.
+    assert!(events[2].model.is_empty());
+    assert!(!events[2].model_inherited);
+
+    let mut claude_acc = DailyUsageAccumulator::default();
+    assert!(aggregate_into(&events, "claude", now(), &pricing(), &mut claude_acc).pi);
+    let warnings = claude_acc.warnings();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("pi"));
+    assert!(warnings[0].contains("unverified"));
+    let today = claude_acc.build(now(), "test").today.unwrap();
+    assert_eq!(today.tokens, 404);
+    assert!(today.unknown_models.is_empty());
 }
 
 #[test]
@@ -621,6 +649,7 @@ mod characterization {
             card_id: card_id.to_owned(),
             provider: provider.to_owned(),
             model,
+            model_inherited: false,
             carried_cost,
             tokens: PiTokenBreakdown {
                 input,

@@ -10,7 +10,6 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::{
-    models::UsageHistory,
     pricing::{ModelPricing, TokenBreakdown},
     storage::Storage,
 };
@@ -20,13 +19,16 @@ use crate::providers::local_usage::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, UsageObservation},
     home_clients::{self, Card, FoldContext},
-    log_usage::{parse_log_timestamp, LocalLogs, LogFormat},
+    log_usage::{parse_log_timestamp, LocalLogs, LogFormat, ScannedUsage},
+    session_model::{SessionModelCli, SessionModelTracker},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaudeTokenEvent {
     pub timestamp: DateTime<Utc>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub model_inherited: bool,
     pub input: u64,
     pub cache_write_5m: u64,
     pub cache_write_1h: u64,
@@ -42,7 +44,7 @@ pub struct ClaudeTokenEvent {
     pub cost_usd: Option<f64>,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 4;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 6;
 
 impl ClaudeTokenEvent {
     fn total_tokens(&self) -> u64 {
@@ -103,7 +105,7 @@ pub fn scan_local_usage(
     storage: &Storage,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
-) -> Result<UsageHistory, ClaudeError> {
+) -> Result<ScannedUsage, ClaudeError> {
     let events = load_local_events(storage, now)?;
     home_clients::card_history(
         &home_clients::CLIENTS,
@@ -244,12 +246,26 @@ fn expand_home(value: &str, home: &Path) -> PathBuf {
 }
 
 pub fn parse_jsonl(content: &str) -> Vec<ClaudeTokenEvent> {
-    content
+    let mut events = Vec::new();
+    let mut main_model = SessionModelTracker::default();
+    for line in content
         .lines()
         .filter(|line| line.contains("\"usage\":{"))
         .filter(|line| !has_unsupported_null_field(line))
-        .flat_map(|line| parse_entries(line).unwrap_or_default())
-        .collect()
+    {
+        let Some(mut entries) = parse_entries(line) else {
+            continue;
+        };
+        // Only the parent main-chain event advances the main session. Advisor iterations and
+        // sidechains keep their own explicit models and cannot become its inheritance source.
+        if let Some(parent) = entries.first_mut().filter(|parent| !parent.sidechain) {
+            let resolved = main_model.resolve(parent.model.take());
+            parent.model = resolved.model;
+            parent.model_inherited = resolved.inherited;
+        }
+        events.extend(entries);
+    }
+    events
 }
 
 #[cfg(test)]
@@ -372,6 +388,7 @@ fn usage_event(
     Some(ClaudeTokenEvent {
         timestamp,
         model,
+        model_inherited: false,
         input,
         cache_write_5m,
         cache_write_1h,
@@ -436,7 +453,7 @@ fn aggregate(
     events: &[ClaudeTokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
-) -> UsageHistory {
+) -> crate::models::UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(events, now, pricing, &mut accumulator);
     accumulator.build(now, "From your Claude usage history (estimated)")
@@ -478,20 +495,23 @@ fn aggregate_routed_into(
 }
 
 fn observation(event: &ClaudeTokenEvent) -> UsageObservation<'_> {
-    UsageObservation::new(
-        event.timestamp,
-        event.model.as_deref(),
-        TokenBreakdown {
-            input: event.input,
-            cache_write_5m: event.cache_write_5m,
-            cache_write_1h: event.cache_write_1h,
-            cache_read: event.cache_read,
-            output: event.output,
-            is_fast: event.is_fast,
-            ..TokenBreakdown::default()
-        },
-        event.cost_usd,
-    )
+    UsageObservation {
+        session_model_cli: event.model_inherited.then_some(SessionModelCli::ClaudeCode),
+        ..UsageObservation::new(
+            event.timestamp,
+            event.model.as_deref(),
+            TokenBreakdown {
+                input: event.input,
+                cache_write_5m: event.cache_write_5m,
+                cache_write_1h: event.cache_write_1h,
+                cache_read: event.cache_read,
+                output: event.output,
+                is_fast: event.is_fast,
+                ..TokenBreakdown::default()
+            },
+            event.cost_usd,
+        )
+    }
 }
 
 fn integer(value: Option<&Value>) -> Option<u64> {
@@ -681,6 +701,7 @@ mod tests {
             ClaudeTokenEvent {
                 timestamp: Utc.with_ymd_and_hms(2026, 2, 20, 12, 0, 0).unwrap(),
                 model: Some("claude-opus-4-6".into()),
+                model_inherited: false,
                 input: 0,
                 cache_write_5m: 0,
                 cache_write_1h: 0,
@@ -818,6 +839,7 @@ mod tests {
         let event = ClaudeTokenEvent {
             timestamp: Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap(),
             model: None,
+            model_inherited: false,
             input: 200,
             cache_write_5m: 0,
             cache_write_1h: 0,
@@ -836,6 +858,56 @@ mod tests {
         assert_eq!(today.estimated_cost_usd, None);
         assert!(!today.estimate_complete);
         assert_eq!(today.unknown_models, ["Unattributed"]);
+    }
+
+    #[test]
+    fn advisor_and_sidechain_models_do_not_replace_the_main_session_model() {
+        let content = [
+            serde_json::json!({"timestamp":"2026-07-15T08:00:00Z","message":{"id":"main-1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":10,"iterations":[{"type":"advisor_message","model":"claude-opus-4-6","input_tokens":20,"output_tokens":5}]}}}),
+            serde_json::json!({"timestamp":"2026-07-15T08:01:00Z","message":{"id":"main-2","model":"<synthetic>","usage":{"input_tokens":30,"output_tokens":2}}}),
+            serde_json::json!({"timestamp":"2026-07-15T08:02:00Z","isSidechain":true,"message":{"id":"side-1","model":"claude-haiku-4-5","usage":{"input_tokens":40,"output_tokens":3}}}),
+            serde_json::json!({"timestamp":"2026-07-15T08:03:00Z","message":{"id":"main-3","usage":{"input_tokens":50,"output_tokens":4}}}),
+        ].iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n");
+        let events = parse_jsonl(&content);
+        assert_eq!(events.len(), 5);
+        assert_eq!(events[1].model.as_deref(), Some("claude-opus-4-6"));
+        assert!(!events[1].model_inherited);
+        assert_eq!(events[3].model.as_deref(), Some("claude-haiku-4-5"));
+        for index in [2, 4] {
+            assert_eq!(events[index].model.as_deref(), Some("claude-sonnet-4-6"));
+            assert!(events[index].model_inherited);
+        }
+    }
+
+    #[test]
+    fn missing_model_in_claude_session_inherits_active_model_with_unverified_warning() {
+        let content = concat!(
+            r#"{"timestamp":"2026-07-15T08:00:00Z","message":{"id":"m1","model":"claude-sonnet-4-6","usage":{"input_tokens":1000,"output_tokens":100}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-15T08:05:00Z","message":{"id":"m2","model":"<synthetic>","usage":{"input_tokens":500,"output_tokens":50}}}"#,
+            "\n"
+        );
+        let events = parse_jsonl(content);
+        assert_eq!(events.len(), 2);
+        assert!(!events[0].model_inherited);
+        assert_eq!(events[1].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert!(events[1].model_inherited);
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let mut accumulator = super::DailyUsageAccumulator::default();
+        assert!(super::aggregate_into(
+            &events,
+            now,
+            &test_bundled_pricing(),
+            &mut accumulator,
+        ));
+        let warnings = accumulator.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Claude Code"));
+        assert!(warnings[0].contains("unverified"));
+        let today = accumulator.build(now, "test").today.unwrap();
+        assert_eq!(today.tokens, 1_650);
+        assert!(today.unknown_models.is_empty());
     }
 
     #[test]
@@ -940,6 +1012,7 @@ mod tests {
             ClaudeTokenEvent {
                 timestamp: now() - Duration::days(days_ago),
                 model: model.map(str::to_owned),
+                model_inherited: false,
                 input,
                 cache_write_5m: 0,
                 cache_write_1h: 0,

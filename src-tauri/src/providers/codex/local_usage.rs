@@ -11,7 +11,6 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::{
-    models::UsageHistory,
     pricing::{ModelPricing, ServiceTier, TokenBreakdown},
     storage::Storage,
 };
@@ -21,13 +20,16 @@ use crate::providers::local_usage::{
     card_usage::DailyUsageAccumulator,
     card_usage::{self, PriceSource, UsageObservation},
     home_clients::{self, Card, FoldContext},
-    log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
+    log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat, ScannedUsage},
+    session_model::{SessionModelCli, SessionModelTracker},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenEvent {
     pub timestamp: DateTime<Utc>,
     pub model: String,
+    #[serde(default)]
+    pub model_inherited: bool,
     pub input: u64,
     pub cached: u64,
     pub output: u64,
@@ -39,7 +41,7 @@ pub struct TokenEvent {
     pub cache_write_12h: u64,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 6;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 7;
 
 pub(crate) fn scan_routed_usage_into(
     storage: &Storage,
@@ -65,7 +67,7 @@ pub fn scan_local_usage(
     storage: &Storage,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
-) -> Result<UsageHistory, CodexError> {
+) -> Result<ScannedUsage, CodexError> {
     let home = home_directory();
     let configured_home = crate::provider_environment::value("CODEX_HOME");
     let homes = codex_homes(configured_home.as_deref().map(OsStr::new), &home);
@@ -196,7 +198,7 @@ fn discover_session_files(homes: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
-    let mut current_model: Option<String> = None;
+    let mut model_tracker = SessionModelTracker::default();
     let mut current_tier = ServiceTier::Standard;
     let mut previous_totals: Option<RawUsage> = None;
     let mut saw_session_meta = false;
@@ -228,7 +230,7 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
                 current_tier = ServiceTier::parse(tier);
             }
             if let Some(model) = model_name(object.get("payload")) {
-                current_model = Some(model);
+                model_tracker.observe(Some(&model));
             }
             continue;
         }
@@ -325,10 +327,11 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
             continue;
         }
         let parsed_model = model_name(Some(payload)).or_else(|| model_name(info));
-        let model = resolve_model(parsed_model, &mut current_model);
+        let resolved = model_tracker.resolve(parsed_model);
         events.push(TokenEvent {
             timestamp,
-            model,
+            model: resolved.model.unwrap_or_default(),
+            model_inherited: resolved.inherited,
             input: usage.input,
             cached: usage.cached.min(usage.input),
             output: usage.output,
@@ -500,15 +503,12 @@ fn model_name(value: Option<&Value>) -> Option<String> {
     })
 }
 
-fn resolve_model(parsed: Option<String>, current_model: &mut Option<String>) -> String {
-    if let Some(parsed) = parsed.as_ref() {
-        *current_model = Some(parsed.clone());
-    }
-    parsed.or_else(|| current_model.clone()).unwrap_or_default()
-}
-
 #[cfg(test)]
-fn aggregate(events: &[TokenEvent], now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
+fn aggregate(
+    events: &[TokenEvent],
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+) -> crate::models::UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(events, now, pricing, &mut accumulator);
     accumulator.build(now, "From your Codex logs (estimated)")
@@ -577,6 +577,7 @@ fn observation(event: &TokenEvent) -> UsageObservation<'_> {
         price_source: PriceSource::CodexLogs {
             chatgpt_plan: event.chatgpt_plan,
         },
+        session_model_cli: event.model_inherited.then_some(SessionModelCli::CodexCli),
         ..UsageObservation::new(
             event.timestamp,
             Some(&event.model),

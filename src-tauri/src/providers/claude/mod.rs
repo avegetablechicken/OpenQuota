@@ -166,11 +166,12 @@ impl From<crate::providers::local_usage::home_clients::FoldInUnavailable> for Cl
 }
 
 /// Reads this device's local usage history for a refresh.
-type LocalUsageScan = fn(
-    &Storage,
-    chrono::DateTime<Utc>,
-    &ModelPricing,
-) -> Result<crate::models::UsageHistory, ClaudeError>;
+type LocalUsageScan =
+    fn(
+        &Storage,
+        chrono::DateTime<Utc>,
+        &ModelPricing,
+    ) -> Result<crate::providers::local_usage::log_usage::ScannedUsage, ClaudeError>;
 
 pub struct ClaudeProvider {
     credential_scope: ClaudeCredentialScope,

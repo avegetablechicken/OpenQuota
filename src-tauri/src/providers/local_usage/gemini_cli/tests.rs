@@ -199,6 +199,58 @@ fn scanner_deduplicates_resumed_and_dual_format_sessions_and_skips_checkpoints()
 }
 
 #[test]
+fn missing_model_in_gemini_cli_session_inherits_and_warns_as_unverified() {
+    let dir = tempdir().unwrap();
+    let storage = Storage::open(&dir.path().join("openquota.db")).unwrap();
+    let pricing = test_bundled_pricing();
+    let now = Utc.with_ymd_and_hms(2026, 11, 20, 12, 0, 0).unwrap();
+
+    let tmp_dir = dir.path().join(".gemini").join("tmp");
+    let chats = tmp_dir.join("proj_hash").join("chats");
+    fs::create_dir_all(&chats).unwrap();
+    fs::write(
+        chats.join("session-inherit.json"),
+        session_json(
+            "sess-inherit",
+            serde_json::json!([
+                {
+                    "id": "m-1",
+                    "timestamp": "2026-11-20T10:00:00.000Z",
+                    "type": "gemini",
+                    "model": "gemini-4-neon",
+                    "tokens": { "input": 100_000, "cached": 0, "output": 10_000, "thoughts": 0, "tool": 0, "total": 110_000 }
+                },
+                {
+                    "id": "m-2",
+                    "timestamp": "2026-11-20T10:01:00.000Z",
+                    "type": "gemini",
+                    "tokens": { "input": 50_000, "cached": 0, "output": 5_000, "thoughts": 0, "tool": 0, "total": 55_000 }
+                }
+            ]),
+        ),
+    )
+    .unwrap();
+
+    let mut antigravity_acc = DailyUsageAccumulator::default();
+    assert!(scan_tmp_directories_into(
+        &storage,
+        &[tmp_dir],
+        now,
+        &pricing,
+        "antigravity",
+        &mut antigravity_acc,
+    )
+    .unwrap());
+    let warnings = antigravity_acc.warnings();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("Gemini CLI"));
+    assert!(warnings[0].contains("unverified"));
+    let today = antigravity_acc.build(now, "test").today.unwrap();
+    assert_eq!(today.tokens, 165_000);
+    assert!(today.unknown_models.is_empty());
+}
+
+#[test]
 fn scanner_routes_non_gemini_models_once_without_double_counting() {
     let dir = tempdir().unwrap();
     let storage = Storage::open(&dir.path().join("openquota.db")).unwrap();
@@ -310,6 +362,7 @@ mod characterization {
             session_id: None,
             timestamp: now() - Duration::days(days_ago),
             model: model.map(str::to_owned),
+            model_inherited: false,
             input,
             cache_read: 0,
             output,

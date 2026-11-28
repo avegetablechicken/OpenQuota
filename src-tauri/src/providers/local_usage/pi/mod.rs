@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -19,9 +19,10 @@ use super::{
     card_usage::{self, UsageObservation},
     log_usage::{parse_log_timestamp, LocalLogs, LogCacheError, LogFormat},
     model_scope::{card_for_model, normalize_provider_model},
+    session_model::{SessionModelCli, SessionModelTracker},
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 11;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 12;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum PiUsageSource {
@@ -42,6 +43,8 @@ struct PiUsageEvent {
     card_id: String,
     provider: String,
     model: String,
+    #[serde(default)]
+    model_inherited: bool,
     carried_cost: Option<f64>,
     tokens: PiTokenBreakdown,
     reported_total_tokens: u64,
@@ -182,14 +185,24 @@ fn discover_files(directory: &Path) -> Vec<PathBuf> {
 }
 
 fn parse_jsonl(content: &str, source: PiUsageSource) -> Vec<PiUsageEvent> {
+    let mut trackers = HashMap::<String, SessionModelTracker>::new();
     content
         .lines()
         .filter(|line| line.contains("\"usage\""))
-        .filter_map(|line| parse_line(line, source))
+        .filter_map(|line| parse_line_with_tracker(line, source, &mut trackers))
         .collect()
 }
 
+#[cfg(test)]
 fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
+    parse_line_with_tracker(line, source, &mut HashMap::new())
+}
+
+fn parse_line_with_tracker(
+    line: &str,
+    source: PiUsageSource,
+    trackers: &mut HashMap<String, SessionModelTracker>,
+) -> Option<PiUsageEvent> {
     let object = serde_json::from_str::<Value>(line).ok()?;
     if object.get("type").and_then(Value::as_str) != Some("message") {
         return None;
@@ -205,7 +218,13 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
-    let model = normalize_provider_model(provider, raw_model);
+    let explicit_model = normalize_provider_model(provider, raw_model);
+    let provider_key = provider.trim().to_ascii_lowercase();
+    let resolved = trackers
+        .entry(provider_key)
+        .or_default()
+        .resolve((!explicit_model.is_empty()).then_some(explicit_model));
+    let model = resolved.model.unwrap_or_default();
     let card_id = mapped_card(provider, &model)?;
     let usage = message.get("usage")?.as_object()?;
     let cache_write = unsigned_number(usage.get("cacheWrite")).unwrap_or_default();
@@ -221,6 +240,7 @@ fn parse_line(line: &str, source: PiUsageSource) -> Option<PiUsageEvent> {
         card_id: card_id.to_owned(),
         provider: provider.to_owned(),
         model,
+        model_inherited: resolved.inherited,
         carried_cost,
         tokens: PiTokenBreakdown {
             input: unsigned_number(usage.get("input")).unwrap_or_default(),
@@ -306,9 +326,14 @@ fn aggregate_into(
 /// pi counts its reported total, and a carried cost of zero means none was recorded. The provider
 /// tells whether a Local runtime served the usage.
 fn observation(event: &PiUsageEvent) -> UsageObservation<'_> {
+    let session_model_cli = event.model_inherited.then_some(match event.source {
+        PiUsageSource::Pi => SessionModelCli::Pi,
+        PiUsageSource::OhMyPi => SessionModelCli::OhMyPi,
+    });
     UsageObservation {
         total_tokens: event.reported_total_tokens,
         provider_hint: Some(&event.provider),
+        session_model_cli,
         ..UsageObservation::new(
             event.timestamp,
             Some(&event.model),

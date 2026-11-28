@@ -8,6 +8,7 @@ use crate::{
     providers::local_usage::{
         card_usage::DailyUsageAccumulator,
         card_usage::{self, Settled, UsageObservation},
+        session_model::SessionModelCli,
     },
 };
 
@@ -77,9 +78,13 @@ impl OpenCodeUsageScanner {
         let Some(scan) = scan_records(paths, now, pricing, "opencode")? else {
             return Ok(None);
         };
+        let mut warnings = scan.warnings;
+        let mut accumulator = DailyUsageAccumulator::default();
+        aggregate_into(&scan.records, now, pricing, &mut accumulator);
+        warnings.extend(accumulator.warnings());
         Ok(Some(OpenCodeUsageScan {
-            usage: aggregate_history(&scan.records, now, pricing),
-            warnings: scan.warnings,
+            usage: accumulator.build(now, USAGE_SOURCE_NOTE),
+            warnings,
         }))
     }
 
@@ -212,6 +217,7 @@ fn better_record(candidate: &UsageRecord, current: &UsageRecord) -> bool {
             && candidate.cost.unwrap_or_default() > current.cost.unwrap_or_default())
 }
 
+#[cfg(test)]
 fn aggregate_history(
     records: &[UsageRecord],
     now: DateTime<Utc>,
@@ -232,6 +238,7 @@ fn aggregate_into(
     let observations = records.iter().map(|record| {
         let observation = UsageObservation {
             total_tokens: record.tokens,
+            session_model_cli: record.model_inherited.then_some(SessionModelCli::OpenCode),
             ..UsageObservation::new(
                 record.timestamp,
                 Some(&record.model),
@@ -264,6 +271,7 @@ mod unit_tests {
             key: ("session".into(), "message".into()),
             timestamp: Utc.with_ymd_and_hms(2026, 7, 18, 10, 0, 0).unwrap(),
             model: "model".into(),
+            model_inherited: false,
             tokens,
             cost,
             cost_provenance: if exact {
@@ -373,6 +381,7 @@ mod unit_tests {
                 key: ("session".into(), format!("{model}-{days_ago}-{tokens}")),
                 timestamp: now() - Duration::days(days_ago),
                 model: model.into(),
+                model_inherited: false,
                 tokens,
                 cost,
                 cost_provenance: if exact {

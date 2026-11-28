@@ -61,6 +61,7 @@ pub(crate) struct UsageRecord {
     pub(crate) key: (String, String),
     pub(crate) timestamp: DateTime<Utc>,
     pub(crate) model: String,
+    pub(crate) model_inherited: bool,
     pub(crate) tokens: u64,
     pub(crate) cost: Option<f64>,
     pub(crate) cost_provenance: CostProvenance,
@@ -73,16 +74,37 @@ pub(crate) struct UsageRecord {
 #[derive(Debug)]
 pub(super) struct ParsedMessage {
     pub(super) message_id: String,
-    session_id: String,
+    pub(super) session_id: String,
     pub(super) timestamp: DateTime<Utc>,
-    provider_id: String,
+    pub(super) provider_id: String,
+    pub(super) explicit_model: Option<String>,
     model: String,
+    model_inherited: bool,
     tokens: Option<ParsedTokens>,
     cost: StoredCost,
     is_other: bool,
 }
 
 impl ParsedMessage {
+    pub(super) fn resolve_for_card(
+        mut self,
+        resolved_model: Option<String>,
+        inherited: bool,
+        card_id: &str,
+    ) -> Option<Self> {
+        let model = resolved_model.unwrap_or_else(|| "Unattributed".into());
+        let target = usage_card(&self.provider_id, &model);
+        let is_other = match target {
+            Some(target) if target == card_id => false,
+            None if card_id == "opencode" => true,
+            _ => return None,
+        };
+        self.model = model;
+        self.model_inherited = inherited;
+        self.is_other = is_other;
+        Some(self)
+    }
+
     pub(super) fn into_usage(self, parts: &[ParsedPart], pricing: &ModelPricing) -> UsageRecord {
         let part_tokens = parts
             .iter()
@@ -130,6 +152,7 @@ impl ParsedMessage {
             key: (self.session_id, self.message_id),
             timestamp: self.timestamp,
             model: self.model,
+            model_inherited: self.model_inherited,
             tokens: tokens.total,
             cost,
             cost_provenance,
@@ -193,22 +216,14 @@ pub(super) fn parse_message(
     message_id: String,
     column_timestamp: Option<i64>,
     value: &Value,
-    card_id: &str,
 ) -> Option<ParsedMessage> {
     if value.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
     let provider_id = provider_id(value)?;
-    let model = model_id(value)
+    let explicit_model = model_id(value)
         .map(|raw| normalize_provider_model(&provider_id, &raw))
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "Unattributed".into());
-    let target = usage_card(&provider_id, &model);
-    let is_other = match target {
-        Some(target) if target == card_id => false,
-        None if card_id == "opencode" => true,
-        _ => return None,
-    };
+        .filter(|name| !name.is_empty());
     let timestamp = column_timestamp
         .and_then(timestamp_from_number)
         .or_else(|| {
@@ -222,10 +237,12 @@ pub(super) fn parse_message(
         message_id,
         timestamp,
         provider_id,
-        model,
+        explicit_model,
+        model: String::new(),
+        model_inherited: false,
         tokens: value.get("tokens").and_then(parse_tokens),
         cost: stored_cost(value, &["cost", "costUSD"]),
-        is_other,
+        is_other: false,
     })
 }
 

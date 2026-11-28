@@ -345,7 +345,10 @@ fn a_changed_default_model_reaches_cached_events_that_name_no_model() {
     fs::create_dir_all(wire.parent().unwrap()).unwrap();
     fs::write(
         &wire,
-        legacy_kimi_wire(now.timestamp() as f64, None, [1_000, 0, 0, 0]),
+        [
+            serde_json::json!({"type":"usage.record","provider":"anthropic","model":"claude-sonnet-4-6","time":now.timestamp_millis()-1000,"usage":{"inputOther":200,"output":0}}).to_string(),
+            legacy_kimi_wire(now.timestamp() as f64, None, [1_000, 0, 0, 0]),
+        ].join("\n"),
     )
     .unwrap();
     let config = root.join("config.toml");
@@ -361,10 +364,70 @@ fn a_changed_default_model_reaches_cached_events_that_name_no_model() {
 
     fs::write(&config, "default_model = \"moonshot-cn/kimi-k2.7-code\"\n").unwrap();
     assert_eq!(tokens_on("kimi"), 1_000);
-    assert_eq!(tokens_on("claude"), 0);
+    assert_eq!(tokens_on("claude"), 200);
 
     fs::write(&config, "default_model = \"claude-sonnet-4-6\"\n").unwrap();
-    assert_eq!(tokens_on("claude"), 1_000);
+    assert_eq!(tokens_on("claude"), 1_200);
+}
+
+#[test]
+fn provider_scoped_session_models_leave_raw_cache_events_and_default_fallback_intact() {
+    let record = |provider: Option<&str>, model: Option<&str>, time: i64| {
+        serde_json::json!({
+            "type":"usage.record", "provider": provider, "model":model, "time":time,
+            "usage":{"inputOther":100,"output":10}
+        })
+        .to_string()
+    };
+    let content = [
+        record(Some("anthropic"), Some("claude-sonnet-4-6"), 1784808000000),
+        record(Some("kimi"), None, 1784808001000),
+        record(None, None, 1784808002000),
+        record(Some("kimi"), Some("kimi-k2.5"), 1784808003000),
+        record(Some("anthropic"), None, 1784808004000),
+        record(Some("KIMI"), None, 1784808005000),
+    ]
+    .join("\n");
+    let raw = parse_jsonl(&content);
+    assert_eq!(raw.len(), 6);
+    for index in [1, 2, 4, 5] {
+        assert!(raw[index].model.is_none());
+    }
+    let mut attached = raw.clone();
+    for event in &mut attached {
+        KimiLogs::attach(event, &Some("kimi-k2.7-code".into()));
+    }
+    for index in [1, 2] {
+        assert_eq!(attached[index].model.as_deref(), Some("kimi-k2.7-code"));
+        assert!(!attached[index].model_inherited);
+    }
+    assert_eq!(attached[4].model.as_deref(), Some("claude-sonnet-4-6"));
+    assert_eq!(attached[5].model.as_deref(), Some("kimi-k2.5"));
+    assert!(attached[4].model_inherited && attached[5].model_inherited);
+    let cached = serde_json::to_string(&raw).unwrap();
+    let mut reloaded: Vec<KimiTokenEvent> = serde_json::from_str(&cached).unwrap();
+    for event in &mut reloaded {
+        KimiLogs::attach(event, &Some("kimi-k3".into()));
+    }
+    assert_eq!(reloaded[1].model.as_deref(), Some("kimi-k3"));
+    assert_eq!(reloaded[2].model.as_deref(), Some("kimi-k3"));
+}
+
+#[test]
+fn request_model_context_does_not_cross_an_explicit_provider_change() {
+    let content = [
+        serde_json::json!({"type":"llm.request","provider":"anthropic","model":"claude-sonnet-4-6"}),
+        serde_json::json!({"type":"usage.record","provider":"kimi","time":1784808000000_i64,"usage":{"inputOther":100,"output":10}}),
+        serde_json::json!({"timestamp":1784808001,"message":{"type":"StatusUpdate","payload":{"provider":"kimi","token_usage":{"input_other":100,"output":10}}}}),
+    ].iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n");
+    let mut events = parse_jsonl(&content);
+    assert_eq!(events.len(), 2);
+    for event in &mut events {
+        assert!(event.model.is_none());
+        KimiLogs::attach(event, &Some("kimi-k3".into()));
+        assert_eq!(event.model.as_deref(), Some("kimi-k3"));
+        assert!(!event.model_inherited);
+    }
 }
 
 #[test]
@@ -529,6 +592,8 @@ fn local_runtime_usage_stays_unpriced_in_kimi_others() {
         timestamp: now,
         provider: Some("ollama".to_owned()),
         model: Some(model.to_owned()),
+        session_model: None,
+        model_inherited: false,
         input: 1_000_000,
         cache_write: 0,
         cache_read: 0,
@@ -583,6 +648,8 @@ mod characterization {
             timestamp: now() - Duration::days(days_ago),
             provider: provider.map(str::to_owned),
             model: model.map(str::to_owned),
+            session_model: None,
+            model_inherited: false,
             input,
             cache_write: 0,
             cache_read: 0,
