@@ -43,6 +43,12 @@ impl OpenCodePaths {
     }
 
     pub(crate) fn go_api_key(&self) -> Result<Option<Zeroizing<String>>, OpenCodeError> {
+        // Both storage formats yield no key when their file is absent, so skip the
+        // version probe; otherwise a missing `opencode` binary reads as unreadable
+        // credentials on machines that never had OpenCode installed.
+        if !self.has_credential_files()? {
+            return Ok(None);
+        }
         #[cfg(test)]
         let major = self
             .test_major_version
@@ -55,6 +61,20 @@ impl OpenCodePaths {
         } else {
             self.legacy_go_api_key()
         }
+    }
+
+    fn has_credential_files(&self) -> Result<bool, OpenCodeError> {
+        for name in ["opencode.db", "auth.json"] {
+            if self
+                .data_directory
+                .join(name)
+                .try_exists()
+                .map_err(|_| OpenCodeError::CredentialsUnreadable)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn database_go_api_key(&self) -> Result<Option<Zeroizing<String>>, OpenCodeError> {
@@ -335,6 +355,15 @@ mod tests {
         ] {
             assert_eq!(super::parse_major_version(output), Some(expected));
         }
+    }
+
+    #[test]
+    fn missing_credential_files_skip_the_version_probe() {
+        let directory = tempdir().unwrap();
+        let mut paths = OpenCodePaths::for_data_directory(directory.path().to_path_buf());
+        // No version is known, as when the `opencode` binary is not installed.
+        paths.test_major_version = None;
+        assert!(paths.go_api_key().unwrap().is_none());
     }
 
     #[test]
