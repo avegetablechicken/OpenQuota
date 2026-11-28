@@ -50,7 +50,7 @@ pub struct GrokAuthStore {
 impl GrokAuthStore {
     pub fn new() -> Self {
         Self {
-            path: home_directory().join(".grok").join("auth.json"),
+            path: super::default_grok_home().join("auth.json"),
         }
     }
 
@@ -255,13 +255,6 @@ fn trimmed(value: Option<&str>) -> Option<&str> {
 fn trimmed_owned(value: String) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
-}
-
-fn home_directory() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

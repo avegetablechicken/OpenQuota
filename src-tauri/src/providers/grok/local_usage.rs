@@ -75,14 +75,7 @@ pub(crate) fn scan_routed_usage_into(
 }
 
 fn default_log_path() -> PathBuf {
-    log_path(
-        &home_directory(),
-        std::env::var("GROK_HOME")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .as_deref(),
-    )
+    log_path(&super::default_grok_home())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -157,19 +150,8 @@ fn scan_path(
     )
 }
 
-fn log_path(home: &Path, configured_home: Option<&str>) -> PathBuf {
-    configured_home
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".grok"))
-        .join("logs")
-        .join("unified.jsonl")
-}
-
-fn home_directory() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_default()
+fn log_path(grok_home: &Path) -> PathBuf {
+    grok_home.join("logs").join("unified.jsonl")
 }
 
 fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
@@ -341,6 +323,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{aggregate, log_path, parse_jsonl, GrokLogUsageScanner};
+    use crate::providers::grok::grok_home;
     use crate::{pricing::test_bundled_pricing, providers::grok::GrokError, storage::Storage};
 
     fn now() -> chrono::DateTime<Utc> {
@@ -434,11 +417,11 @@ mod tests {
     #[test]
     fn path_uses_override_or_cross_platform_home() {
         assert_eq!(
-            log_path(Path::new("/users/me"), None),
+            log_path(&grok_home(Path::new("/users/me"), None)),
             Path::new("/users/me/.grok/logs/unified.jsonl")
         );
         assert_eq!(
-            log_path(Path::new("/ignored"), Some("/custom/grok")),
+            log_path(&grok_home(Path::new("/ignored"), Some("/custom/grok"))),
             Path::new("/custom/grok/logs/unified.jsonl")
         );
     }

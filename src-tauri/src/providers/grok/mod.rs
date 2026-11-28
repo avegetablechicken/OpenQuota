@@ -3,7 +3,10 @@ mod client;
 pub(crate) mod local_usage;
 mod mapper;
 
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
@@ -27,6 +30,25 @@ use self::{
 };
 
 use super::{ProviderError, UsageProvider};
+
+/// The Grok CLI's data directory, holding both `auth.json` and the usage logs: `GROK_HOME` when
+/// set, else `~/.grok`.
+fn grok_home(home: &Path, configured_home: Option<&str>) -> PathBuf {
+    configured_home
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".grok"))
+}
+
+fn default_grok_home() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    grok_home(
+        &home,
+        crate::provider_environment::value("GROK_HOME").as_deref(),
+    )
+}
 
 pub(crate) fn definition() -> ProviderDefinition {
     ProviderDefinition {
