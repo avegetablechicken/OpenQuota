@@ -219,8 +219,11 @@ fn map_window(
         number(window.get("reset_at"))
             .and_then(timestamp)
             .or_else(|| {
-                number(window.get("reset_after_seconds"))
-                    .map(|seconds| now + Duration::milliseconds((seconds * 1000.0) as i64))
+                number(window.get("reset_after_seconds")).and_then(|seconds| {
+                    // Out-of-range server values must not panic chrono arithmetic.
+                    Duration::try_milliseconds((seconds * 1000.0) as i64)
+                        .and_then(|offset| now.checked_add_signed(offset))
+                })
             })
     });
     let period_seconds = candidate
@@ -587,6 +590,23 @@ mod tests {
         assert_eq!(mapped.quotas[0].used_percent, 10.0);
         assert_eq!(mapped.quotas[1].used_percent, 20.0);
         assert_eq!(mapped.quotas[0].period_seconds, SESSION_PERIOD_SECONDS);
+    }
+
+    #[test]
+    fn out_of_range_reset_after_seconds_is_ignored_instead_of_panicking() {
+        let now = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let mapped = map_usage(
+            &response(json!({
+                "rate_limit": {
+                    "primary_window": {"used_percent": 10, "reset_after_seconds": 1e300}
+                }
+            })),
+            None,
+            now,
+        )
+        .unwrap();
+        assert_eq!(mapped.quotas[0].used_percent, 10.0);
+        assert_eq!(mapped.quotas[0].resets_at, None);
     }
 
     #[test]

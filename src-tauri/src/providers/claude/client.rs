@@ -168,14 +168,20 @@ fn clock_offset_seconds(value: &str, now: DateTime<Utc>) -> Option<i64> {
     Some(server.signed_duration_since(now).num_seconds())
 }
 
+/// Longest cooldown honored from `Retry-After`; larger values would overflow
+/// chrono arithmetic and are never meaningful for a polling client.
+const MAX_RETRY_AFTER_SECONDS: u64 = 24 * 60 * 60;
+
 fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<u64> {
     let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(seconds);
-    }
-    let date = DateTime::parse_from_rfc2822(value).ok()?.to_utc();
-    let milliseconds = date.signed_duration_since(now).num_milliseconds().max(0) as u64;
-    Some(milliseconds.div_ceil(1000))
+    let seconds = if let Ok(seconds) = value.parse::<u64>() {
+        seconds
+    } else {
+        let date = DateTime::parse_from_rfc2822(value).ok()?.to_utc();
+        let milliseconds = date.signed_duration_since(now).num_milliseconds().max(0) as u64;
+        milliseconds.div_ceil(1000)
+    };
+    Some(seconds.min(MAX_RETRY_AFTER_SECONDS))
 }
 
 #[cfg(test)]
@@ -323,6 +329,14 @@ mod tests {
         assert_eq!(
             parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", now),
             Some(60)
+        );
+        assert_eq!(
+            parse_retry_after("100000000000000", now),
+            Some(super::MAX_RETRY_AFTER_SECONDS)
+        );
+        assert_eq!(
+            parse_retry_after("Fri, 31 Dec 9999 23:59:59 GMT", now),
+            Some(super::MAX_RETRY_AFTER_SECONDS)
         );
     }
 }

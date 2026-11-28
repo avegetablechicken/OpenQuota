@@ -400,8 +400,15 @@ pub(super) fn decode_response<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Upper bound for a cached session token's lifetime; also keeps a hostile
+/// `expires_in` from overflowing `Instant` arithmetic.
+const MAX_TOKEN_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
+
 pub(super) fn token_expiry(expires_in: u64) -> Instant {
-    Instant::now() + Duration::from_secs(expires_in.saturating_sub(60).max(1))
+    let seconds = expires_in
+        .saturating_sub(60)
+        .clamp(1, MAX_TOKEN_LIFETIME_SECONDS);
+    Instant::now() + Duration::from_secs(seconds)
 }
 
 pub(super) fn clone_session(session: &CachedSession) -> CachedSession {
@@ -409,5 +416,19 @@ pub(super) fn clone_session(session: &CachedSession) -> CachedSession {
         scope: session.scope.clone(),
         token: Zeroizing::new(session.token.to_string()),
         expires_at: session.expires_at,
+    }
+}
+
+#[cfg(test)]
+mod token_expiry_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{token_expiry, MAX_TOKEN_LIFETIME_SECONDS};
+
+    #[test]
+    fn huge_expires_in_is_capped_instead_of_overflowing_instant() {
+        let expiry = token_expiry(u64::MAX);
+        let cap = Instant::now() + Duration::from_secs(MAX_TOKEN_LIFETIME_SECONDS);
+        assert!(expiry <= cap);
     }
 }
