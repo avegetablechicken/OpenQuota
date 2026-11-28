@@ -22,9 +22,12 @@ pub struct CodexAuthState {
     pub refresh_token: Option<String>,
     pub account_id: Option<String>,
     pub last_refresh: Option<String>,
+    /// The document the saved login still holds while this state carries a renewal that could
+    /// not be saved; `None` while `document` is what the saved login holds.
+    unsaved_from: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AuthSource {
     File(PathBuf),
     #[cfg(target_os = "macos")]
@@ -69,6 +72,7 @@ impl CodexAuthState {
                     last_refresh: string_at(&document, "/last_refresh"),
                     document,
                     access_token,
+                    unsaved_from: None,
                 });
                 continue;
             }
@@ -134,6 +138,32 @@ impl CodexAuthState {
             .is_some_and(|date| now.signed_duration_since(date.to_utc()).num_days() > 8)
     }
 
+    /// The document the saved login holds, as far as this state knows.
+    pub(super) fn saved_document(&self) -> &Value {
+        self.unsaved_from.as_ref().unwrap_or(&self.document)
+    }
+
+    pub(super) fn has_unsaved_renewal(&self) -> bool {
+        self.unsaved_from.is_some()
+    }
+
+    pub(super) fn has_source_of(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+
+    /// Uses `renewed`, which carries a renewal that could not be saved, in place of this login
+    /// when this saved login is still the one the renewal was made from.
+    pub(super) fn resume_unsaved(&mut self, renewed: &Self) -> bool {
+        if self.unsaved_from.is_some()
+            || self.source != renewed.source
+            || renewed.unsaved_from.as_ref() != Some(&self.document)
+        {
+            return false;
+        }
+        *self = renewed.clone();
+        true
+    }
+
     pub(super) fn update_and_save_if_current(
         &mut self,
         access_token: String,
@@ -142,7 +172,7 @@ impl CodexAuthState {
         now: DateTime<Utc>,
     ) -> Result<(), CodexError> {
         let current = self.reload().map_err(|_| CodexError::AccountChanged)?;
-        if current.document != self.document {
+        if current.document != *self.saved_document() {
             return Err(CodexError::AccountChanged);
         }
         self.update_and_save(access_token, refresh_token, id_token, now)
@@ -155,6 +185,7 @@ impl CodexAuthState {
         id_token: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<(), CodexError> {
+        let saved = self.saved_document().clone();
         set_string(&mut self.document, "/tokens/access_token", &access_token)?;
         if let Some(value) = refresh_token.as_deref() {
             set_string(&mut self.document, "/tokens/refresh_token", value)?;
@@ -168,11 +199,13 @@ impl CodexAuthState {
         self.access_token = access_token;
         self.last_refresh = Some(refreshed_at);
 
-        match &self.source {
+        let written = match &self.source {
             AuthSource::File(path) => save_file_document(path, &self.document),
             #[cfg(target_os = "macos")]
             AuthSource::Keychain => save_keychain_document(&self.document),
-        }
+        };
+        self.unsaved_from = written.is_err().then_some(saved);
+        written
     }
 }
 
@@ -189,6 +222,7 @@ fn load_from_path(path: &Path) -> Result<CodexAuthState, CodexError> {
         last_refresh: string_at(&document, "/last_refresh"),
         document,
         access_token,
+        unsaved_from: None,
     })
 }
 
@@ -224,6 +258,7 @@ fn load_keychain_candidate() -> Option<CodexAuthState> {
         last_refresh: string_at(&document, "/last_refresh"),
         document,
         access_token,
+        unsaved_from: None,
     })
 }
 
@@ -250,6 +285,7 @@ fn load_from_keychain() -> Result<CodexAuthState, CodexError> {
         last_refresh: string_at(&document, "/last_refresh"),
         document,
         access_token,
+        unsaved_from: None,
     })
 }
 
@@ -402,6 +438,7 @@ mod tests {
             refresh_token: None,
             account_id: None,
             last_refresh: None,
+            unsaved_from: None,
         };
         assert!(state.needs_refresh(now));
     }
@@ -431,6 +468,7 @@ mod tests {
             refresh_token: None,
             account_id: Some("  ACCOUNT-A  ".into()),
             last_refresh: None,
+            unsaved_from: None,
         };
         assert_eq!(state.account_identity().as_deref(), Some("account-a"));
 
@@ -447,6 +485,7 @@ mod tests {
             refresh_token: None,
             account_id: None,
             last_refresh: None,
+            unsaved_from: None,
         };
         assert_eq!(state.account_identity().as_deref(), Some("account-b"));
     }
@@ -463,6 +502,7 @@ mod tests {
             refresh_token: Some("old-refresh".into()),
             account_id: None,
             last_refresh: None,
+            unsaved_from: None,
         };
 
         let error = state
@@ -477,6 +517,43 @@ mod tests {
         assert!(matches!(error, CodexError::AuthWrite));
         assert!(!error.to_string().contains("secret-access"));
         assert!(!error.to_string().contains("secret-refresh"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unsaved_renewal_resumes_on_the_reloaded_login_and_is_saved_once_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        let original = json!({"tokens": {"access_token": "old", "refresh_token": "spent"}});
+        fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let mut state = super::load_from_path(&path).unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let saved =
+            state.update_and_save_if_current("first".into(), Some("next".into()), None, Utc::now());
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(saved, Err(CodexError::AuthWrite)));
+        assert!(state.has_unsaved_renewal());
+
+        // The next poll reloads the saved login, which still holds the spent token.
+        let mut reloaded = super::load_from_path(&path).unwrap();
+        assert!(reloaded.resume_unsaved(&state));
+        assert_eq!(reloaded.access_token, "first");
+        assert_eq!(reloaded.refresh_token.as_deref(), Some("next"));
+
+        // The next renewal replaces the saved login that still holds the spent token.
+        reloaded
+            .update_and_save_if_current("second".into(), Some("last".into()), None, Utc::now())
+            .unwrap();
+        assert!(!reloaded.has_unsaved_renewal());
+        let persisted = super::load_from_path(&path).unwrap();
+        assert_eq!(persisted.access_token, "second");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("last"));
+
+        // A login changed elsewhere no longer takes the unsaved renewal.
+        let mut changed = super::load_from_path(&path).unwrap();
+        assert!(!changed.resume_unsaved(&state));
+        assert_eq!(changed.access_token, "second");
     }
 
     #[test]

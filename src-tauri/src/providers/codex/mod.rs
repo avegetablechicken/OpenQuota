@@ -6,7 +6,10 @@ pub mod local_usage;
 pub mod mapper;
 pub mod reset_claim;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::Utc;
 use reqwest::StatusCode;
@@ -182,6 +185,9 @@ pub struct CodexProvider {
     storage: Arc<Storage>,
     pricing: Arc<PricingStore>,
     client: CodexClient,
+    /// Logins carrying a renewal that could not be saved. Their refresh tokens were spent, so
+    /// each is used in place of its saved login while that is still the one it was made from.
+    unsaved_renewals: Mutex<Vec<CodexAuthState>>,
 }
 
 impl CodexProvider {
@@ -196,6 +202,7 @@ impl CodexProvider {
             storage,
             pricing,
             client: CodexClient::new()?,
+            unsaved_renewals: Mutex::new(Vec::new()),
         })
     }
 
@@ -205,7 +212,7 @@ impl CodexProvider {
 
     fn refresh_with_identity(&self) -> Result<(ProviderSnapshot, Option<String>), CodexError> {
         let now = Utc::now();
-        let candidates = CodexAuthState::load_candidates()?;
+        let candidates = self.resume_unsaved_renewals(CodexAuthState::load_candidates()?);
         crate::app_debug!(
             "auth:codex",
             "credential candidates loaded ({})",
@@ -261,7 +268,10 @@ impl CodexProvider {
         if auth.needs_refresh(now) {
             if let Ok(live) = auth.reload() {
                 Self::ensure_candidate_identity(&live, account_identity)?;
-                *auth = live;
+                // An unchanged saved login is no newer than an unsaved renewal of it.
+                if live.document != *auth.saved_document() {
+                    *auth = live;
+                }
             }
         }
         if auth.needs_refresh(now) {
@@ -383,6 +393,31 @@ impl CodexProvider {
         resolve_account_usage(&self.storage, account_identity, outcome, warnings)
     }
 
+    /// Replaces each saved login an unsaved renewal was made from with that renewal, and
+    /// forgets renewals whose saved login has since changed.
+    fn resume_unsaved_renewals(&self, mut candidates: Vec<CodexAuthState>) -> Vec<CodexAuthState> {
+        let Ok(mut renewals) = self.unsaved_renewals.lock() else {
+            return candidates;
+        };
+        renewals.retain(|renewal| {
+            candidates
+                .iter_mut()
+                .any(|candidate| candidate.resume_unsaved(renewal))
+        });
+        candidates
+    }
+
+    /// Keeps the renewal `auth` carries while its saved login could not take it.
+    fn remember_unsaved_renewal(&self, auth: &CodexAuthState) {
+        let Ok(mut renewals) = self.unsaved_renewals.lock() else {
+            return;
+        };
+        renewals.retain(|renewal| !renewal.has_source_of(auth));
+        if auth.has_unsaved_renewal() {
+            renewals.push(auth.clone());
+        }
+    }
+
     fn refresh_access_token(
         &self,
         auth: &mut CodexAuthState,
@@ -413,6 +448,7 @@ impl CodexProvider {
                     .into(),
             );
         }
+        self.remember_unsaved_renewal(auth);
         Ok(())
     }
 }
@@ -589,12 +625,14 @@ mod account_tests {
             storage: storage.clone(),
             pricing: pricing.clone(),
             client: CodexClient::new().unwrap(),
+            unsaved_renewals: Default::default(),
         };
         let unresolved = CodexProvider {
             account_identity: None,
             storage,
             pricing,
             client: CodexClient::new().unwrap(),
+            unsaved_renewals: Default::default(),
         };
 
         assert_eq!(

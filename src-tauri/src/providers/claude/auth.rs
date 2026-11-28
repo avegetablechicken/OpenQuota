@@ -59,6 +59,18 @@ pub struct ClaudeCredential {
     source: CredentialSource,
     document: ClaudeCredentialsFile,
     pub inference_only: bool,
+    /// The refresh token the saved login still holds while `oauth` carries a renewal that could
+    /// not be saved; `None` while `oauth` is what the saved login holds.
+    unsaved_from: Option<String>,
+}
+
+/// A renewal that could not be saved, kept for the rest of the session while the saved login it
+/// was made from still holds the refresh token it spent.
+#[derive(Debug, Clone)]
+pub(super) struct UnsavedRenewal {
+    source: CredentialSource,
+    saved_refresh_token: String,
+    oauth: ClaudeOAuth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,8 +166,41 @@ impl ClaudeCredential {
         pair.finalize().into()
     }
 
+    /// The renewal this login carries that its saved login does not hold.
+    pub(super) fn unsaved_renewal(&self) -> Option<UnsavedRenewal> {
+        if self.inference_only || self.source == CredentialSource::Environment {
+            return None;
+        }
+        Some(UnsavedRenewal {
+            source: self.source.clone(),
+            saved_refresh_token: self.unsaved_from.clone()?,
+            oauth: self.oauth.clone(),
+        })
+    }
+
+    /// Whether `renewal` was made from the saved login `self` was read from.
+    pub(super) fn is_for_source(&self, renewal: &UnsavedRenewal) -> bool {
+        self.source == renewal.source
+    }
+
+    /// Uses `renewal` in place of this login when it was made from this saved login, which still
+    /// holds the refresh token the renewal spent.
+    pub(super) fn resume_unsaved(&mut self, renewal: &UnsavedRenewal) -> bool {
+        if self.inference_only
+            || self.unsaved_from.is_some()
+            || self.source != renewal.source
+            || self.oauth.refresh_token.as_deref() != Some(&renewal.saved_refresh_token)
+        {
+            return false;
+        }
+        self.unsaved_from = Some(renewal.saved_refresh_token.clone());
+        self.oauth = renewal.oauth.clone();
+        true
+    }
+
     /// Applies a renewal of the refresh token `spent` to this login and to the saved login it was
-    /// read from, while that still holds `spent`. Only the members a renewal changes are
+    /// read from, while that still holds `spent` (or, for a login carrying an unsaved renewal, the
+    /// refresh token that renewal spent). Only the members a renewal changes are
     /// written: everything else the saved login keeps (Claude Code's client, its MCP logins,
     /// members unknown here) stays exactly as it is. A saved login holding another refresh token
     /// was renewed or switched by someone else and is never written over.
@@ -165,9 +210,13 @@ impl ClaudeCredential {
         spent: &str,
         now_millis: i64,
     ) -> Result<bool, ClaudeError> {
+        let expected = self
+            .unsaved_from
+            .clone()
+            .unwrap_or_else(|| spent.to_owned());
         let saved = match &self.source {
             CredentialSource::Environment => {
-                self.apply_in_memory(renewal, now_millis);
+                self.apply_in_memory(renewal, spent, now_millis);
                 return Ok(false);
             }
             source => read_saved_document(source),
@@ -176,20 +225,22 @@ impl ClaudeCredential {
             Ok(Some(document)) => document,
             Ok(None) => return Err(ClaudeError::CredentialsChanged),
             Err(error) => {
-                self.apply_in_memory(renewal, now_millis);
+                self.apply_in_memory(renewal, spent, now_millis);
                 return Err(error);
             }
         };
         let oauth = document
             .get_mut("claudeAiOauth")
             .and_then(Value::as_object_mut)
-            .filter(|oauth| oauth.get("refreshToken").and_then(Value::as_str) == Some(spent))
+            .filter(|oauth| {
+                oauth.get("refreshToken").and_then(Value::as_str) == Some(expected.as_str())
+            })
             .ok_or(ClaudeError::CredentialsChanged)?;
         apply_renewal(oauth, renewal, now_millis);
         let saved: ClaudeCredentialsFile = match serde_json::from_value(document.clone()) {
             Ok(saved) => saved,
             Err(_) => {
-                self.apply_in_memory(renewal, now_millis);
+                self.apply_in_memory(renewal, spent, now_millis);
                 return Err(ClaudeError::AuthWrite);
             }
         };
@@ -208,18 +259,21 @@ impl ClaudeCredential {
                 CredentialSource::Environment => Ok(()),
             });
         if let Err(error) = written {
-            self.apply_in_memory(renewal, now_millis);
+            self.apply_in_memory(renewal, spent, now_millis);
             return Err(error);
         }
         if let Some(oauth) = saved.claude_ai_oauth.clone() {
             self.oauth = oauth;
         }
         self.document = saved;
+        self.unsaved_from = None;
         Ok(true)
     }
 
     /// Keeps a renewal that could not be saved for this session.
-    fn apply_in_memory(&mut self, renewal: &ClaudeRefreshResponse, now_millis: i64) {
+    fn apply_in_memory(&mut self, renewal: &ClaudeRefreshResponse, spent: &str, now_millis: i64) {
+        // A login already carrying an unsaved renewal keeps the token its saved login holds.
+        self.unsaved_from.get_or_insert_with(|| spent.to_owned());
         let mut oauth = serde_json::to_value(&self.oauth)
             .ok()
             .and_then(|value| value.as_object().cloned())
@@ -490,6 +544,7 @@ fn load_candidates_with_environment(
         source: CredentialSource::Environment,
         document: ClaudeCredentialsFile::default(),
         inference_only: true,
+        unsaved_from: None,
     });
     let mut oauth = base.oauth;
     oauth.access_token = Some(environment_token);
@@ -498,6 +553,7 @@ fn load_candidates_with_environment(
         source: CredentialSource::Environment,
         document: base.document,
         inference_only: true,
+        unsaved_from: None,
     };
     let live = stored
         .into_iter()
@@ -613,6 +669,7 @@ fn parse_candidate(
         source,
         document,
         inference_only,
+        unsaved_from: None,
     })
 }
 
@@ -966,6 +1023,50 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_unsaved_renewal_resumes_on_the_reloaded_login_and_is_saved_once_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempdir().unwrap();
+        let blocked = directory.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        let path = blocked.join(".credentials.json");
+        fs::write(
+            &path,
+            br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"spent"}}"#,
+        )
+        .unwrap();
+        let mut credential = file_credential(&path);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
+        let saved = credential.save_renewal(&renewal("first", Some("next")), "spent", 0);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(saved, Err(ClaudeError::AuthWrite)));
+        let unsaved = credential
+            .unsaved_renewal()
+            .expect("the failed save keeps the renewal");
+
+        // The next poll reloads the saved login, which still holds the spent token.
+        let mut reloaded = file_credential(&path);
+        assert_eq!(reloaded.oauth.refresh_token.as_deref(), Some("spent"));
+        assert!(reloaded.resume_unsaved(&unsaved));
+        assert_eq!(reloaded.access_token(), Some("first"));
+        assert_eq!(reloaded.oauth.refresh_token.as_deref(), Some("next"));
+
+        // Renewing the resumed login spends "next" and replaces the saved "spent".
+        assert!(reloaded
+            .save_renewal(&renewal("second", Some("last")), "next", 0)
+            .unwrap());
+        assert!(reloaded.unsaved_renewal().is_none());
+        let saved = file_credential(&path);
+        assert_eq!(saved.access_token(), Some("second"));
+        assert_eq!(saved.oauth.refresh_token.as_deref(), Some("last"));
+
+        // A saved login renewed or switched elsewhere no longer takes the unsaved renewal.
+        let mut changed = file_credential(&path);
+        assert!(!changed.resume_unsaved(&unsaved));
+        assert_eq!(changed.access_token(), Some("second"));
+    }
+
     #[test]
     fn atomic_credential_write_replaces_an_existing_file() {
         let directory = tempdir().unwrap();
@@ -1118,6 +1219,7 @@ mod tests {
             source,
             document: ClaudeCredentialsFile::default(),
             inference_only: false,
+            unsaved_from: None,
         };
         let file = credential(
             CredentialSource::File("credentials.json".into()),
@@ -1165,6 +1267,7 @@ mod tests {
             source: CredentialSource::Environment,
             document: ClaudeCredentialsFile::default(),
             inference_only: false,
+            unsaved_from: None,
         };
 
         let original = credential("shared-access", "refresh-a").fingerprint();

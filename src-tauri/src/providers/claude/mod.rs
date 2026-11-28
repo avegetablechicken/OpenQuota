@@ -113,7 +113,7 @@ pub(crate) fn definition() -> ProviderDefinition {
 use self::{
     auth::{
         load_candidates, oauth_config, ClaudeCredential, ClaudeCredentialGeneration,
-        ClaudeCredentialScope,
+        ClaudeCredentialScope, UnsavedRenewal,
     },
     client::ClaudeClient,
     local_usage::scan_local_usage,
@@ -183,6 +183,9 @@ pub struct ClaudeProvider {
     cached_credential_fingerprint: Mutex<Option<[u8; 32]>>,
     last_good: Mutex<Option<ProviderSnapshot>>,
     rate_limited_until: Mutex<Option<chrono::DateTime<Utc>>>,
+    /// Renewals that could not be saved. Their refresh tokens were spent, so each is used in
+    /// place of its saved login while that still holds the spent token.
+    unsaved_renewals: Mutex<Vec<UnsavedRenewal>>,
 }
 
 impl ClaudeProvider {
@@ -211,6 +214,7 @@ impl ClaudeProvider {
             cached_credential_fingerprint: Mutex::new(None),
             last_good: Mutex::new(None),
             rate_limited_until: Mutex::new(None),
+            unsaved_renewals: Mutex::new(Vec::new()),
         }
     }
 
@@ -280,7 +284,10 @@ impl ClaudeProvider {
         );
         let now = Utc::now();
         let pricing = self.pricing.current();
+        // The generation describes the saved logins, so it is taken before unsaved renewals
+        // replace them.
         let mut credential_generation = ClaudeCredentialGeneration::from_candidates(&candidates);
+        let candidates = self.resume_unsaved_renewals(candidates);
         let mut last_auth_error = None;
         for mut credential in candidates {
             match self.refresh_candidate(
@@ -368,6 +375,7 @@ impl ClaudeProvider {
                 credential_generation,
                 &self.credential_scope,
             )?;
+            self.remember_unsaved_renewal(credential);
             self.replace_live_usage_fingerprint(previous_fingerprint, credential.fingerprint());
         }
 
@@ -421,6 +429,7 @@ impl ClaudeProvider {
                 credential_generation,
                 &self.credential_scope,
             )?;
+            self.remember_unsaved_renewal(credential);
             self.replace_live_usage_fingerprint(previous_fingerprint, credential.fingerprint());
             let token = credential.access_token().ok_or(ClaudeError::TokenExpired)?;
             (status, body, retry_after, clock_offset) = self.client.fetch_usage(token, config)?;
@@ -485,6 +494,34 @@ impl ClaudeProvider {
             *until = None;
         }
         Ok(snapshot)
+    }
+
+    /// Replaces each saved login that still holds a refresh token spent by an unsaved renewal
+    /// with that renewal, and forgets renewals whose saved login has since changed.
+    fn resume_unsaved_renewals(
+        &self,
+        mut candidates: Vec<ClaudeCredential>,
+    ) -> Vec<ClaudeCredential> {
+        let Ok(mut renewals) = self.unsaved_renewals.lock() else {
+            return candidates;
+        };
+        renewals.retain(|renewal| {
+            candidates
+                .iter_mut()
+                .any(|candidate| candidate.resume_unsaved(renewal))
+        });
+        candidates
+    }
+
+    /// Keeps the renewal `credential` carries while its saved login could not take it.
+    fn remember_unsaved_renewal(&self, credential: &ClaudeCredential) {
+        let Ok(mut renewals) = self.unsaved_renewals.lock() else {
+            return;
+        };
+        renewals.retain(|renewal| !credential.is_for_source(renewal));
+        if let Some(renewal) = credential.unsaved_renewal() {
+            renewals.push(renewal);
+        }
     }
 
     fn activate_live_usage_cache(&self, fingerprint: [u8; 32]) {
@@ -1114,5 +1151,68 @@ mod tests {
         assert_eq!(oauth["clientId"], "code-client");
         assert_eq!(oauth["subscriptionType"], "max");
         assert_eq!(saved["mcpOAuth"]["server"]["accessToken"], "mcp");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unsaved_renewal_is_reused_on_later_refreshes_instead_of_the_spent_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempdir().unwrap();
+        let account_root = directory.path().join("account");
+        // The login is a link into a directory that cannot be written, as in a read-only
+        // dotfiles checkout; Claude Code's lock directory stays writable.
+        let target = expired_login(&directory.path().join("dotfiles"));
+        fs::create_dir_all(&account_root).unwrap();
+        std::os::unix::fs::symlink(&target, account_root.join(".credentials.json")).unwrap();
+        let read_only = target.parent().unwrap().to_path_buf();
+        fs::set_permissions(&read_only, fs::Permissions::from_mode(0o500)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                if request.starts_with("POST /token ") {
+                    let body = r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"scope":"user:profile user:inference"}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                } else {
+                    write_http_response(&mut stream, 25);
+                }
+                requests.push(request);
+            }
+            requests
+        });
+        let provider = isolated_provider(directory.path(), &account_root);
+        let config = ClaudeOAuthConfig {
+            usage_url: format!("{base}/usage"),
+            refresh_url: format!("{base}/token"),
+            client_id: "test-client".into(),
+        };
+
+        let first = provider.refresh_inner_with_config(&config);
+        let second = provider.refresh_inner_with_config(&config);
+        fs::set_permissions(&read_only, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let (first, _) = first.unwrap();
+        assert!(first
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("could not be saved")));
+        second.unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("POST /token "), "{}", requests[0]);
+        for usage in &requests[1..] {
+            assert!(usage.starts_with("GET /usage "), "{usage}");
+            assert!(usage
+                .to_ascii_lowercase()
+                .contains("authorization: bearer new-access"));
+        }
+        assert!(fs::read_to_string(&target).unwrap().contains("\"spent\""));
     }
 }
