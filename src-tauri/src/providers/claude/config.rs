@@ -62,6 +62,26 @@ pub(crate) fn subscription_credentials(
     Ok((base, key))
 }
 
+/// Top-level directories where Claude Code keeps its own session data, caches and plugin
+/// checkouts. They hold no user settings, can be large, and change while Claude Code runs.
+const CLAUDE_DATA_DIRECTORIES: &[&str] = &[
+    "cache",
+    "debug",
+    "file-history",
+    "ide",
+    "logs",
+    "paste-cache",
+    "plugins",
+    "projects",
+    "session-env",
+    "sessions",
+    "shell-snapshots",
+    "statsig",
+    "telemetry",
+    "todos",
+    "uploads",
+];
+
 fn provider_document(name: &str, directory: &Path) -> Result<Value, ClaudeConfigError> {
     let name = name.trim();
     if name.is_empty() {
@@ -69,16 +89,33 @@ fn provider_document(name: &str, directory: &Path) -> Result<Value, ClaudeConfig
     }
     let mut settings_matches = Vec::new();
     let mut exact_matches = Vec::new();
-    let mut directories = vec![directory.to_path_buf()];
+    let root = directory;
+    let mut directories = vec![root.to_path_buf()];
     while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(directory).map_err(|_| ClaudeConfigError::Unreadable)? {
-            let entry = entry.map_err(|_| ClaudeConfigError::Unreadable)?;
-            let kind = entry
-                .file_type()
-                .map_err(|_| ClaudeConfigError::Unreadable)?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) if directory == root => return Err(ClaudeConfigError::Unreadable),
+            // Claude Code creates and removes session directories while it runs; a subdirectory
+            // that vanished or cannot be read holds no selectable settings.
+            Err(_) => continue,
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             // Do not traverse symlink directories: configuration trees can contain cycles.
             if kind.is_dir() {
-                directories.push(entry.path());
+                let skipped = directory == root
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| CLAUDE_DATA_DIRECTORIES.contains(&name));
+                if !skipped {
+                    directories.push(entry.path());
+                }
                 continue;
             }
             if !kind.is_file() {
@@ -260,6 +297,39 @@ mod tests {
         assert_eq!(
             resolve("profiles/api.json", dir.path()),
             Err(ClaudeConfigError::NotFound("profiles/api.json".into()))
+        );
+    }
+
+    #[test]
+    fn claude_data_directories_and_unreadable_subdirectories_are_skipped() {
+        use super::{resolve_provider_base_url_in_directory as resolve, ClaudeConfigError};
+        let dir = tempfile::tempdir().unwrap();
+        let profile = r#"{"env":{"ANTHROPIC_BASE_URL":"https://work.example.com"}}"#;
+        std::fs::create_dir_all(dir.path().join("profiles")).unwrap();
+        std::fs::write(dir.path().join("profiles/settings-work.json"), profile).unwrap();
+        let plugin = dir.path().join("plugins/marketplaces/repo");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("settings-work.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.path().join("projects/app")).unwrap();
+        std::fs::write(dir.path().join("projects/app/work.json"), "{}").unwrap();
+        assert_eq!(
+            resolve("work", dir.path()).unwrap(),
+            "https://work.example.com"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let result = resolve("work", dir.path());
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(result.unwrap(), "https://work.example.com");
+        }
+        assert_eq!(
+            resolve("work", &dir.path().join("absent")),
+            Err(ClaudeConfigError::Unreadable)
         );
     }
 

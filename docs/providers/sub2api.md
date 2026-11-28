@@ -102,7 +102,9 @@ Enable **Custom Base URL** to enter an endpoint manually. Custom Base URL mode c
 puts an editable Base URL in its place, so the two sources cannot be combined.
 
 For a Claude upstream, enter a **Provider** name. OpenQuota searches `$CLAUDE_CONFIG_DIR`
-(default `~/.claude`) and its subdirectories, case-sensitively, without following symlinks.
+(default `~/.claude`) and its subdirectories, case-sensitively, without following symlinks. It skips
+Claude Code's own data directories such as `projects`, `plugins`, `file-history` and `shell-snapshots`,
+and any subdirectory it cannot read.
 First, it looks for JSON filenames containing both `settings` and the entered name: for example,
 `work` matches `work.settings.json` or `settings-work.json`. Only when there are no such matches
 will it match an exact JSON filename stem: `api` matches `profiles/api.json`. Full filenames such
