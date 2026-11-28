@@ -1466,7 +1466,7 @@ fn quotas_of_every_account_are_previewed_before_any_usage_history_request() {
     let snapshot = provider
         .refresh_snapshot_with_preview(&config, &|preview| {
             let sent: Vec<String> = requests.try_iter().collect();
-            assert!(sent.iter().all(|request| !request.contains("/admin/usage")));
+            assert!(sent.iter().all(|request| !request.contains("/stats")));
             previews.lock().unwrap().push(preview);
         })
         .unwrap();
