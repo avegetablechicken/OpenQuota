@@ -83,7 +83,7 @@ pub(crate) struct MenuBarProvider {
 }
 
 /// The menu bar entries of the tray menu: what is drawn now, and what each enabled provider offers.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MenuBarMenu {
     pub(crate) shown: Vec<MenuBarItem>,

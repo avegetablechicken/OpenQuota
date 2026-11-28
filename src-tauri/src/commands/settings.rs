@@ -33,14 +33,14 @@ enum SettingsSaveMode {
     ResetAll,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TraySetting {
     MenuBarStyle(MenuBarStyle),
     WindowMode(WindowMode),
     UsageDisplay(UsageDisplay),
     UpdateFrequency(UpdateFrequency),
     LaunchAtLoginToggle,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", test))]
     MenuBarMetricPinned {
         metric_id: String,
         pinned: bool,
@@ -63,7 +63,7 @@ pub(crate) fn apply_tray_setting(app: &AppHandle, setting: TraySetting) {
                 TraySetting::UsageDisplay(value) => next.usage_display = *value,
                 TraySetting::UpdateFrequency(value) => next.update_frequency = *value,
                 TraySetting::LaunchAtLoginToggle => next.launch_at_login = !current.launch_at_login,
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", test))]
                 TraySetting::MenuBarMetricPinned { metric_id, pinned } => {
                     if let Some(provider) = next.providers.iter_mut().find(|provider| {
                         provider
