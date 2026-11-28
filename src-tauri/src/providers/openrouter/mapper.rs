@@ -44,14 +44,7 @@ pub fn map_key(data: &serde_json::Map<String, Value>) -> KeyMetrics {
     .collect();
     let quota = number(data.get("limit"))
         .filter(|limit| *limit > 0.0)
-        .map(|limit| {
-            dollars_quota(
-                "keyLimit",
-                "Key Limit",
-                number(data.get("usage")).unwrap_or(0.0).max(0.0),
-                limit,
-            )
-        });
+        .map(|limit| dollars_quota("keyLimit", "Key Limit", key_limit_used(data, limit), limit));
     let plan = data
         .get("is_free_tier")
         .and_then(Value::as_bool)
@@ -67,6 +60,22 @@ pub fn map_key(data: &serde_json::Map<String, Value>) -> KeyMetrics {
         quota,
         values,
     }
+}
+
+/// Spend counted against the key cap. `usage` is lifetime spend, while a cap
+/// with `limit_reset` only counts the current window, so prefer the in-window
+/// remainder and then the matching period spend.
+fn key_limit_used(data: &serde_json::Map<String, Value>, limit: f64) -> f64 {
+    if let Some(remaining) = number(data.get("limit_remaining")) {
+        return (limit - remaining).max(0.0);
+    }
+    let field = match data.get("limit_reset").and_then(Value::as_str) {
+        Some("daily") => "usage_daily",
+        Some("weekly") => "usage_weekly",
+        Some("monthly") => "usage_monthly",
+        _ => "usage",
+    };
+    number(data.get(field)).unwrap_or(0.0).max(0.0)
 }
 
 fn dollars_quota(id: &str, label: &str, used: f64, limit: f64) -> QuotaWindow {
@@ -160,5 +169,28 @@ mod tests {
             [("today", 0.0), ("week", 1.25), ("month", 4.5)]
         );
         assert_eq!(mapped.quota.unwrap().used_value, Some(2.0));
+    }
+
+    #[test]
+    fn resetting_key_limit_counts_only_the_current_window() {
+        let body = json!({"data":{
+            "usage":50,
+            "usage_monthly":2,
+            "limit":10,
+            "limit_reset":"monthly",
+            "limit_remaining":7
+        }});
+        let quota = map_key(data_object(&body).unwrap()).quota.unwrap();
+        assert_eq!(quota.used_value, Some(3.0));
+        assert!((quota.used_percent - 30.0).abs() < 1e-9);
+
+        let body = json!({"data":{
+            "usage":50,
+            "usage_weekly":4,
+            "limit":10,
+            "limit_reset":"weekly"
+        }});
+        let quota = map_key(data_object(&body).unwrap()).quota.unwrap();
+        assert_eq!(quota.used_value, Some(4.0));
     }
 }
