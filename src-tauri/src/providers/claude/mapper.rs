@@ -380,14 +380,15 @@ pub(crate) fn map_sub2api_claude_reset_credits(
 }
 
 /// Retains unexpired reset credits from the last confirmed snapshot when a live usage response
-/// omits `cedar_ember` (for example after falling back to the legacy User-Agent on HTTP 429).
+/// omits `cedar_ember` or reports client-capability ineligibility (for example `cli_version` or
+/// `surface` after falling back to the legacy User-Agent on HTTP 429).
 pub(crate) fn retain_known_resets(
     value_metrics: &mut Vec<ValueMetric>,
     previous: Option<&ProviderSnapshot>,
     body: &Value,
     now: DateTime<Utc>,
 ) {
-    if body.get("cedar_ember").is_some()
+    if !cedar_ember_omitted_for_client_capability(body)
         || value_metrics
             .iter()
             .any(|metric| metric.id == "claudeRateLimitResets")
@@ -426,6 +427,20 @@ pub(crate) fn retain_known_resets(
         }
     }
     value_metrics.push(retained);
+}
+
+fn cedar_ember_omitted_for_client_capability(body: &Value) -> bool {
+    match body.get("cedar_ember") {
+        None => true,
+        Some(block) => {
+            block.get("eligible").and_then(Value::as_bool) == Some(false)
+                && block
+                    .get("ineligible_reason")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .is_some_and(|reason| matches!(reason, "cli_version" | "surface"))
+        }
+    }
 }
 
 fn bounded_reset_count(value: Option<&Value>, current_total: u64) -> Option<u64> {
@@ -777,16 +792,37 @@ mod tests {
             warnings: Vec::new(),
             refreshed_at: t0,
         };
-        let mut metrics = Vec::new();
-        retain_known_resets(&mut metrics, Some(&previous), &serde_json::json!({}), t1);
-        assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0].values[0].number, 1.0);
-        assert_eq!(metrics[0].reset_credits.len(), 1);
-        assert_eq!(metrics[0].reset_credits[0].kind, ResetCreditKind::Full);
+        for mut body in [
+            serde_json::json!({}),
+            serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "cli_version"}}),
+            serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "cli_version", "grants": []}}),
+            serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "surface"}}),
+        ] {
+            body["five_hour"] = serde_json::json!({"utilization": 10});
+            let mut mapped =
+                map_usage_at(StatusCode::OK, &body, &ClaudeOAuth::default(), t1).unwrap();
+            retain_known_resets(&mut mapped.value_metrics, Some(&previous), &body, t1);
+            let resets = mapped
+                .value_metrics
+                .iter()
+                .find(|metric| metric.id == "claudeRateLimitResets")
+                .unwrap_or_else(|| panic!("expected retained resets for {body}"));
+            assert_eq!(resets.values[0].number, 1.0, "{body}");
+            assert_eq!(resets.reset_credits.len(), 1, "{body}");
+            assert_eq!(
+                resets.reset_credits[0].kind,
+                ResetCreditKind::Full,
+                "{body}"
+            );
+        }
 
-        // Explicit negative or malformed reset metadata must supersede the prior positive state.
+        // Real eligibility revocation, unknown ineligibility, malformed metadata, or authoritative
+        // empty grants must supersede the prior positive state.
         for mut body in [
             serde_json::json!({"cedar_ember": {"eligible": false}}),
+            serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "plan"}}),
+            serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "account_ineligible"}}),
+            serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": ""}}),
             serde_json::json!({"cedar_ember": null}),
             serde_json::json!({"cedar_ember": {"eligible": true}}),
             serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}}),
@@ -795,10 +831,13 @@ mod tests {
             let mut mapped =
                 map_usage_at(StatusCode::OK, &body, &ClaudeOAuth::default(), t1).unwrap();
             retain_known_resets(&mut mapped.value_metrics, Some(&previous), &body, t1);
-            assert!(mapped
-                .value_metrics
-                .iter()
-                .all(|metric| metric.values[0].number == 0.0));
+            assert!(
+                mapped
+                    .value_metrics
+                    .iter()
+                    .all(|metric| metric.values[0].number == 0.0),
+                "{body}"
+            );
         }
     }
 

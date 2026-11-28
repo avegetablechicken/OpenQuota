@@ -1066,6 +1066,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fallback_capability_ineligibility_retains_verified_credits_while_real_revocation_clears_them(
+    ) {
+        let org = "550e8400-e29b-41d4-a716-446655440000";
+        let matching =
+            serde_json::json!({"account":{"uuid":"account-a"},"organization":{"uuid":org}});
+        let mismatched =
+            serde_json::json!({"account":{"uuid":"account-b"},"organization":{"uuid":org}});
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("account");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".credentials.json"),
+            credential_json("usage-token", "refresh-token", "pro"),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".claude.json"),
+            serde_json::json!({"oauthAccount":{"accountUuid":"account-a","organizationUuid":org}})
+                .to_string(),
+        )
+        .unwrap();
+        let provider = isolated_provider(directory.path(), &root);
+        let expected_owner =
+            super::accounts::identity_for_scope(&provider.credential_scope).unwrap();
+        let initial_usage = serde_json::json!({
+            "five_hour": {"utilization": 12},
+            "cedar_ember": {
+                "eligible": true,
+                "next_grant_id": "grant",
+                "grants": [{
+                    "id": "grant",
+                    "resets_left": 2,
+                    "ends_at": "2099-12-01T00:00:00Z",
+                    "usable_now": true,
+                    "clears": ["five_hour", "seven_day"]
+                }]
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            for (status, body, path) in [
+                // 1. Primary UA succeeds with active reset credits.
+                (200, initial_usage, "/usage?cedar_ember=1"),
+                (200, matching.clone(), "/api/oauth/profile"),
+                // 2. Primary UA hits 429, fallback returns `surface` ineligibility -> retain & verify.
+                (429, serde_json::Value::Null, "/usage?cedar_ember=1"),
+                (
+                    200,
+                    serde_json::json!({
+                        "five_hour": {"utilization": 12},
+                        "cedar_ember": {"eligible": false, "ineligible_reason": "surface"}
+                    }),
+                    "/usage?cedar_ember=1",
+                ),
+                (200, matching, "/api/oauth/profile"),
+                // 3. During primary cooldown, fallback returns `cli_version` + mismatched profile ->
+                //    credits retained, ownership verification clears claimability.
+                (
+                    200,
+                    serde_json::json!({
+                        "five_hour": {"utilization": 12},
+                        "cedar_ember": {"eligible": false, "ineligible_reason": "cli_version"}
+                    }),
+                    "/usage?cedar_ember=1",
+                ),
+                (200, mismatched, "/api/oauth/profile"),
+                // 4. Real eligibility revocation supersedes prior credits without calling profile.
+                (
+                    200,
+                    serde_json::json!({
+                        "five_hour": {"utilization": 12},
+                        "cedar_ember": {"eligible": false, "ineligible_reason": "plan"}
+                    }),
+                    "/usage?cedar_ember=1",
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(StdDuration::from_secs(5)))
+                    .unwrap();
+                let request = read_request(&mut stream);
+                assert!(request.starts_with(&format!("GET {path} ")), "{request}");
+                let body = body.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let config = ClaudeOAuthConfig {
+            usage_url: format!("{base}/usage"),
+            refresh_url: format!("{base}/token"),
+            client_id: "test".into(),
+        };
+
+        let (initial, _) = provider.refresh_inner_with_config(&config).unwrap();
+        let (fallback_ok, _) = provider.refresh_inner_with_config(&config).unwrap();
+        assert_eq!(fallback_ok.value_metrics, initial.value_metrics);
+        let metric = fallback_ok
+            .value_metrics
+            .iter()
+            .find(|metric| metric.id == "claudeRateLimitResets")
+            .unwrap();
+        assert_eq!(metric.values[0].number, 2.0);
+        assert!(metric.reset_credits.iter().all(|credit| {
+            credit.claim_account.as_deref() == Some(expected_owner.as_str()) && credit.redeemable
+        }));
+
+        let (fallback_mismatch, _) = provider.refresh_inner_with_config(&config).unwrap();
+        let metric = fallback_mismatch
+            .value_metrics
+            .iter()
+            .find(|metric| metric.id == "claudeRateLimitResets")
+            .unwrap();
+        assert_eq!(metric.values[0].number, 2.0);
+        assert!(metric
+            .reset_credits
+            .iter()
+            .all(|credit| credit.claim_account.is_none() && !credit.redeemable));
+        assert!(fallback_mismatch
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("ownership")));
+
+        let (revoked, _) = provider.refresh_inner_with_config(&config).unwrap();
+        assert!(revoked
+            .value_metrics
+            .iter()
+            .all(|metric| metric.id != "claudeRateLimitResets"));
+
+        server.join().unwrap();
+    }
+
     fn expired_login(account_root: &std::path::Path) -> std::path::PathBuf {
         fs::create_dir_all(account_root).unwrap();
         let path = account_root.join(".credentials.json");
