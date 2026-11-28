@@ -764,7 +764,12 @@ mod tests {
                 let (dir, holders, overlap) = (dir.clone(), holders.clone(), overlap.clone());
                 thread::spawn(move || {
                     for _ in 0..5 {
-                        let lock = RefreshLock::acquire(&dir, quick(5_000)).unwrap().unwrap();
+                        // Each acquisition syncs the owner record to disk. Allow
+                        // all contenders to finish on busy CI runners; this tests
+                        // mutual exclusion, not scheduling or filesystem speed.
+                        let lock = RefreshLock::acquire(&dir, quick(30_000))
+                            .expect("lock acquisition should not fail")
+                            .expect("contenders should release the lock within 30 seconds");
                         if holders.fetch_add(1, Ordering::SeqCst) != 0 {
                             overlap.store(true, Ordering::SeqCst);
                         }
