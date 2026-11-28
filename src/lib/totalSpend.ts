@@ -57,13 +57,14 @@ export function selectedPeriod(
 
 function valueFor(period: UsagePeriod, metric: AppSettings['totalSpendMetric']): number | null {
   if (metric === 'tokens') return period.tokens > 0 ? period.tokens : null;
-  if (period.estimatedCostUsd === null || period.estimatedCostUsd <= 0) return null;
+  if (period.estimatedCostUsd === null || period.estimatedCostUsd < 0) return null;
   if (metric === 'costPerMillion') {
+    // A Recorded $0 is a measured rate, and its tokens belong in the blended rate.
     return period.estimateComplete && period.tokens > 0
       ? (period.estimatedCostUsd / period.tokens) * 1_000_000
       : null;
   }
-  return period.estimatedCostUsd;
+  return period.estimatedCostUsd > 0 ? period.estimatedCostUsd : null;
 }
 
 function selectedOtherPeriod(
@@ -196,13 +197,15 @@ function otherSpendSlices(
   }
 
   const slices: SpendSlice[] = [];
-  if (aggregate.estimatedCostUsd !== null && aggregate.estimatedCostUsd > 0) {
+  if (aggregate.estimatedCostUsd !== null && aggregate.estimatedCostUsd >= 0) {
     const pricedValue =
       metric === 'costPerMillion'
         ? aggregate.pricedTokens > 0
           ? (aggregate.estimatedCostUsd / aggregate.pricedTokens) * 1_000_000
           : null
-        : aggregate.estimatedCostUsd;
+        : aggregate.estimatedCostUsd > 0
+          ? aggregate.estimatedCostUsd
+          : null;
     if (pricedValue !== null) {
       slices.push({
         id: OTHERS_SPEND_ID,

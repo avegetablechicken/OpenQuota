@@ -129,6 +129,72 @@ describe('Total Spend projection', () => {
     );
   });
 
+  it('counts a Recorded $0 period in the blended cost per million', () => {
+    const period = (tokens: number, estimatedCostUsd: number): UsagePeriod => ({
+      tokens,
+      estimatedCostUsd,
+      costEstimated: false,
+      estimateComplete: true,
+    });
+    const mixed = [
+      provider('claude', period(1_000_000, 10)),
+      provider('opencode', period(9_000_000, 0)),
+    ];
+
+    expect(projectSpend(mixed, 'today', 'costPerMillion', 'localDevice').centerValue).toBe(1);
+    expect(projectSpend(mixed, 'today', 'cost', 'localDevice').slices.map((s) => s.id)).toEqual([
+      'claude',
+    ]);
+    expect(
+      projectSpend(
+        [provider('opencode', period(1_000_000, 0))],
+        'today',
+        'costPerMillion',
+        'localDevice',
+      ).centerValue,
+    ).toBe(0);
+  });
+
+  it('counts free filtered usage in the Others cost per million', () => {
+    const free = {
+      tokens: 9_000_000,
+      pricedTokens: 9_000_000,
+      estimatedCostUsd: 0,
+      costEstimated: false,
+    };
+    const providers: SpendProvider[] = [
+      provider('claude', {
+        tokens: 1_000_000,
+        estimatedCostUsd: 10,
+        costEstimated: false,
+        estimateComplete: true,
+      }),
+      {
+        id: 'opencode',
+        usageHistories: {
+          localDevice: {
+            ...empty,
+            otherUsage: {
+              today: { ...free, estimateComplete: true, models: { 'free-model': free } },
+              yesterday: null,
+              last30Days: null,
+            },
+          },
+        },
+      },
+    ];
+
+    const projection = projectSpend(providers, 'today', 'costPerMillion', 'localDevice');
+    expect(projection.slices.map((s) => [s.id, s.value])).toEqual([
+      ['claude', 10],
+      [OTHERS_SPEND_ID, 0],
+    ]);
+    expect(projection.centerValue).toBe(1);
+    expect(projectSpend(providers, 'today', 'cost', 'localDevice').slices.map((s) => s.id)).toEqual(
+      ['claude'],
+    );
+  });
+
   it('hides cost per million for partially priced periods instead of diluting the rate with unpriced tokens', () => {
     const providers = [
       provider('codex', {
