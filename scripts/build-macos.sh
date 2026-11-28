@@ -21,7 +21,7 @@ if [[ "$(uname -s)" != Darwin ]]; then
   echo 'This script requires macOS.' >&2
   exit 1
 fi
-export PATH="/tmp/openquota-pnpm-shim:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 # A stable signing identity preserves Keychain trust across local rebuilds.
 # An explicit '-' still selects ad hoc; no certificate also falls back to it.
 if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
@@ -68,7 +68,7 @@ if [[ "$mode" == dmg ]]; then
   build_arguments=(--verbose "${build_arguments[@]}")
 fi
 
-if PATH=/tmp/openquota-pnpm-shim:/opt/homebrew/bin:/usr/bin:/bin \
+if PATH=/opt/homebrew/bin:/usr/bin:/bin \
   node_modules/.bin/tauri build \
     "${build_arguments[@]}" \
     --ignore-version-mismatches \
