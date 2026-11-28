@@ -150,23 +150,11 @@ fn installed_major_version() -> Result<u64, OpenCodeError> {
     } else {
         "opencode"
     };
-    let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
-        .unwrap_or_default();
-    // GUI launches may not inherit the terminal's PATH.
-    let home = home_directory();
-    directories.extend([home.join(".opencode/bin"), home.join(".local/bin")]);
-    #[cfg(unix)]
-    directories.extend([
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/usr/bin"),
-    ]);
-    let binary = directories
-        .into_iter()
-        .map(|dir| dir.join(executable))
-        .find(|path| path.is_file())
-        .ok_or(OpenCodeError::CredentialsUnreadable)?;
+    let binary = crate::child_process::find_executable(
+        executable,
+        &[home_directory().join(".opencode/bin")],
+    )
+    .ok_or(OpenCodeError::CredentialsUnreadable)?;
     let output = crate::child_process::output_with_timeout(
         crate::child_process::background_command(
             binary

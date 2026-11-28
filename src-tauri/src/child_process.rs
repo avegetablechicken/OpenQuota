@@ -1,5 +1,6 @@
 use std::{
     io::{self, Read, Write},
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
@@ -140,6 +141,46 @@ fn read_all(mut reader: impl Read) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Finds an installed command-line tool: on `PATH`, then in `preferred`, then in the usual install
+/// directories, because GUI launches may not inherit the terminal's `PATH`. `executable` is the
+/// file name, including `.exe` on Windows.
+pub fn find_executable(executable: &str, preferred: &[PathBuf]) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    find_executable_in(
+        executable,
+        std::env::var_os("PATH").as_deref(),
+        &home,
+        preferred,
+    )
+}
+
+fn find_executable_in(
+    executable: &str,
+    path: Option<&std::ffi::OsStr>,
+    home: &Path,
+    preferred: &[PathBuf],
+) -> Option<PathBuf> {
+    let mut directories: Vec<PathBuf> = path
+        .map(|path| std::env::split_paths(path).collect())
+        .unwrap_or_default();
+    directories.extend(preferred.iter().cloned());
+    directories.push(home.join(".local/bin"));
+    #[cfg(unix)]
+    directories.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/home/linuxbrew/.linuxbrew/bin"),
+    ]);
+    directories
+        .into_iter()
+        .map(|directory| directory.join(executable))
+        .find(|path| path.is_file())
+}
+
 #[cfg(target_os = "windows")]
 fn hide_console_window(command: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -150,6 +191,37 @@ fn hide_console_window(command: &mut Command) {
 
 #[cfg(not(target_os = "windows"))]
 fn hide_console_window(_command: &mut Command) {}
+
+#[cfg(test)]
+mod lookup_tests {
+    use std::fs;
+
+    use super::find_executable_in;
+
+    #[test]
+    fn executables_are_found_on_path_first_then_in_install_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let on_path = directory.path().join("path");
+        let home = directory.path().join("home");
+        fs::create_dir_all(&on_path).unwrap();
+        fs::create_dir_all(home.join(".local/bin")).unwrap();
+        fs::write(home.join(".local/bin/tool"), "").unwrap();
+
+        assert_eq!(
+            find_executable_in("tool", Some(on_path.as_os_str()), &home, &[]),
+            Some(home.join(".local/bin/tool"))
+        );
+        fs::write(on_path.join("tool"), "").unwrap();
+        assert_eq!(
+            find_executable_in("tool", Some(on_path.as_os_str()), &home, &[]),
+            Some(on_path.join("tool"))
+        );
+        assert_eq!(
+            find_executable_in("missing-openquota-tool", None, &home, &[]),
+            None
+        );
+    }
+}
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {

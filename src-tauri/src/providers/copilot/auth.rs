@@ -16,7 +16,8 @@ use zeroize::Zeroizing;
 #[cfg(target_os = "macos")]
 use crate::providers::credential_store::read_generic_password;
 use crate::{
-    child_process::background_command, providers::credential_store::decode_go_keyring_value,
+    child_process::{background_command, find_executable},
+    providers::credential_store::decode_go_keyring_value,
 };
 
 const GH_KEYRING_SERVICE: &str = "gh:github.com";
@@ -386,7 +387,14 @@ fn token_from_keyring(raw: &[u8]) -> Option<CopilotToken> {
 }
 
 fn run_gh_token_command(timeout: Duration) -> Option<CopilotToken> {
-    let mut child = background_command("gh");
+    let executable = if cfg!(windows) { "gh.exe" } else { "gh" };
+    let program = find_executable(executable, &[]);
+    let mut child = background_command(
+        program
+            .as_deref()
+            .and_then(std::path::Path::to_str)
+            .unwrap_or("gh"),
+    );
     child
         .args(["auth", "token", "--hostname", "github.com"])
         .env("GH_PROMPT_DISABLED", "1")
