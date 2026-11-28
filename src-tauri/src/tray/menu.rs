@@ -32,62 +32,30 @@ pub(crate) enum TrayAction {
     Quit,
 }
 
-/// The settings each fixed entry sets, by id.
-const SETTINGS: [(&str, TraySetting); 11] = [
-    (
-        "icon-style-openquota",
-        TraySetting::MenuBarStyle(MenuBarStyle::Icon),
-    ),
-    (
-        "icon-style-text",
-        TraySetting::MenuBarStyle(MenuBarStyle::Text),
-    ),
-    (
-        "icon-style-bars",
-        TraySetting::MenuBarStyle(MenuBarStyle::Bars),
-    ),
-    (
-        "tray-mode-popup",
-        TraySetting::WindowMode(WindowMode::Popup),
-    ),
-    (
-        "tray-mode-floating",
-        TraySetting::WindowMode(WindowMode::Floating),
-    ),
-    (
-        "usage-display-left",
-        TraySetting::UsageDisplay(UsageDisplay::Left),
-    ),
-    (
-        "usage-display-used",
-        TraySetting::UsageDisplay(UsageDisplay::Used),
-    ),
-    (
-        "update-frequency-one-minute",
-        TraySetting::UpdateFrequency(UpdateFrequency::OneMinute),
-    ),
-    (
-        "update-frequency-five-minutes",
-        TraySetting::UpdateFrequency(UpdateFrequency::FiveMinutes),
-    ),
-    (
-        "update-frequency-adaptive",
-        TraySetting::UpdateFrequency(UpdateFrequency::Adaptive),
-    ),
-    ("launch-at-login", TraySetting::LaunchAtLoginToggle),
-];
-
-const COMMANDS: [(&str, TrayAction); 4] = [
-    ("open", TrayAction::Open),
-    ("customize", TrayAction::Customize),
-    ("settings", TrayAction::Settings),
-    ("quit", TrayAction::Quit),
+/// Every action whose id names no metric: what [`TrayAction::from_id`] reads back besides the
+/// menu bar entries.
+const FIXED: [TrayAction; 15] = [
+    TrayAction::Setting(TraySetting::MenuBarStyle(MenuBarStyle::Icon)),
+    TrayAction::Setting(TraySetting::MenuBarStyle(MenuBarStyle::Text)),
+    TrayAction::Setting(TraySetting::MenuBarStyle(MenuBarStyle::Bars)),
+    TrayAction::Setting(TraySetting::WindowMode(WindowMode::Popup)),
+    TrayAction::Setting(TraySetting::WindowMode(WindowMode::Floating)),
+    TrayAction::Setting(TraySetting::UsageDisplay(UsageDisplay::Left)),
+    TrayAction::Setting(TraySetting::UsageDisplay(UsageDisplay::Used)),
+    TrayAction::Setting(TraySetting::UpdateFrequency(UpdateFrequency::OneMinute)),
+    TrayAction::Setting(TraySetting::UpdateFrequency(UpdateFrequency::FiveMinutes)),
+    TrayAction::Setting(TraySetting::UpdateFrequency(UpdateFrequency::Adaptive)),
+    TrayAction::Setting(TraySetting::LaunchAtLoginToggle),
+    TrayAction::Open,
+    TrayAction::Customize,
+    TrayAction::Settings,
+    TrayAction::Quit,
 ];
 
 impl TrayAction {
     /// The menu entry id that [`Self::from_id`] reads back as this action.
     pub(crate) fn id(&self) -> String {
-        match self {
+        let fixed = match self {
             #[cfg(any(target_os = "macos", test))]
             Self::Setting(TraySetting::MenuBarMetricPinned { metric_id, pinned }) => {
                 let prefix = if *pinned {
@@ -95,21 +63,37 @@ impl TrayAction {
                 } else {
                     MENU_BAR_UNPIN_PREFIX
                 };
-                format!("{prefix}{metric_id}")
+                return format!("{prefix}{metric_id}");
             }
-            Self::Setting(setting) => SETTINGS
-                .iter()
-                .find(|(_, candidate)| candidate == setting)
-                .map(|(id, _)| (*id).to_owned())
-                .expect("every fixed tray setting has an id"),
             #[cfg(any(target_os = "macos", test))]
-            Self::HideMenuBarMetric(metric_id) => format!("{MENU_BAR_HIDE_PREFIX}{metric_id}"),
-            command => COMMANDS
-                .iter()
-                .find(|(_, candidate)| candidate == command)
-                .map(|(id, _)| (*id).to_owned())
-                .expect("every tray command has an id"),
-        }
+            Self::HideMenuBarMetric(metric_id) => {
+                return format!("{MENU_BAR_HIDE_PREFIX}{metric_id}")
+            }
+            Self::Setting(TraySetting::MenuBarStyle(style)) => match style {
+                MenuBarStyle::Icon => "icon-style-openquota",
+                MenuBarStyle::Text => "icon-style-text",
+                MenuBarStyle::Bars => "icon-style-bars",
+            },
+            Self::Setting(TraySetting::WindowMode(mode)) => match mode {
+                WindowMode::Popup => "tray-mode-popup",
+                WindowMode::Floating => "tray-mode-floating",
+            },
+            Self::Setting(TraySetting::UsageDisplay(display)) => match display {
+                UsageDisplay::Left => "usage-display-left",
+                UsageDisplay::Used => "usage-display-used",
+            },
+            Self::Setting(TraySetting::UpdateFrequency(frequency)) => match frequency {
+                UpdateFrequency::OneMinute => "update-frequency-one-minute",
+                UpdateFrequency::FiveMinutes => "update-frequency-five-minutes",
+                UpdateFrequency::Adaptive => "update-frequency-adaptive",
+            },
+            Self::Setting(TraySetting::LaunchAtLoginToggle) => "launch-at-login",
+            Self::Open => "open",
+            Self::Customize => "customize",
+            Self::Settings => "settings",
+            Self::Quit => "quit",
+        };
+        fixed.to_owned()
     }
 
     /// The action of the entry with `id`; `None` for submenus and unknown ids.
@@ -132,16 +116,7 @@ impl TrayAction {
                 return Some(pinned(metric_id, false));
             }
         }
-        SETTINGS
-            .iter()
-            .find(|(candidate, _)| *candidate == id)
-            .map(|(_, setting)| Self::Setting(setting.clone()))
-            .or_else(|| {
-                COMMANDS
-                    .iter()
-                    .find(|(candidate, _)| *candidate == id)
-                    .map(|(_, action)| action.clone())
-            })
+        FIXED.iter().find(|action| action.id() == id).cloned()
     }
 }
 
@@ -356,7 +331,7 @@ fn menu_bar_submenu(menu: MenuBarMenu) -> Option<TrayEntry> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{mac_menu, standard_menu, TrayAction, TrayEntry, COMMANDS, SETTINGS};
+    use super::{mac_menu, standard_menu, TrayAction, TrayEntry, FIXED};
     use crate::{
         commands::settings::TraySetting,
         models::{AppSettings, MenuBarStyle, UpdateFrequency, UsageDisplay, WindowMode},
@@ -457,11 +432,7 @@ mod tests {
 
     #[test]
     fn every_action_reads_back_from_its_id() {
-        let mut actions = SETTINGS
-            .iter()
-            .map(|(_, setting)| TrayAction::Setting(setting.clone()))
-            .chain(COMMANDS.iter().map(|(_, action)| action.clone()))
-            .collect::<Vec<_>>();
+        let mut actions = FIXED.to_vec();
         actions.extend([
             TrayAction::HideMenuBarMetric("sub2api@2.session".into()),
             TrayAction::Setting(TraySetting::MenuBarMetricPinned {
@@ -481,6 +452,29 @@ mod tests {
         }
         for submenu in ["tray-mode", "menu-bar-add", "menu-bar-add:codex", "unknown"] {
             assert_eq!(TrayAction::from_id(submenu), None, "{submenu}");
+        }
+    }
+
+    #[test]
+    fn every_menu_item_reads_back_as_its_action() {
+        fn items(entries: &[TrayEntry]) -> Vec<&TrayAction> {
+            entries
+                .iter()
+                .flat_map(|entry| match entry {
+                    TrayEntry::Item { action, .. } => vec![action],
+                    TrayEntry::Submenu { entries, .. } => items(entries),
+                    TrayEntry::Separator => Vec::new(),
+                })
+                .collect()
+        }
+        let standard = standard_menu(&settings());
+        let mac = mac_menu(&settings(), menu_bar());
+        for action in items(&standard).into_iter().chain(items(&mac)) {
+            assert_eq!(
+                TrayAction::from_id(&action.id()).as_ref(),
+                Some(action),
+                "{action:?}"
+            );
         }
     }
 
