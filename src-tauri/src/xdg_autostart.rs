@@ -68,8 +68,15 @@ Icon=io.github.deviffyy.openquota\n\
 Terminal=false\n\
 StartupNotify=false\n\
 X-GNOME-Autostart-enabled=true\n",
-        quote_exec(executable.to_string_lossy().as_ref())
+        exec_value(executable.to_string_lossy().as_ref())
     )
+}
+
+/// The `Exec=` value for `program`: quoted by the Exec rules, with a literal
+/// `%` written `%%` so it is not a field code, and then escaped as a key-file
+/// string, whose unescaping runs first and turns `\\` back into `\`.
+fn exec_value(program: &str) -> String {
+    quote_exec(program).replace('%', "%%").replace('\\', "\\\\")
 }
 
 fn quote_exec(value: &str) -> String {
@@ -113,8 +120,15 @@ mod tests {
     #[test]
     fn desktop_entry_quotes_reserved_exec_characters() {
         let entry = desktop_entry(Path::new("/opt/Open Quota/$test`bin"));
-        assert!(entry.contains("Exec=\"/opt/Open Quota/\\$test\\`bin\""));
+        // Exec quoting gives `\$`, and the key-file string escape doubles the backslash.
+        assert!(entry.contains("Exec=\"/opt/Open Quota/\\\\$test\\\\`bin\""));
         assert!(entry.contains("X-GNOME-Autostart-enabled=true"));
+    }
+
+    #[test]
+    fn desktop_entry_escapes_percent_signs_and_backslashes() {
+        let entry = desktop_entry(Path::new(r"/opt/100%/a\b/openquota"));
+        assert!(entry.contains(r#"Exec="/opt/100%%/a\\\\b/openquota""#));
     }
 
     #[test]
