@@ -81,3 +81,16 @@ correct local clock skew, including virtual machines with a fast or slow clock.
 Reset timestamps remain UTC instants; exact times are displayed in the local time
 zone. The offset is cached with each quota. Old caches and responses without a
 valid `Date` header use the local clock until a successful refresh supplies one.
+
+Adaptive refresh ignores changes to that clock offset and reset-time corrections of up to
+five seconds when deciding whether usage changed. After two unchanged fast refreshes, the
+shared refresh interval returns from one minute to five minutes, provided no other enabled
+provider reports changed usage. Actual usage changes and new or ended windows still trigger
+faster refreshes.
+
+If Claude's primary usage request returns HTTP 429, OpenQuota remembers a cooldown for that
+login token and endpoint even when the legacy request succeeds. During the cooldown it uses
+the legacy request directly. The cooldown lasts at least five minutes and honors a longer
+`Retry-After`, capped at 24 hours. It is kept in memory; restarting OpenQuota or rotating the
+login token starts a fresh probe. If both requests are rate limited, the existing cached-limit
+display and provider cooldown still apply.

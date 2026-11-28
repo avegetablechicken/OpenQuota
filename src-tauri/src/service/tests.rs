@@ -109,6 +109,119 @@ fn usage_refresh_interval_follows_actual_snapshot_changes() {
     );
 }
 
+#[test]
+fn clock_jitter_does_not_keep_adaptive_refresh_fast_for_live_or_nested_accounts() {
+    let mut baseline = test_snapshot("claude");
+    baseline.quotas.push(QuotaWindow {
+        clock_offset_seconds: Some(0),
+        id: "session".into(),
+        label: "Session".into(),
+        used_percent: 25.0,
+        resets_at: Some(Utc::now() + chrono::Duration::hours(3)),
+        period_seconds: 18000,
+        format: QuotaFormat::Percent,
+        used_value: None,
+        limit_value: None,
+        unit: None,
+        estimated: false,
+        source_note: None,
+    });
+    for nested in [false, true] {
+        let view = |snapshot: ProviderSnapshot| {
+            let snapshot = if nested {
+                let mut parent = test_snapshot("claude");
+                parent.accounts = Some(vec![AccountSnapshot {
+                    id: "alice".into(),
+                    name: "Alice".into(),
+                    snapshot,
+                }]);
+                parent
+            } else {
+                snapshot
+            };
+            UsageViewState {
+                providers: [(
+                    "claude".into(),
+                    ProviderViewState {
+                        snapshot: Some(snapshot),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            }
+        };
+        let ids = vec!["claude".into()];
+        let mut previous = baseline.clone();
+        previous.quotas[0].used_percent = 20.0;
+        let changed = usage_data_changed(&view(previous), &view(baseline.clone()), &ids);
+        assert!(changed);
+        let mut unchanged = 0;
+        let mut interval = refresh_interval_for(REFRESH_INTERVAL, changed, &mut unchanged);
+        assert_eq!(interval, FAST_REFRESH_INTERVAL);
+        previous = baseline.clone();
+        for (round, offset, shift) in [(1, Some(-1), -1), (2, None, 0)] {
+            let mut current = baseline.clone();
+            current.refreshed_at += chrono::Duration::seconds(60 * round);
+            current.quotas[0].clock_offset_seconds = offset;
+            current.quotas[0].resets_at = baseline.quotas[0]
+                .resets_at
+                .map(|at| at + chrono::Duration::seconds(shift));
+            let changed = usage_data_changed(&view(previous), &view(current.clone()), &ids);
+            assert!(!changed, "clock jitter, nested={nested}");
+            interval = refresh_interval_for(interval, changed, &mut unchanged);
+            assert_eq!(
+                interval,
+                if round == 1 {
+                    FAST_REFRESH_INTERVAL
+                } else {
+                    REFRESH_INTERVAL
+                }
+            );
+            previous = current;
+        }
+        // Repeated idle polls stay slow; real usage and window changes still speed up.
+        for shift in [-5, 5, 6] {
+            let mut current = baseline.clone();
+            current.quotas[0].resets_at = baseline.quotas[0]
+                .resets_at
+                .map(|at| at + chrono::Duration::seconds(shift));
+            assert_eq!(
+                usage_data_changed(&view(baseline.clone()), &view(current), &ids),
+                shift == 6
+            );
+        }
+        let mut ended = baseline.clone();
+        ended.quotas[0].resets_at = None;
+        assert!(usage_data_changed(
+            &view(baseline.clone()),
+            &view(ended.clone()),
+            &ids
+        ));
+        assert!(usage_data_changed(
+            &view(ended),
+            &view(baseline.clone()),
+            &ids
+        ));
+        let mut spent = baseline.clone();
+        spent.quotas[0].used_percent += 1.0;
+        spent.quotas[0].clock_offset_seconds = Some(-1);
+        assert!(usage_data_changed(
+            &view(baseline.clone()),
+            &view(spent),
+            &ids
+        ));
+        let mut removed = baseline.clone();
+        removed.quotas.clear();
+        assert!(usage_data_changed(
+            &view(baseline.clone()),
+            &view(removed),
+            &ids
+        ));
+    }
+}
+
 struct SlowProvider {
     id: &'static str,
     calls: Arc<AtomicUsize>,

@@ -1,11 +1,26 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::{auth::ClaudeOAuthConfig, ClaudeError};
 
 type UsageResponse = (StatusCode, Value, Option<u64>, Option<i64>);
+// Isolate logins and OAuth endpoints without retaining raw access tokens.
+type UsageKey = (String, [u8; 32]);
+
+#[derive(Clone)]
+struct UsageCooldown {
+    until: Instant,
+    response: UsageResponse,
+}
 
 const OAUTH_SCOPES: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
@@ -31,6 +46,7 @@ pub struct ClaudeRefreshResponse {
 #[derive(Clone)]
 pub struct ClaudeClient {
     client: crate::http_client::ProviderClient,
+    primary_usage_retry_at: Arc<Mutex<HashMap<UsageKey, UsageCooldown>>>,
 }
 
 impl ClaudeClient {
@@ -47,6 +63,7 @@ impl ClaudeClient {
                     .redirect(reqwest::redirect::Policy::none())
             })
             .map_err(|_| ClaudeError::ConnectionFailed)?,
+            primary_usage_retry_at: Default::default(),
         })
     }
 
@@ -56,6 +73,7 @@ impl ClaudeClient {
                 builder.timeout(timeout)
             })
             .map_err(|_| ClaudeError::ConnectionFailed)?,
+            primary_usage_retry_at: Default::default(),
         })
     }
 
@@ -65,6 +83,7 @@ impl ClaudeClient {
                 .client
                 .for_provider(provider_id)
                 .with_claude_settings(settings),
+            primary_usage_retry_at: self.primary_usage_retry_at.clone(),
         }
     }
 
@@ -73,6 +92,30 @@ impl ClaudeClient {
         token: &str,
         config: &ClaudeOAuthConfig,
     ) -> Result<UsageResponse, ClaudeError> {
+        let key = (
+            config.usage_url.clone(),
+            Sha256::digest(token.trim()).into(),
+        );
+        let now = Instant::now();
+        let primary_paused = self
+            .primary_usage_retry_at
+            .lock()
+            .map(|mut pauses| {
+                pauses.retain(|_, cooldown| cooldown.until > now);
+                pauses.get(&key).cloned()
+            })
+            .unwrap_or(None);
+        if let Some(cooldown) = primary_paused {
+            let mut primary = cooldown.response;
+            primary.2 = Some(
+                cooldown
+                    .until
+                    .saturating_duration_since(now)
+                    .as_secs()
+                    .max(1),
+            );
+            return self.fetch_usage_fallback(token, config, primary);
+        }
         let primary = self.fetch_usage_once(
             token,
             &config.usage_url,
@@ -81,19 +124,45 @@ impl ClaudeClient {
             true,
         )?;
         if primary.0 == StatusCode::TOO_MANY_REQUESTS {
-            if let Ok(fallback) = self.fetch_usage_once(
-                token,
-                &config.usage_url,
-                &[("cedar_ember", "1")],
-                LEGACY_USER_AGENT,
-                false,
-            ) {
-                if fallback.0.is_success() {
-                    return Ok(fallback);
-                }
+            // The fallback's success must not erase the primary's rate limit.
+            // Also retain it if the fallback fails, so the next poll avoids the
+            // throttled agent. Existing provider-level backoff still applies.
+            let pause = primary
+                .2
+                .unwrap_or(5 * 60)
+                .clamp(5 * 60, MAX_RETRY_AFTER_SECONDS);
+            if let Ok(mut pauses) = self.primary_usage_retry_at.lock() {
+                pauses.insert(
+                    key,
+                    UsageCooldown {
+                        until: Instant::now() + Duration::from_secs(pause),
+                        response: primary.clone(),
+                    },
+                );
             }
+            return self.fetch_usage_fallback(token, config, primary);
         }
         Ok(primary)
+    }
+
+    /// The legacy agent is optional: only success may replace the primary's known 429.
+    /// In particular, its 401/403 must never trigger an OAuth renewal.
+    fn fetch_usage_fallback(
+        &self,
+        token: &str,
+        config: &ClaudeOAuthConfig,
+        primary: UsageResponse,
+    ) -> Result<UsageResponse, ClaudeError> {
+        match self.fetch_usage_once(
+            token,
+            &config.usage_url,
+            &[("cedar_ember", "1")],
+            LEGACY_USER_AGENT,
+            false,
+        ) {
+            Ok(fallback) if fallback.0.is_success() => Ok(fallback),
+            _ => Ok(primary),
+        }
     }
 
     fn fetch_usage_once(
@@ -483,58 +552,191 @@ mod tests {
         );
     }
 
-    #[test]
-    fn usage_sends_cedar_ember_cli_agent_and_falls_back_on_429() {
+    /// Captures each request so cooldown tests verify which agent reached the server.
+    fn usage_server(
+        responses: Vec<(u16, Option<u64>)>,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<String>,
+        std::thread::JoinHandle<()>,
+    ) {
         use std::{
             io::{Read, Write},
             net::TcpListener,
             sync::mpsc,
             thread,
-            time::Duration,
         };
-
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = mpsc::channel();
         let server = thread::spawn(move || {
-            for (status, body) in [
-                (429, r#"{"error":"rate_limited"}"#),
-                (200, r#"{"five_hour":{"utilization":12}}"#),
-            ] {
+            for (status, retry) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut buffer = [0_u8; 4096];
-                let count = stream.read(&mut buffer).unwrap();
-                sender
-                    .send(String::from_utf8_lossy(&buffer[..count]).into_owned())
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
-                write!(
-                    stream,
-                    "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                sender.send(String::from_utf8(request).unwrap()).unwrap();
+                let body = r#"{"five_hour":{"utilization":12}}"#;
+                let header = retry
+                    .map(|seconds| format!("Retry-After: {seconds}\r\n"))
+                    .unwrap_or_default();
+                write!(stream,
+                    "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n{header}\r\n{body}",
                     body.len()
-                )
-                .unwrap();
+                ).unwrap();
             }
         });
-        let base = format!("http://{address}");
-        let (status, body, _, _) = ClaudeClient::new()
-            .unwrap()
-            .fetch_usage("secret-token", &config(&base))
-            .unwrap();
-        server.join().unwrap();
+        (format!("http://{address}"), receiver, server)
+    }
 
+    #[test]
+    fn usage_primary_cooldown_survives_success_is_scoped_and_expires() {
+        use sha2::{Digest, Sha256};
+        use std::time::{Duration, Instant};
+        let (base, receiver, server) = usage_server(vec![
+            (429, None),
+            (200, None),
+            (200, None),
+            (200, None),
+            (200, None),
+            (200, None),
+        ]);
+        let config = config(&base);
+        let client = ClaudeClient::new().unwrap();
+        let before = Instant::now();
+        let (status, body, _, _) = client.fetch_usage("secret-token", &config).unwrap();
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["five_hour"]["utilization"], 12);
-        let first = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-        let second = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(first.starts_with("GET /usage?cedar_ember=1 HTTP/1.1"));
-        assert!(first
-            .to_ascii_lowercase()
-            .contains("user-agent: claude-cli/2.1.322 (external, cli)"));
-        assert!(first.to_ascii_lowercase().contains("x-app: cli"));
-        assert!(second.starts_with("GET /usage?cedar_ember=1 HTTP/1.1"));
-        assert!(second
-            .to_ascii_lowercase()
-            .contains("user-agent: claude-code/2.1.69"));
+        let key = (
+            config.usage_url.clone(),
+            Sha256::digest("secret-token").into(),
+        );
+        let until = client.primary_usage_retry_at.lock().unwrap()[&key].until;
+        assert!(until >= before + Duration::from_secs(300));
+        assert!(until <= Instant::now() + Duration::from_secs(300));
+        // Provider-specific clients and clones must retain the same cooldown.
+        let dir = tempfile::tempdir().unwrap();
+        let derived = client
+            .clone()
+            .for_provider("claude", dir.path().join("settings.json"));
+        derived.fetch_usage("secret-token", &config).unwrap();
+        client.fetch_usage("other-token", &config).unwrap();
+        let other_endpoint = ClaudeOAuthConfig {
+            usage_url: format!("{base}/other"),
+            ..config.clone()
+        };
+        client.fetch_usage("secret-token", &other_endpoint).unwrap();
+        client
+            .primary_usage_retry_at
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .unwrap()
+            .until = Instant::now() - Duration::from_secs(1);
+        client.fetch_usage("secret-token", &config).unwrap();
+        assert!(!client
+            .primary_usage_retry_at
+            .lock()
+            .unwrap()
+            .contains_key(&key));
+        server.join().unwrap();
+        let requests: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(requests.len(), 6);
+        for (index, agent) in [
+            super::USAGE_USER_AGENT,
+            super::LEGACY_USER_AGENT,
+            super::LEGACY_USER_AGENT,
+            super::USAGE_USER_AGENT,
+            super::USAGE_USER_AGENT,
+            super::USAGE_USER_AGENT,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let request = requests[index].to_ascii_lowercase();
+            assert!(
+                request.contains(&format!("user-agent: {agent}")),
+                "request {index}: {request}"
+            );
+            assert_eq!(
+                request.contains("x-app: cli"),
+                *agent == super::USAGE_USER_AGENT
+            );
+        }
+        assert!(requests[0].starts_with("GET /usage?cedar_ember=1 HTTP/1.1"));
+        assert!(requests[4].starts_with("GET /other?cedar_ember=1 HTTP/1.1"));
+    }
+
+    #[test]
+    fn usage_cooldown_keeps_retry_after_when_fallback_is_also_limited() {
+        use std::time::{Duration, Instant};
+        let (base, receiver, server) =
+            usage_server(vec![(429, Some(5400)), (429, Some(60)), (429, Some(120))]);
+        let client = ClaudeClient::new().unwrap();
+        let before = Instant::now();
+        let (status, _, retry, _) = client.fetch_usage("test-token", &config(&base)).unwrap();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry, Some(5400));
+        let until = client
+            .primary_usage_retry_at
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .until;
+        assert!(until >= before + Duration::from_secs(5400));
+        assert!(until <= Instant::now() + Duration::from_secs(5400));
+        let (status, _, retry, _) = client.fetch_usage("test-token", &config(&base)).unwrap();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(matches!(retry, Some(seconds) if (5395..=5400).contains(&seconds)));
+        server.join().unwrap();
+        let requests: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].contains(super::LEGACY_USER_AGENT));
+    }
+
+    #[test]
+    fn failed_legacy_responses_never_replace_the_primary_rate_limit() {
+        for fallback_status in [401, 403, 429, 500, 503] {
+            let (base, requests, server) = usage_server(vec![
+                (429, Some(1800)),
+                (fallback_status, Some(1)),
+                (fallback_status, Some(2)),
+            ]);
+            let client = ClaudeClient::new().unwrap();
+            let config = config(&base);
+            let primary = client.fetch_usage("same-token", &config).unwrap();
+            assert_eq!(primary.0, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(primary.2, Some(1800));
+            let during_cooldown = client.fetch_usage("same-token", &config).unwrap();
+            assert_eq!(during_cooldown.0, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(during_cooldown.1, primary.1);
+            assert!(matches!(during_cooldown.2, Some(seconds) if (1795..=1800).contains(&seconds)));
+            server.join().unwrap();
+            assert_eq!(requests.try_iter().count(), 3);
+        }
+    }
+
+    #[test]
+    fn a_failed_legacy_transport_keeps_the_primary_response_during_cooldown() {
+        let (base, _requests, server) = usage_server(vec![(429, Some(1800))]);
+        let client = ClaudeClient::new().unwrap();
+        let config = config(&base);
+        let primary = client.fetch_usage("same-token", &config).unwrap();
+        server.join().unwrap();
+        assert_eq!(primary.0, StatusCode::TOO_MANY_REQUESTS);
+        let during_cooldown = client.fetch_usage("same-token", &config).unwrap();
+        assert_eq!(during_cooldown.0, primary.0);
+        assert_eq!(during_cooldown.1, primary.1);
+        assert!(during_cooldown.2.unwrap() > 1700);
     }
 
     #[test]

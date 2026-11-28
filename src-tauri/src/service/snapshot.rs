@@ -4,7 +4,8 @@ use chrono::Utc;
 
 use crate::{
     models::{
-        MetricSource, ProviderErrorKind, ProviderSnapshot, ProviderViewState, SnapshotSource,
+        MetricSource, ProviderErrorKind, ProviderSnapshot, ProviderViewState, QuotaWindow,
+        SnapshotSource,
     },
     policy::{FAST_REFRESH_INTERVAL, REFRESH_INTERVAL, STALE_AFTER},
     providers::{ProviderError, ProviderRegistry},
@@ -187,7 +188,12 @@ pub(super) fn usage_data_changed(
 }
 
 fn snapshot_usage_changed(previous: &ProviderSnapshot, current: &ProviderSnapshot) -> bool {
-    previous.quotas != current.quotas
+    previous.quotas.len() != current.quotas.len()
+        || previous
+            .quotas
+            .iter()
+            .zip(&current.quotas)
+            .any(|(previous, current)| quota_usage_changed(previous, current))
         || previous.value_metrics != current.value_metrics
         || previous.status_metrics != current.status_metrics
         || previous.usage_histories != current.usage_histories
@@ -202,6 +208,19 @@ fn snapshot_usage_changed(previous: &ProviderSnapshot, current: &ProviderSnapsho
             }
             _ => true,
         }
+}
+
+/// Clock estimates and small reset-time corrections are not new usage. Keep the
+/// original snapshots intact for countdowns, and compare every other field.
+fn quota_usage_changed(previous: &QuotaWindow, current: &QuotaWindow) -> bool {
+    let mut comparable = current.clone();
+    comparable.clock_offset_seconds = previous.clock_offset_seconds;
+    if let (Some(before), Some(after)) = (previous.resets_at, current.resets_at) {
+        if (after - before).abs() <= chrono::Duration::seconds(5) {
+            comparable.resets_at = previous.resets_at;
+        }
+    }
+    previous != &comparable
 }
 
 pub(super) fn refresh_interval_for(
