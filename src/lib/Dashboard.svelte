@@ -386,19 +386,26 @@
     providerId: string,
     targetMetricId: string,
   ) {
+    const metrics = settings.providers.find((provider) => provider.id === providerId)?.metrics;
     if (targetMetricId === 'section:onDemand') {
-      moveMetricIntoSection(draggedMetricId, providerId, 'onDemand');
+      // The divider sits between the sections: crossing it upward ends the
+      // Always Visible list, crossing it downward starts the On Demand list.
+      const dragged = metrics?.find((metric) => metric.id === draggedMetricId);
+      if (dragged?.section === 'onDemand') {
+        moveMetricIntoSection(draggedMetricId, providerId, 'alwaysVisible');
+      } else {
+        moveMetricIntoSection(draggedMetricId, providerId, 'onDemand', 'start');
+      }
       return;
     }
-    const target = settings.providers
-      .find((provider) => provider.id === providerId)
-      ?.metrics.find((metric) => metric.id === targetMetricId);
+    const target = metrics?.find((metric) => metric.id === targetMetricId);
     if (target) reorderMetric(draggedMetricId, providerId, targetMetricId, target.section);
   }
   function moveMetricIntoSection(
     draggedMetricId: string,
     providerId: string,
     section: MetricLayout['section'],
+    at: 'start' | 'end' = 'end',
   ) {
     const provider = settings.providers.find((item) => item.id === providerId);
     if (!provider) return;
@@ -406,12 +413,19 @@
     const from = metrics.findIndex((metric) => metric.id === draggedMetricId);
     if (from < 0) return;
     const [source] = metrics.splice(from, 1);
+    const firstInSection = metrics.findIndex((metric) => metric.section === section);
     const lastInSection = metrics.reduce(
       (last, metric, index) => (metric.section === section ? index : last),
       -1,
     );
     const insertAt =
-      lastInSection >= 0 ? lastInSection + 1 : section === 'alwaysVisible' ? 0 : metrics.length;
+      at === 'start' && firstInSection >= 0
+        ? firstInSection
+        : lastInSection >= 0
+          ? lastInSection + 1
+          : section === 'alwaysVisible'
+            ? 0
+            : metrics.length;
     metrics.splice(insertAt, 0, { ...source, section });
     updateProvider({ ...provider, metrics });
   }

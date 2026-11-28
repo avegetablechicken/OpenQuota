@@ -290,6 +290,49 @@ describe('OpenQuota customization persistence and reorder', () => {
     expect(await screen.findByRole('heading', { name: 'Customize' })).toBeInTheDocument();
   });
 
+  it('moves a metric across the On Demand divider by one step with Alt+Arrow', async () => {
+    // Let the click suppression left by the previous test's drag expire.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    render(App);
+    await screen.findByText('Plus');
+    const savedCodexMetrics = () => {
+      const saveCall = [...mocks.invoke.mock.calls]
+        .reverse()
+        .find(([command]) => command === 'save_app_settings');
+      const saved = saveCall?.[1] as { settings: SettingsViewState['settings'] };
+      return saved.settings.providers
+        .find((provider) => provider.id === 'codex')
+        ?.metrics.map((metric) => `${metric.id}:${metric.section}`);
+    };
+
+    await fireEvent.keyDown(screen.getByRole('button', { name: 'Move Usage Trend' }), {
+      key: 'ArrowDown',
+      altKey: true,
+    });
+    await waitFor(() =>
+      expect(savedCodexMetrics()?.slice(0, 4)).toEqual([
+        'codex.session:alwaysVisible',
+        'codex.weekly:alwaysVisible',
+        'codex.trend:onDemand',
+        'codex.spark:onDemand',
+      ]),
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+    await fireEvent.keyDown(await screen.findByRole('button', { name: 'Move Usage Trend' }), {
+      key: 'ArrowUp',
+      altKey: true,
+    });
+    await waitFor(() =>
+      expect(savedCodexMetrics()?.slice(0, 4)).toEqual([
+        'codex.session:alwaysVisible',
+        'codex.weekly:alwaysVisible',
+        'codex.trend:alwaysVisible',
+        'codex.spark:onDemand',
+      ]),
+    );
+  });
+
   it('restores the pre-drag layout when a reorder is cancelled', async () => {
     render(App);
     await screen.findByText('Plus');
