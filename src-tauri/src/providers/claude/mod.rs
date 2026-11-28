@@ -290,6 +290,7 @@ impl ClaudeProvider {
         let candidates = self.resume_unsaved_renewals(candidates);
         let mut last_auth_error = None;
         for mut credential in candidates {
+            let inference_only = credential.inference_only;
             match self.refresh_candidate(
                 &mut credential,
                 config,
@@ -298,7 +299,16 @@ impl ClaudeProvider {
                 &mut credential_generation,
                 identity,
             ) {
-                Ok(snapshot) => return Ok(snapshot),
+                Ok(mut snapshot) => {
+                    // The inference-only token shows no live limits; say why the stored login
+                    // that would have shown them did not.
+                    if let Some(error) = last_auth_error.filter(|_| inference_only) {
+                        snapshot
+                            .warnings
+                            .push(format!("Live Claude limits are unavailable. {error}"));
+                    }
+                    return Ok(snapshot);
+                }
                 Err(error @ (ClaudeError::SessionExpired | ClaudeError::TokenExpired)) => {
                     last_auth_error = Some(error);
                 }
