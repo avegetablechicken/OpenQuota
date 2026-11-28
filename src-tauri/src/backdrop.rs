@@ -16,7 +16,7 @@ use serde::Serialize;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Mutex, MutexGuard, PoisonError,
     },
     time::SystemTime,
 };
@@ -114,6 +114,11 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     position: (0.0, 0.0),
 });
 
+/// The cache, recovered after a panic elsewhere so the backdrop keeps working.
+fn lock_cache() -> MutexGuard<'static, Cache> {
+    CACHE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Renders the backdrop for a panel about to appear at physical `(x, y)` on
 /// `monitor`, `width` pixels wide; the panel must not be on screen yet.
 pub fn capture(w: &WebviewWindow, monitor: &Monitor, x: f64, y: f64, width: f64) {
@@ -126,7 +131,7 @@ pub fn capture(w: &WebviewWindow, monitor: &Monitor, x: f64, y: f64, width: f64)
         w: right - left,
         ..screen
     };
-    let mut cache = CACHE.lock().unwrap();
+    let mut cache = lock_cache();
     let image = if let Some(png) = grab(&column).and_then(frost) {
         cache.area = column;
         cache.wallpaper = None;
@@ -134,10 +139,12 @@ pub fn capture(w: &WebviewWindow, monitor: &Monitor, x: f64, y: f64, width: f64)
     } else {
         let (pw, ph) = screen.pixels();
         let source = Source::current(pw as i32, ph as i32);
+        // The source does not hold the monitor's position, so a monitor of the
+        // same size reuses the image but must still move the area.
+        cache.area = screen;
         if cache.wallpaper.as_ref() == Some(&source) {
             None
         } else {
-            cache.area = screen;
             let png = source.as_ref().and_then(wallpaper).and_then(frost);
             cache.wallpaper = Some(source);
             Some(png.unwrap_or_default())
@@ -152,7 +159,7 @@ pub fn capture(w: &WebviewWindow, monitor: &Monitor, x: f64, y: f64, width: f64)
 
 /// Replays a capture made before the frontend listener was ready.
 pub fn replay(w: &WebviewWindow) {
-    let cache = CACHE.lock().unwrap();
+    let cache = lock_cache();
     if cache.area.scale > 0.0 {
         emit(
             w,
@@ -166,7 +173,7 @@ pub fn replay(w: &WebviewWindow) {
 
 /// Keeps the backdrop aligned with the panel moved to physical `(x, y)`.
 pub fn follow(w: &WebviewWindow, x: f64, y: f64) {
-    let mut cache = CACHE.lock().unwrap();
+    let mut cache = lock_cache();
     if cache.area.scale > 0.0 {
         cache.position = (x, y);
         emit(w, &cache.area, x, y, None);
@@ -299,7 +306,9 @@ fn pixels(pixbuf: &Pixbuf) -> Vec<f32> {
 
 /// "#rrggbb" as a flat color.
 fn solid(color: &str, w: usize, h: usize) -> Option<Vec<f32>> {
-    let hex = color.strip_prefix('#').filter(|hex| hex.len() == 6)?;
+    let hex = color
+        .strip_prefix('#')
+        .filter(|hex| hex.len() == 6 && hex.is_ascii())?;
     let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(f32::from);
     let rgb = [channel(0)?, channel(2)?, channel(4)?];
     Some(rgb.iter().copied().cycle().take(w * h * 3).collect())
@@ -428,5 +437,7 @@ mod tests {
         assert_eq!(solid("#023c88", 1, 1), Some(vec![2.0, 60.0, 136.0]));
         assert_eq!(solid("023c88", 1, 1), None);
         assert_eq!(solid("#xyzxyz", 1, 1), None);
+        // Six bytes, but 'é' spans a slice boundary.
+        assert_eq!(solid("#aééb", 1, 1), None);
     }
 }
