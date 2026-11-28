@@ -338,9 +338,11 @@ fn transition(
     toggles: &NotificationPreferences,
     metric: &str,
 ) -> Vec<PaceAlert> {
-    let fully_used = remaining_percent <= 0.0;
+    // A dollar window whose remainder rounds to $0.00 is shown as spent even
+    // while its percent is just below 100, so it counts as fully used too.
+    let fully_used = severity == PaceSeverity::Spent || remaining_percent <= 0.0;
     // Observe actual quota recovery, including rolling windows without reset dates.
-    let recovered = state.exhausted && remaining_percent > 0.0;
+    let recovered = state.exhausted && !fully_used;
     if recovered {
         state.pending_reset = toggles.usage_reset;
         state.exhausted = false;
@@ -612,6 +614,31 @@ mod tests {
                 &toggles,
                 "Session",
             );
+            assert_eq!(
+                alerts
+                    .iter()
+                    .map(|alert| alert.milestone)
+                    .collect::<Vec<_>>(),
+                expected.into_iter().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn visibly_spent_dollar_window_counts_as_fully_used() {
+        let toggles = NotificationPreferences {
+            fully_used: true,
+            usage_reset: true,
+            ..NotificationPreferences::default()
+        };
+        let mut state = NotificationState::default();
+        for (severity, remaining, expected) in [
+            (PaceSeverity::Untracked, 50.0, None),
+            (PaceSeverity::Spent, 0.04, Some(Milestone::FullyUsed)),
+            (PaceSeverity::Spent, 0.04, None),
+            (PaceSeverity::Untracked, 80.0, Some(Milestone::UsageReset)),
+        ] {
+            let alerts = transition(&mut state, severity, remaining, None, &toggles, "Credits");
             assert_eq!(
                 alerts
                     .iter()
