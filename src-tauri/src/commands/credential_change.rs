@@ -23,7 +23,7 @@ pub(crate) trait CredentialApp: Send + Sync + 'static {
     fn settings(&self) -> &SettingsService;
     /// Shows changed settings: the tray and the settings view state.
     fn settings_changed(&self, settings: &AppSettings);
-    /// Shows the current usage.
+    /// Shows the current usage: the tray and the usage view state.
     fn usage_changed(&self);
     fn clear_cached_usage(&self, provider_id: &str) -> Result<(), String>;
     fn refresh(&self, provider_id: &str) -> impl Future<Output = ()> + Send;
@@ -248,7 +248,15 @@ impl CredentialApp for TauriApp {
     }
 
     fn usage_changed(&self) {
-        let _ = self.app.emit("usage-state", &self.service.state());
+        let state = self.service.state();
+        // A cleared connection's quotas leave the tray now, not when the refresh answers.
+        tray_presentation::update(
+            &self.app,
+            &state,
+            &self.settings.get(),
+            self.settings.registry(),
+        );
+        let _ = self.app.emit("usage-state", &state);
     }
 
     fn clear_cached_usage(&self, provider_id: &str) -> Result<(), String> {
