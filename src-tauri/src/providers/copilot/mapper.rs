@@ -184,9 +184,11 @@ fn snapshot_quota(
     let entitlement = number(snapshot.get("entitlement"));
     let remaining =
         number(snapshot.get("remaining")).or_else(|| number(snapshot.get("quota_remaining")));
+    // A remaining of -1 is the unlimited sentinel only without a real entitlement; against one,
+    // it is a pool one credit into overage.
     if bool_value(snapshot.get("unlimited")) == Some(true)
         || entitlement == Some(-1.0)
-        || remaining == Some(-1.0)
+        || (remaining == Some(-1.0) && !entitlement.is_some_and(|value| value > 0.0))
         || entitlement == Some(0.0)
     {
         return None;
@@ -594,6 +596,28 @@ mod tests {
         assert_eq!(credits.format, QuotaFormat::Percent);
         assert_eq!(credits.used_value, None);
         assert_eq!(credits.limit_value, None);
+    }
+
+    #[test]
+    fn one_credit_of_overage_is_not_the_unlimited_sentinel() {
+        let mapped = map_usage(&json!({
+            "copilot_plan": "pro",
+            "quota_snapshots": {
+                "premium_interactions": {
+                    "entitlement": 300,
+                    "remaining": -1,
+                    "overage_permitted": true,
+                    "overage_count": 1
+                },
+                "chat": {"entitlement": -1, "remaining": -1, "unlimited": true}
+            }
+        }))
+        .unwrap();
+        assert_eq!(quota(&mapped, "premium").used_percent, 100.0);
+        assert!(mapped
+            .value_metrics
+            .iter()
+            .any(|metric| metric.id == "extra"));
     }
 
     #[test]
