@@ -334,7 +334,7 @@
       {#if !open && error}
         <div class="config-error summary-error" role="alert">{error}</div>
       {:else if !open && notice}
-        <div class="config-note summary-error" role="status">{notice}</div>
+        <div class="config-warning summary-error" role="status">{notice}</div>
       {/if}
       {#if open}
         <div class="sub2api-config-editor">
@@ -545,7 +545,7 @@
             </div>
           {/if}
           {#if error}<div class="config-error" role="alert">{error}</div>
-          {:else if notice}<div class="config-note" role="status">{notice}</div>{/if}
+          {:else if notice}<div class="config-warning" role="status">{notice}</div>{/if}
         </div>
       {/if}
     </div>
@@ -873,14 +873,22 @@
     margin-top: 6px;
   }
 
-  .config-error {
+  .config-error,
+  .config-warning {
     color: var(--error);
     font-size: 10px;
     line-height: 14px;
   }
 
+  /* An incomplete change: placed like an error, in the quieter colour of a note. */
+  .config-warning {
+    overflow-wrap: anywhere;
+    color: var(--secondary);
+  }
+
   .clear-confirm,
-  .sub2api-config-editor > .config-error {
+  .sub2api-config-editor > .config-error,
+  .sub2api-config-editor > .config-warning {
     margin-top: 5px;
   }
 
