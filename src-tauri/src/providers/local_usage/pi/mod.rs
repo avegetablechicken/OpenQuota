@@ -48,7 +48,7 @@ struct PiUsageEvent {
     source: PiUsageSource,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 struct PiTokenBreakdown {
     input: u64,
     cache_write_5m: u64,
@@ -253,11 +253,26 @@ fn mapped_card(provider: &str, model: &str) -> Option<&'static str> {
     }
 }
 
+/// pi entry ids are short and unique only within one session file, so a copied or forked entry is
+/// recognised by its id together with its timestamp, model and usage; distinct messages that
+/// happen to share an id across sessions are both kept.
 fn deduplicate(events: Vec<PiUsageEvent>) -> Vec<PiUsageEvent> {
     let mut seen = HashSet::new();
     events
         .into_iter()
-        .filter(|event| event.id.as_ref().is_none_or(|id| seen.insert(id.clone())))
+        .filter(|event| {
+            event.id.as_ref().is_none_or(|id| {
+                seen.insert((
+                    id.clone(),
+                    event.timestamp,
+                    event.provider.clone(),
+                    event.model.clone(),
+                    event.tokens,
+                    event.reported_total_tokens,
+                    event.carried_cost.map(f64::to_bits),
+                ))
+            })
+        })
         .collect()
 }
 

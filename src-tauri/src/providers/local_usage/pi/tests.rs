@@ -217,6 +217,18 @@ fn repeated_message_ids_are_counted_once_across_files() {
 }
 
 #[test]
+fn distinct_messages_sharing_a_short_id_are_both_counted() {
+    let first = parsed_line(&line("a1b2c3d4", "anthropic", "claude-model", "0.5")).unwrap();
+    let mut later = first.clone();
+    later.timestamp += chrono::Duration::seconds(30);
+    let mut other_usage = first.clone();
+    other_usage.tokens.output += 1;
+    other_usage.reported_total_tokens += 1;
+
+    assert_eq!(deduplicate(vec![first, later, other_usage]).len(), 3);
+}
+
+#[test]
 fn recursive_scan_uses_cache_and_folds_only_the_requested_card() {
     let directory = tempdir().unwrap();
     let sessions = directory.path().join("sessions");
