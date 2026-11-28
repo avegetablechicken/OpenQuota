@@ -266,6 +266,37 @@ fn hidden_daily_fills_only_an_absent_weekly_meter_and_is_still_flipped() {
 }
 
 #[test]
+fn omitted_remaining_percent_with_a_reset_time_is_an_exhausted_window() {
+    let mapped = map_user_status_response(&json!({
+        "userStatus": {"planStatus": {
+            "planInfo": {"planName": "Max"},
+            "dailyQuotaResetAtUnix": "1774080000",
+            "weeklyQuotaResetAtUnix": "1774166400"
+        }}
+    }))
+    .unwrap();
+    assert_eq!(
+        mapped
+            .quotas
+            .iter()
+            .map(|quota| (quota.id.as_str(), quota.used_percent))
+            .collect::<Vec<_>>(),
+        [("daily", 100.0), ("weekly", 100.0)]
+    );
+
+    let hidden = map_user_status_response(&json!({
+        "userStatus": {"planStatus": {
+            "planInfo": {"hideDailyQuota": true},
+            "weeklyQuotaResetAtUnix": "1774166400"
+        }}
+    }))
+    .unwrap();
+    assert_eq!(hidden.quotas.len(), 1);
+    assert_eq!(hidden.quotas[0].id, "weekly");
+    assert_eq!(hidden.quotas[0].used_percent, 100.0);
+}
+
+#[test]
 fn partial_fields_remain_usable_while_malformed_envelopes_fail_safely() {
     let daily_only = map_user_status_response(&json!({
         "userStatus": {"planStatus": {

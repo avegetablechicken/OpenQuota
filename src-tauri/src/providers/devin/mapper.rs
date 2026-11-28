@@ -57,9 +57,13 @@ fn map_user_status(
         .and_then(|status| status.get("weeklyQuotaResetAtUnix"))
         .and_then(unix_seconds);
 
+    // Proto3 JSON omits default values, so an exhausted window (0% remaining)
+    // arrives without its percent field. A reset time still marks the window.
+    let exhausted_if_reset = |reset: Option<DateTime<Utc>>| reset.map(|_| 0.0);
+
     let mut quotas = Vec::new();
     if !hide_daily {
-        if let Some(remaining) = daily_remaining {
+        if let Some(remaining) = daily_remaining.or_else(|| exhausted_if_reset(daily_reset)) {
             quotas.push(quota(
                 "daily",
                 "Daily",
@@ -77,16 +81,18 @@ fn map_user_status(
             weekly_reset,
             WEEK_PERIOD_SECONDS,
         ));
-    } else if hide_daily {
-        if let Some(remaining) = daily_remaining {
-            quotas.push(quota(
-                "weekly",
-                "Weekly",
-                remaining,
-                weekly_reset,
-                WEEK_PERIOD_SECONDS,
-            ));
-        }
+    } else if let Some(remaining) = hide_daily
+        .then_some(daily_remaining)
+        .flatten()
+        .or_else(|| exhausted_if_reset(weekly_reset))
+    {
+        quotas.push(quota(
+            "weekly",
+            "Weekly",
+            remaining,
+            weekly_reset,
+            WEEK_PERIOD_SECONDS,
+        ));
     }
 
     let balance = plan_status
