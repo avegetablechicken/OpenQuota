@@ -211,7 +211,7 @@ pub fn parse_cloud_models(value: &Value) -> Vec<ModelConfig> {
                 .and_then(trimmed)
                 .unwrap_or(key)
                 .to_owned();
-            Some(model_config(label, Some(model_id), model.get("quotaInfo")))
+            model_config(label, Some(model_id), model.get("quotaInfo"))
         })
         .collect()
 }
@@ -228,7 +228,7 @@ pub fn parse_quota_buckets(value: &Value) -> Vec<ModelConfig> {
                 .and_then(Value::as_str)
                 .and_then(trimmed)?
                 .to_owned();
-            Some(model_config(&id, Some(id.clone()), Some(bucket)))
+            model_config(&id, Some(id.clone()), Some(bucket))
         })
         .collect()
 }
@@ -294,23 +294,30 @@ fn model_from_ls(value: &Value) -> Option<ModelConfig> {
         .and_then(Value::as_str)
         .and_then(trimmed)
         .map(str::to_owned);
-    Some(model_config(label, model_id, value.get("quotaInfo")))
+    model_config(label, model_id, value.get("quotaInfo"))
 }
 
-fn model_config(label: &str, model_id: Option<String>, quota: Option<&Value>) -> ModelConfig {
-    ModelConfig {
+/// A model's quota, or `None` when the model reports no quota at all. A quota that omits its
+/// remaining fraction is exhausted: protobuf JSON leaves out a zero.
+fn model_config(
+    label: &str,
+    model_id: Option<String>,
+    quota: Option<&Value>,
+) -> Option<ModelConfig> {
+    let quota = quota?;
+    Some(ModelConfig {
         label: label.to_owned(),
         model_id,
         remaining_fraction: quota
-            .and_then(|value| value.get("remainingFraction"))
+            .get("remainingFraction")
             .and_then(number)
             .unwrap_or(0.0),
         resets_at: quota
-            .and_then(|value| value.get("resetTime"))
+            .get("resetTime")
             .and_then(Value::as_str)
             .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
             .map(|date| date.to_utc()),
-    }
+    })
 }
 
 fn trimmed(value: &str) -> Option<&str> {
@@ -477,6 +484,29 @@ mod tests {
         let ids: Vec<_> = merged.iter().map(|quota| quota.id.as_str()).collect();
         assert_eq!(ids, ["geminiPro", "claude"]);
         assert!(has_gemini_pool(&merged));
+    }
+
+    #[test]
+    fn models_without_quota_info_leave_their_pool_alone() {
+        let value = json!({"userStatus": {
+            "cascadeModelConfigData": {"clientModelConfigs": [
+                {"label": "Gemini 3 Pro", "quotaInfo": {"remainingFraction": 0.8}},
+                {"label": "Gemini 3 Flash"},
+                {"label": "Claude Sonnet", "quotaInfo": {}}
+            ]}
+        }});
+        let (_, configs) = parse_user_status(&value).unwrap();
+        let quotas = build_legacy_quotas(configs, now());
+        assert_eq!(quotas[0].id, "geminiPro");
+        assert_eq!(quotas[0].used_percent, 20.0);
+        // A quota that omits its fraction is a protobuf zero: exhausted.
+        assert_eq!(quotas[1].id, "claude");
+        assert_eq!(quotas[1].used_percent, 100.0);
+
+        let cloud = json!({"models": {
+            "listed": {"displayName": "Claude Opus"}
+        }});
+        assert!(build_legacy_quotas(parse_cloud_models(&cloud), now()).is_empty());
     }
 
     #[test]
