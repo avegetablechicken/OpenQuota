@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { PanelHeightMode } from './backend';
+  import { globalShortcutKey } from './globalShortcutKey';
   import Icon from './Icon.svelte';
   import type { DesktopPlatform } from './platform';
   import SelectMenu from './SelectMenu.svelte';
@@ -114,13 +115,8 @@
       event.shiftKey && 'Shift',
       event.metaKey && 'Super',
     ].filter(Boolean);
-    const key = event.code.startsWith('Key')
-      ? event.code.slice(3)
-      : event.code.startsWith('Digit')
-        ? event.code.slice(5)
-        : event.key.length === 1
-          ? event.key.toUpperCase()
-          : event.key;
+    const key = globalShortcutKey(event.code);
+    if (key === null) return;
     patch({ globalShortcut: [...modifiers, key].join('+') });
     recording = false;
   }
