@@ -78,23 +78,34 @@ impl PricingSupplement {
             return Some(*exact);
         }
         let normalized = normalized_key(model);
-        for part in normalized.split(['/', ':']) {
-            for (base, multiplier) in &self.fast_multipliers {
-                let base = normalized_key(base);
-                if matches_model_suffix(part, &base) {
-                    return Some(*multiplier);
-                }
-            }
-        }
-        None
+        // Several bases can match one part ("gpt-5" and "gpt-5.5" both match
+        // "gpt-5-5"), so prefer the longest, then the smallest key, to keep the
+        // result independent of HashMap iteration order.
+        normalized.split(['/', ':']).find_map(|part| {
+            self.fast_multipliers
+                .iter()
+                .map(|(base, multiplier)| (normalized_key(base), base, *multiplier))
+                .filter(|(normalized_base, _, _)| matches_model_suffix(part, normalized_base))
+                .max_by(|(left, left_key, _), (right, right_key, _)| {
+                    left.len()
+                        .cmp(&right.len())
+                        .then_with(|| right_key.cmp(left_key))
+                })
+                .map(|(_, _, multiplier)| multiplier)
+        })
     }
 }
 
 fn matches_model_suffix(part: &str, base: &str) -> bool {
-    part.rfind(base).is_some_and(|start| {
-        let suffix = &part[start + base.len()..];
-        suffix.is_empty() || suffix.starts_with('-')
-    })
+    !base.is_empty()
+        && part.match_indices(base).any(|(start, _)| {
+            let starts_token = part[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|previous| !previous.is_ascii_alphanumeric());
+            let suffix = &part[start + base.len()..];
+            starts_token && (suffix.is_empty() || suffix.starts_with('-'))
+        })
 }
 
 #[derive(Debug, Error)]
@@ -132,4 +143,31 @@ struct SupplementEntry {
 struct SupplementRule {
     pattern: String,
     canonical: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PricingSupplement;
+
+    fn supplement(multipliers: &str) -> PricingSupplement {
+        PricingSupplement::decode(
+            format!(r#"{{"pricing":{{}},"fast_multipliers":{multipliers}}}"#).as_bytes(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fast_multiplier_prefers_the_longest_matching_base() {
+        let supplement = supplement(r#"{"gpt-5":2.0,"gpt-5.5":2.5}"#);
+        assert_eq!(supplement.fast_multiplier("azure/gpt-5.5"), Some(2.5));
+        assert_eq!(supplement.fast_multiplier("azure/gpt-5-mini"), Some(2.0));
+    }
+
+    #[test]
+    fn fast_multiplier_requires_a_token_boundary_before_the_base() {
+        let supplement = supplement(r#"{"gpt-5":2.0}"#);
+        assert_eq!(supplement.fast_multiplier("chatgpt-5"), None);
+        assert_eq!(supplement.fast_multiplier("openai/gpt-5"), Some(2.0));
+        assert_eq!(supplement.fast_multiplier("x_gpt-5-pro"), Some(2.0));
+    }
 }
