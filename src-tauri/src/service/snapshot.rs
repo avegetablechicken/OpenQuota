@@ -14,6 +14,9 @@ use crate::{
 use super::UsageViewState;
 
 const FAST_REFRESH_UNCHANGED_ROUNDS: u8 = 2;
+const RESET_JITTER_TOLERANCE_SECONDS: i64 = 5;
+const IDLE_RESET_WINDOW_TOLERANCE_SECONDS: i64 = 90;
+const IDLE_RESET_DRIFT_TOLERANCE_SECONDS: i64 = 15;
 
 pub(super) fn normalize_quota_availability(
     definition: &crate::models::ProviderDefinition,
@@ -193,7 +196,9 @@ fn snapshot_usage_changed(previous: &ProviderSnapshot, current: &ProviderSnapsho
             .quotas
             .iter()
             .zip(&current.quotas)
-            .any(|(previous, current)| quota_usage_changed(previous, current))
+            .any(|(before, after)| {
+                quota_usage_changed(before, previous.refreshed_at, after, current.refreshed_at)
+            })
         || previous.value_metrics != current.value_metrics
         || previous.status_metrics != current.status_metrics
         || previous.usage_histories.local_device != current.usage_histories.local_device
@@ -211,17 +216,79 @@ fn snapshot_usage_changed(previous: &ProviderSnapshot, current: &ProviderSnapsho
         }
 }
 
-/// Clock estimates and small reset-time corrections are not new usage. Keep the
-/// original snapshots intact for countdowns, and compare every other field.
-fn quota_usage_changed(previous: &QuotaWindow, current: &QuotaWindow) -> bool {
+/// Clock estimates, small reset-time corrections, and idle windows whose reset rolls
+/// forward alongside each poll (`used == 0`, `reset ≈ observed + period`) are not new usage.
+/// Keep the original snapshots intact for countdowns, and compare every other field.
+fn quota_usage_changed(
+    previous: &QuotaWindow,
+    previous_refreshed_at: chrono::DateTime<Utc>,
+    current: &QuotaWindow,
+    current_refreshed_at: chrono::DateTime<Utc>,
+) -> bool {
     let mut comparable = current.clone();
     comparable.clock_offset_seconds = previous.clock_offset_seconds;
     if let (Some(before), Some(after)) = (previous.resets_at, current.resets_at) {
-        if (after - before).abs() <= chrono::Duration::seconds(5) {
+        if (after - before).abs() <= chrono::Duration::seconds(RESET_JITTER_TOLERANCE_SECONDS)
+            || is_rolling_idle_reset(
+                previous,
+                previous_refreshed_at,
+                before,
+                current,
+                current_refreshed_at,
+                after,
+            )
+        {
             comparable.resets_at = previous.resets_at;
         }
     }
     previous != &comparable
+}
+
+fn is_rolling_idle_reset(
+    previous: &QuotaWindow,
+    previous_refreshed_at: chrono::DateTime<Utc>,
+    before: chrono::DateTime<Utc>,
+    current: &QuotaWindow,
+    current_refreshed_at: chrono::DateTime<Utc>,
+    after: chrono::DateTime<Utc>,
+) -> bool {
+    if previous.used_percent != 0.0
+        || current.used_percent != 0.0
+        || previous.period_seconds == 0
+        || previous.period_seconds != current.period_seconds
+        || previous_refreshed_at == chrono::DateTime::UNIX_EPOCH
+        || current_refreshed_at == chrono::DateTime::UNIX_EPOCH
+    {
+        return false;
+    }
+    let Ok(period_seconds) = i64::try_from(previous.period_seconds) else {
+        return false;
+    };
+    let Some(period) = chrono::Duration::try_seconds(period_seconds) else {
+        return false;
+    };
+    let previous_observed = previous_refreshed_at
+        + chrono::Duration::seconds(previous.clock_offset_seconds.unwrap_or(0));
+    let current_observed =
+        current_refreshed_at + chrono::Duration::seconds(current.clock_offset_seconds.unwrap_or(0));
+    let observation_interval = current_observed - previous_observed;
+    let reset_shift = after - before;
+    if observation_interval <= chrono::Duration::zero() || reset_shift <= chrono::Duration::zero() {
+        return false;
+    }
+    let window_tolerance =
+        chrono::Duration::seconds((period_seconds / 10).min(IDLE_RESET_WINDOW_TOLERANCE_SECONDS));
+    let drift_tolerance =
+        chrono::Duration::seconds(IDLE_RESET_DRIFT_TOLERANCE_SECONDS).min(window_tolerance);
+    let Some(expected_before) = previous_observed.checked_add_signed(period) else {
+        return false;
+    };
+    let Some(expected_after) = current_observed.checked_add_signed(period) else {
+        return false;
+    };
+    (before - expected_before).abs() <= window_tolerance
+        && (after - expected_after).abs() <= window_tolerance
+        && (reset_shift - observation_interval).abs() <= drift_tolerance
 }
 
 pub(super) fn refresh_interval_for(

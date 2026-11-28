@@ -222,6 +222,167 @@ fn clock_jitter_does_not_keep_adaptive_refresh_fast_for_live_or_nested_accounts(
     }
 }
 
+#[test]
+fn rolling_idle_resets_do_not_keep_adaptive_refresh_fast() {
+    let base_time = chrono::DateTime::parse_from_rfc3339("2026-11-28T17:07:09Z")
+        .unwrap()
+        .to_utc();
+    let weekly_period = 7 * 24 * 60 * 60;
+    let make_snapshot = |refreshed_at, used_percent, resets_at, period_seconds| {
+        let mut snapshot = test_snapshot("sub2api");
+        snapshot.refreshed_at = refreshed_at;
+        snapshot.quotas.push(QuotaWindow {
+            clock_offset_seconds: None,
+            id: "weekly".into(),
+            label: "Weekly".into(),
+            used_percent,
+            resets_at: Some(resets_at),
+            period_seconds,
+            format: QuotaFormat::Percent,
+            used_value: None,
+            limit_value: None,
+            unit: None,
+            estimated: false,
+            source_note: None,
+        });
+        snapshot
+    };
+    let ids = vec!["sub2api".into()];
+    for nested in [false, true] {
+        let view = |snapshot: ProviderSnapshot| {
+            let snapshot = if nested {
+                let mut parent = test_snapshot("sub2api");
+                parent.refreshed_at = snapshot.refreshed_at;
+                parent.accounts = Some(vec![AccountSnapshot {
+                    id: "14".into(),
+                    name: "Sub2API · Codex · openai-hmm".into(),
+                    snapshot,
+                }]);
+                parent
+            } else {
+                snapshot
+            };
+            UsageViewState {
+                providers: [(
+                    "sub2api".into(),
+                    ProviderViewState {
+                        snapshot: Some(snapshot),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            }
+        };
+
+        let period = chrono::Duration::seconds(weekly_period as i64);
+        // Real observed pattern: +7s then +1s offset around refreshed_at + 7d across a 162s poll,
+        // followed by a 60s idle poll. Both polls must be treated as unchanged so adaptive refresh
+        // returns to the slow interval without clearing `resets_at`.
+        let s0 = make_snapshot(
+            base_time,
+            0.0,
+            base_time + period + chrono::Duration::seconds(7),
+            weekly_period,
+        );
+        let s1 = make_snapshot(
+            base_time + chrono::Duration::seconds(162),
+            0.0,
+            base_time + chrono::Duration::seconds(162) + period + chrono::Duration::seconds(1),
+            weekly_period,
+        );
+        let s2 = make_snapshot(
+            base_time + chrono::Duration::seconds(222),
+            0.0,
+            base_time + chrono::Duration::seconds(222) + period,
+            weekly_period,
+        );
+        let mut unchanged = 0;
+        let mut interval = FAST_REFRESH_INTERVAL;
+        for (round, (prev, curr)) in [(&s0, &s1), (&s1, &s2)].into_iter().enumerate() {
+            let changed = usage_data_changed(&view(prev.clone()), &view(curr.clone()), &ids);
+            assert!(
+                !changed,
+                "rolling idle reset, nested={nested}, round={round}"
+            );
+            assert!(curr.quotas[0].resets_at.is_some());
+            interval = refresh_interval_for(interval, changed, &mut unchanged);
+        }
+        assert_eq!(interval, REFRESH_INTERVAL);
+
+        // Non-zero usage: rolling reset must still be detected as a change.
+        let active_prev = make_snapshot(base_time, 1.0, base_time + period, weekly_period);
+        let active_curr = make_snapshot(
+            base_time + chrono::Duration::seconds(60),
+            1.0,
+            base_time + chrono::Duration::seconds(60) + period,
+            weekly_period,
+        );
+        assert!(usage_data_changed(
+            &view(active_prev),
+            &view(active_curr),
+            &ids
+        ));
+
+        // Zero period or mismatched period must not ignore reset differences.
+        let zero_period_prev = make_snapshot(base_time, 0.0, base_time + period, 0);
+        let zero_period_curr = make_snapshot(
+            base_time + chrono::Duration::seconds(60),
+            0.0,
+            base_time + chrono::Duration::seconds(60) + period,
+            0,
+        );
+        assert!(usage_data_changed(
+            &view(zero_period_prev),
+            &view(zero_period_curr),
+            &ids
+        ));
+
+        // A reset far from `observed + period` (an already-started window) must still count as changed.
+        let mid_prev = make_snapshot(
+            base_time,
+            0.0,
+            base_time + chrono::Duration::days(3),
+            weekly_period,
+        );
+        let mid_curr = make_snapshot(
+            base_time + chrono::Duration::seconds(60),
+            0.0,
+            base_time + chrono::Duration::days(3) + chrono::Duration::seconds(60),
+            weekly_period,
+        );
+        assert!(usage_data_changed(&view(mid_prev), &view(mid_curr), &ids));
+
+        // Reset shift that does not match the observation interval must still count as changed.
+        let drift_prev = make_snapshot(base_time, 0.0, base_time + period, weekly_period);
+        let drift_curr = make_snapshot(
+            base_time + chrono::Duration::seconds(60),
+            0.0,
+            base_time + period + chrono::Duration::seconds(20),
+            weekly_period,
+        );
+        assert!(usage_data_changed(
+            &view(drift_prev.clone()),
+            &view(drift_curr),
+            &ids
+        ));
+
+        // Zero observation interval with a >5s reset jump must still count as changed.
+        let same_time_curr = make_snapshot(
+            base_time,
+            0.0,
+            base_time + period + chrono::Duration::seconds(30),
+            weekly_period,
+        );
+        assert!(usage_data_changed(
+            &view(drift_prev),
+            &view(same_time_curr),
+            &ids
+        ));
+    }
+}
+
 struct SlowProvider {
     id: &'static str,
     calls: Arc<AtomicUsize>,
