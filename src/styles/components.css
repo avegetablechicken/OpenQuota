@@ -29,10 +29,13 @@
   }
 
   .provider-section + .provider-section,
-  .provider-reorder-shell + .provider-reorder-shell,
-  .total-spend-section + .provider-section,
-  .total-spend-section + .provider-reorder-shell {
+  .total-spend-section + .provider-section {
     margin-top: 14px;
+  }
+
+  .provider-reorder-shell--visible ~ .provider-reorder-shell > .provider-morph-slot,
+  .total-spend-section ~ .provider-reorder-shell > .provider-morph-slot {
+    padding-top: 14px;
   }
 
   .metric {
@@ -212,10 +215,19 @@
   }
 
   :root[data-density='compact'] .provider-section + .provider-section,
-  :root[data-density='compact'] .provider-reorder-shell + .provider-reorder-shell,
-  :root[data-density='compact'] .total-spend-section + .provider-section,
-  :root[data-density='compact'] .total-spend-section + .provider-reorder-shell {
+  :root[data-density='compact'] .total-spend-section + .provider-section {
     margin-top: 8px;
+  }
+
+  :root[data-density='compact']
+    .provider-reorder-shell--visible
+    ~ .provider-reorder-shell
+    > .provider-morph-slot,
+  :root[data-density='compact']
+    .total-spend-section
+    ~ .provider-reorder-shell
+    > .provider-morph-slot {
+    padding-top: 8px;
   }
 
   :root[data-density='compact'] .settings-section {

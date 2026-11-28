@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { slide } from 'svelte/transition';
   import { usageSourceNote, type ProviderCatalogIndex } from './metrics';
+  import { springMotion } from './motion';
   import QuotaMetric from './QuotaMetric.svelte';
   import QuotaReset from './QuotaReset.svelte';
   import { quotaNow } from './pacing';
@@ -26,6 +28,7 @@
     viewMode: UsageViewMode;
     usageScope?: UsageScope;
     tokensOnly?: boolean;
+    reducedMotion?: boolean;
     onSettingsChange: (settings: AppSettings) => void;
   }
   let {
@@ -37,6 +40,7 @@
     viewMode,
     usageScope,
     tokensOnly = false,
+    reducedMotion = false,
     onSettingsChange,
   }: Props = $props();
   const definition = $derived(catalog.metric(layout.id));
@@ -129,19 +133,21 @@
   </section>
 {:else if definition?.source.kind === 'trend'}
   {#each scopedUsageHistories as scoped (scoped.scope)}
-    <UsageTrend
-      label={scopedUsageHistories.length > 1
-        ? `${PROVIDER_USAGE_SCOPE_LABELS[scoped.scope]} Trend`
-        : definition.label}
-      daily={scoped.history.daily}
-      sourceNote={usageSourceNote(
-        catalog,
-        snapshot,
-        scoped.history,
-        scoped.scope,
-        providerDisplayName,
-      )}
-    />
+    <div class="trend-scope-slot" transition:slide={springMotion(reducedMotion)}>
+      <UsageTrend
+        label={scopedUsageHistories.length > 1
+          ? `${PROVIDER_USAGE_SCOPE_LABELS[scoped.scope]} Trend`
+          : definition.label}
+        daily={scoped.history.daily}
+        sourceNote={usageSourceNote(
+          catalog,
+          snapshot,
+          scoped.history,
+          scoped.scope,
+          providerDisplayName,
+        )}
+      />
+    </div>
   {/each}
 {:else if definition?.source.kind === 'status'}
   <StatusMetric label={definition.label} metric={statusMetric} />

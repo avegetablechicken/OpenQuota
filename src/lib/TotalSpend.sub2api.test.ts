@@ -361,4 +361,38 @@ describe('TotalSpend Sub2API labels', () => {
     await rerender(props);
     expect(document.querySelector('.spend-billing-tooltip--open')).toBeNull();
   });
+
+  it('starts the scope divider outro immediately when leaving All for Device', async () => {
+    const animated: Element[] = [];
+    const originalAnimate = Element.prototype.animate;
+    Element.prototype.animate = function (this: Element, ...args) {
+      animated.push(this);
+      return originalAnimate.apply(this, args);
+    };
+    const props = {
+      providers: [
+        { id: 'codex', usageHistories: scopedUsage(100, 'localDevice') },
+        { id: 'sub2api', usageHistories: scopedUsage(200) },
+      ],
+      settings,
+      catalog: new ProviderCatalogIndex(catalog),
+      viewMode: 'all' as const,
+      onViewModeChange: vi.fn(),
+      onChange: vi.fn(),
+      onShare: vi.fn(),
+    };
+    try {
+      const view = render(TotalSpend, props);
+      const divider = view.container.querySelector('.total-card__scope-divider');
+      expect(divider).not.toBeNull();
+      animated.length = 0;
+
+      await view.rerender({ ...props, viewMode: 'localDevice' });
+
+      expect(animated).toContain(divider);
+      expect(view.container.querySelector('.total-card__scope-divider')).toBeNull();
+    } finally {
+      Element.prototype.animate = originalAnimate;
+    }
+  });
 });

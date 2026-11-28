@@ -666,17 +666,91 @@ describe('OpenQuota dashboard', () => {
 
     await chooseUsageScope('Accounts');
     expect(provider).toBeInTheDocument();
+    expect(provider.closest('.provider-reorder-shell')).toHaveClass(
+      'provider-reorder-shell--content-morph',
+    );
+    for (const block of provider.querySelectorAll('.metric-render-block')) {
+      expect(block).toHaveClass('metric-render-block--content-morph');
+    }
+    for (const metric of provider.querySelectorAll('.metric-context-target')) {
+      expect(metric).toHaveClass('metric-context-target--content-morph');
+    }
     expect(within(provider).getByRole('progressbar', { name: 'Session used' })).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
     expect(within(provider).getAllByRole('region', { name: 'Usage Trend' })).toHaveLength(1);
     expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
     expect(within(provider).getByText('Today')).toBeInTheDocument();
 
+    const accountToday = within(provider).getByText('Today');
+    await chooseUsageScope('All');
+    expect(accountToday.isConnected).toBe(true);
+
     await chooseUsageScope('Device');
     expect(provider).toBeInTheDocument();
     expect(within(provider).getByRole('progressbar', { name: 'Weekly used' })).toBeInTheDocument();
     expect(within(provider).getByRole('region', { name: 'Usage Trend' })).toBeInTheDocument();
     expect(within(provider).getByText('Today')).toBeInTheDocument();
+  });
+
+  it('preserves interleaved custom metric order in single-scope views for dual-scope providers', async () => {
+    const dualScopeState = structuredClone(codexState);
+    dualScopeState.snapshot!.usageHistories.account = structuredClone(
+      dualScopeState.snapshot!.usageHistories.localDevice!,
+    );
+    const customSettings: SettingsViewState = {
+      ...settingsState,
+      settings: {
+        ...settingsState.settings,
+        providers: settingsState.settings.providers.map((provider) =>
+          provider.id === 'codex'
+            ? {
+                ...provider,
+                metrics: [
+                  { id: 'codex.today', enabled: true, section: 'alwaysVisible', pinned: false },
+                  { id: 'codex.session', enabled: true, section: 'alwaysVisible', pinned: true },
+                  { id: 'codex.yesterday', enabled: true, section: 'alwaysVisible', pinned: false },
+                ],
+              }
+            : provider,
+        ),
+      },
+    };
+    mockInvoke((command: string) => {
+      if (command === 'get_usage_state')
+        return Promise.resolve({ providers: { codex: dualScopeState } });
+      if (command === 'get_app_settings') return Promise.resolve(customSettings);
+      if (command === 'check_for_updates')
+        return Promise.resolve({
+          available: false,
+          currentVersion: '0.1.0',
+          version: null,
+          body: null,
+          installable: true,
+          releaseUrl: 'https://github.com/deviffyy/OpenQuota/releases/latest',
+        });
+      return Promise.resolve();
+    });
+
+    render(App);
+    const provider = await screen.findByRole('group', { name: 'Codex provider' });
+    const rowOrder = () =>
+      Array.from(
+        provider.querySelectorAll(
+          '.provider-card > section > .metric-render-block .metric__heading h2, .provider-card > section > .metric-render-block .usage-row > span',
+        ),
+        (node) => node.textContent?.trim(),
+      );
+
+    expect(rowOrder()).toEqual(['Today', 'Yesterday', 'Today', 'Yesterday', 'Session']);
+
+    await chooseUsageScope('Device');
+    expect(rowOrder()).toEqual(['Today', 'Session', 'Yesterday']);
+
+    await chooseUsageScope('Accounts');
+    expect(rowOrder()).toEqual(['Today', 'Session', 'Yesterday']);
+
+    await chooseUsageScope('All');
+    expect(rowOrder()).toEqual(['Today', 'Yesterday', 'Today', 'Yesterday', 'Session']);
   });
 
   it('toggles floating window mode from the Options menu when a tray is available', async () => {

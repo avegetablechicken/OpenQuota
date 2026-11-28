@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
+  import { slide } from 'svelte/transition';
   import { computeFixedPopoverTop } from './floatingPosition';
   import Icon from './Icon.svelte';
+  import { springMotion } from './motion';
   import { sub2ApiUpstreams } from './sub2ApiUpstreams';
   import { formatSpendValue, totalSpendRingCenter } from './metricFormat';
   import { popupMenu } from './nativeMenu';
@@ -29,12 +31,21 @@
     settings: AppSettings;
     catalog: ProviderCatalogIndex;
     viewMode: UsageViewMode;
+    reducedMotion?: boolean;
     onViewModeChange: (mode: UsageViewMode) => void;
     onChange: (settings: AppSettings) => void;
     onShare: (projections: SpendProjection[]) => boolean | Promise<boolean>;
   }
-  let { providers, settings, catalog, viewMode, onViewModeChange, onChange, onShare }: Props =
-    $props();
+  let {
+    providers,
+    settings,
+    catalog,
+    viewMode,
+    reducedMotion = false,
+    onViewModeChange,
+    onChange,
+    onShare,
+  }: Props = $props();
   const keyshortcuts = dashboardKeyshortcuts();
   const providerDisplayName = (id: string) => {
     if (id === OTHERS_SPEND_ID) return 'Others';
@@ -49,6 +60,35 @@
       projectSpend(providers, settings.totalSpendPeriod, settings.totalSpendMetric, scope),
     ),
   );
+  const localProjection = $derived(
+    projections.find((projection) => projection.scope === 'localDevice') ?? null,
+  );
+  const accountProjection = $derived(
+    projections.find((projection) => projection.scope === 'account') ?? null,
+  );
+  function dividerSlide(
+    node: Element,
+    params: { duration: number; easing: (t: number) => number },
+  ) {
+    const style = getComputedStyle(node);
+    const height = Number.parseFloat(style.height) || 0;
+    const marginTop = Number.parseFloat(style.marginTop) || 0;
+    const marginBottom = Number.parseFloat(style.marginBottom) || 0;
+    return {
+      ...params,
+      css: (t: number) => {
+        const progress = Math.max(0, t);
+        return (
+          'overflow: hidden;' +
+          `opacity: ${Math.min(1, progress)};` +
+          `height: ${progress * height}px;` +
+          `margin-top: ${progress * marginTop}px;` +
+          `margin-bottom: ${progress * marginBottom}px;` +
+          'min-height: 0;'
+        );
+      },
+    };
+  }
   const inclusionNote = $derived(
     viewMode === 'all'
       ? `${scopeNote('localDevice')} ${scopeNote('account')}`
@@ -244,6 +284,109 @@
   }
 </script>
 
+{#snippet scopeSection(projection: SpendProjection)}
+  <section
+    class="total-card__scope"
+    class:total-card__scope--empty-history={projection.slices.length === 0 &&
+      !hasScopeHistory(projection.scope)}
+    aria-label={`${SPEND_SCOPE_LABELS[projection.scope]} Spend`}
+    transition:slide={springMotion(reducedMotion)}
+  >
+    {#if viewMode === 'all'}
+      <h2 transition:slide={springMotion(reducedMotion)}>
+        {SPEND_SCOPE_LABELS[projection.scope]}
+      </h2>
+    {/if}
+    {#if projection.slices.length === 0}
+      <div class="total-card__empty">
+        <span>{emptySpendMessage(settings.totalSpendMetric)}</span>
+      </div>
+    {:else}
+      <div class="total-card__body">
+        <div class="spend-ring">
+          <svg
+            viewBox={`0 0 ${TOTAL_SPEND_GEOMETRY.ringDiameter} ${TOTAL_SPEND_GEOMETRY.ringDiameter}`}
+            shape-rendering="geometricPrecision"
+            aria-hidden="true"
+          >
+            {#each spendRingArcs(projection.slices) as segment (segment.id)}
+              {@const segmentKey = billingKeyFor(projection.scope, segment.id)}
+              <path
+                role="presentation"
+                class="spend-ring__segment"
+                onpointerenter={() => (hoveredBilling = segmentKey)}
+                onpointerleave={() => {
+                  if (hoveredBilling === segmentKey) hoveredBilling = null;
+                }}
+                d={ringSectorPath(segment, TOTAL_SPEND_GEOMETRY)}
+                style={`--segment-color: ${providerSpendColor(segment.id)}`}
+              />
+            {/each}
+          </svg>
+          <div class="spend-ring__label" data-tooltip={centerTooltip(projection)}>
+            <strong>{ringCenter(projection.centerValue).primary}</strong><span
+              >{ringCenter(projection.centerValue).unit}</span
+            >
+          </div>
+        </div>
+        <div class="spend-legend">
+          {#each projection.slices as provider (provider.id)}
+            {@const billingKey = billingKeyFor(projection.scope, provider.id)}
+            {@const tooltipId = provider.otherBilling
+              ? `${chartId}-${projection.scope}-${provider.id}`
+              : undefined}
+            <div
+              class="spend-legend__row"
+              class:spend-legend__billing={provider.otherBilling}
+              use:registerNode={{ map: billingRowNodes, key: billingKey }}
+            >
+              {#if tooltipId}
+                <button
+                  type="button"
+                  aria-describedby={tooltipId}
+                  onmouseenter={() => openLegendBilling(billingKey)}
+                  onmouseleave={() => scheduleLegendBillingHide(billingKey)}
+                  onfocus={() => openLegendBilling(billingKey)}
+                  onblur={() => {
+                    if (legendBilling === billingKey) legendBilling = null;
+                  }}
+                  ><i style={`background: ${providerSpendColor(provider.id)}`}
+                  ></i>{providerDisplayName(provider.id)}</button
+                >
+              {:else}
+                <span
+                  ><i style={`background: ${providerSpendColor(provider.id)}`}
+                  ></i>{providerDisplayName(provider.id)}</span
+                >
+              {/if}<strong
+                class:spend-legend__value--hidden={provider.showValue === false}
+                aria-hidden={provider.showValue === false ? 'true' : undefined}
+                >{display(provider.value)}</strong
+              >
+              {#if provider.otherBilling}
+                <div
+                  id={tooltipId}
+                  role="tooltip"
+                  class="spend-billing-tooltip"
+                  class:spend-billing-tooltip--open={openBillingKey === billingKey}
+                  style={`top:${billingTooltipTop}px`}
+                  use:registerNode={{ map: billingTooltipNodes, key: billingKey }}
+                  onmouseenter={() => openLegendBilling(billingKey)}
+                  onmouseleave={() => scheduleLegendBillingHide(billingKey)}
+                >
+                  {#each billingLines(provider) as line, index (index)}
+                    <div>{line}</div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+  </section>
+{/snippet}
+
 <section
   class="total-spend-section"
   aria-label="Total Spend"
@@ -306,106 +449,20 @@
         >
       {/each}
     </div>
-    <div class:total-card__scopes--all={viewMode === 'all'}>
-      {#each projections as projection (projection.scope)}
-        <section
-          class="total-card__scope"
-          class:total-card__scope--empty-history={projection.slices.length === 0 &&
-            !hasScopeHistory(projection.scope)}
-          aria-label={`${SPEND_SCOPE_LABELS[projection.scope]} Spend`}
-        >
-          {#if viewMode === 'all'}
-            <h2>{SPEND_SCOPE_LABELS[projection.scope]}</h2>
-          {/if}
-          {#if projection.slices.length === 0}
-            <div class="total-card__empty">
-              <span>{emptySpendMessage(settings.totalSpendMetric)}</span>
-            </div>
-          {:else}
-            <div class="total-card__body">
-              <div class="spend-ring">
-                <svg
-                  viewBox={`0 0 ${TOTAL_SPEND_GEOMETRY.ringDiameter} ${TOTAL_SPEND_GEOMETRY.ringDiameter}`}
-                  shape-rendering="geometricPrecision"
-                  aria-hidden="true"
-                >
-                  {#each spendRingArcs(projection.slices) as segment (segment.id)}
-                    {@const segmentKey = billingKeyFor(projection.scope, segment.id)}
-                    <path
-                      role="presentation"
-                      class="spend-ring__segment"
-                      onpointerenter={() => (hoveredBilling = segmentKey)}
-                      onpointerleave={() => {
-                        if (hoveredBilling === segmentKey) hoveredBilling = null;
-                      }}
-                      d={ringSectorPath(segment, TOTAL_SPEND_GEOMETRY)}
-                      style={`--segment-color: ${providerSpendColor(segment.id)}`}
-                    />
-                  {/each}
-                </svg>
-                <div class="spend-ring__label" data-tooltip={centerTooltip(projection)}>
-                  <strong>{ringCenter(projection.centerValue).primary}</strong><span
-                    >{ringCenter(projection.centerValue).unit}</span
-                  >
-                </div>
-              </div>
-              <div class="spend-legend">
-                {#each projection.slices as provider (provider.id)}
-                  {@const billingKey = billingKeyFor(projection.scope, provider.id)}
-                  {@const tooltipId = provider.otherBilling
-                    ? `${chartId}-${projection.scope}-${provider.id}`
-                    : undefined}
-                  <div
-                    class="spend-legend__row"
-                    class:spend-legend__billing={provider.otherBilling}
-                    use:registerNode={{ map: billingRowNodes, key: billingKey }}
-                  >
-                    {#if tooltipId}
-                      <button
-                        type="button"
-                        aria-describedby={tooltipId}
-                        onmouseenter={() => openLegendBilling(billingKey)}
-                        onmouseleave={() => scheduleLegendBillingHide(billingKey)}
-                        onfocus={() => openLegendBilling(billingKey)}
-                        onblur={() => {
-                          if (legendBilling === billingKey) legendBilling = null;
-                        }}
-                        ><i style={`background: ${providerSpendColor(provider.id)}`}
-                        ></i>{providerDisplayName(provider.id)}</button
-                      >
-                    {:else}
-                      <span
-                        ><i style={`background: ${providerSpendColor(provider.id)}`}
-                        ></i>{providerDisplayName(provider.id)}</span
-                      >
-                    {/if}<strong
-                      class:spend-legend__value--hidden={provider.showValue === false}
-                      aria-hidden={provider.showValue === false ? 'true' : undefined}
-                      >{display(provider.value)}</strong
-                    >
-                    {#if provider.otherBilling}
-                      <div
-                        id={tooltipId}
-                        role="tooltip"
-                        class="spend-billing-tooltip"
-                        class:spend-billing-tooltip--open={openBillingKey === billingKey}
-                        style={`top:${billingTooltipTop}px`}
-                        use:registerNode={{ map: billingTooltipNodes, key: billingKey }}
-                        onmouseenter={() => openLegendBilling(billingKey)}
-                        onmouseleave={() => scheduleLegendBillingHide(billingKey)}
-                      >
-                        {#each billingLines(provider) as line, index (index)}
-                          <div>{line}</div>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            </div>
-          {/if}
-        </section>
-      {/each}
+    <div class="total-card__scopes" class:total-card__scopes--all={viewMode === 'all'}>
+      {#if localProjection}
+        {@render scopeSection(localProjection)}
+      {/if}
+      {#if viewMode === 'all'}
+        <div
+          class="total-card__scope-divider"
+          aria-hidden="true"
+          transition:dividerSlide={springMotion(reducedMotion)}
+        ></div>
+      {/if}
+      {#if accountProjection}
+        {@render scopeSection(accountProjection)}
+      {/if}
     </div>
   </div>
 </section>
@@ -471,14 +528,15 @@
       padding-top: 10px;
     }
 
-    .total-card__scopes--all {
-      display: grid;
-      gap: 8px;
+    .total-card__scopes {
+      display: flex;
+      flex-direction: column;
     }
 
-    .total-card__scopes--all .total-card__scope + .total-card__scope {
-      padding-top: 8px;
-      border-top: 1px solid var(--separator);
+    .total-card__scope-divider {
+      height: 1px;
+      margin: 8px 0;
+      background: var(--separator);
     }
 
     .total-card__scope h2 {
