@@ -1,8 +1,14 @@
 OpenQuota includes pacparser 1.5.1 by Manu Garg.
 
-pacparser is licensed under LGPL-3.0-or-later. Its unmodified source files are
-vendored in this directory and compiled by src-tauri/build.rs. The corresponding
-LGPL and GPL license texts are included as COPYING and GPL-3.0.txt.
+pacparser is licensed under LGPL-3.0-or-later. Its source files are vendored in
+this directory and compiled by src-tauri/build.rs. The corresponding LGPL and
+GPL license texts are included as COPYING and GPL-3.0.txt.
+
+OpenQuota modifications (2026-11-28): pacparser.c installs a QuickJS interrupt
+handler that ends each script evaluation (pacparser_init, pacparser_parse_pac_string and
+pacparser_find_proxy) after a 5-second execution budget, so a PAC script that
+never terminates fails instead of blocking its caller. Every other file is
+unmodified.
 
 Upstream source: https://github.com/manugarg/pacparser/tree/v1.5.1
 Release archive SHA-256: 88dda1833b5c467ea61d0217fa58fbc7980f7c5a856ca2af325e6a110b1c081d

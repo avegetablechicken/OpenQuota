@@ -633,7 +633,7 @@ fn string_array_setting(settings: &ProxySettings, key: CFStringRef) -> Vec<Strin
 mod tests {
     use super::{
         pac_decision_from_result, BypassRules, CredentialCache, CredentialEntry,
-        DynamicSystemProxyResolver, EnvironmentProxyConfig, HostMatch, PacDecision,
+        DynamicSystemProxyResolver, EnvironmentProxyConfig, HostMatch, PacDecision, PacResolver,
         ProxyCredentials, ProxyEndpoint, ProxyResolver, StaticProxyConfig, SystemProxyCache,
         SystemProxyConfiguration, SystemProxyResolver,
     };
@@ -972,6 +972,26 @@ mod tests {
                 unreachable!()
             }),
             "http://user_a:pass_a@shared-proxy.example:8080/"
+        );
+    }
+
+    #[test]
+    fn a_pac_script_that_never_returns_fails_and_frees_the_engine() {
+        let looping = PacResolver::new(
+            "function FindProxyForURL(url, host) { for (;;) { try { while (true) {} } catch (e) {} } }",
+        )
+        .unwrap();
+        assert_eq!(
+            looping.decision_for_url(&url("https://example.com")),
+            PacDecision::Error
+        );
+        assert!(PacResolver::new("while (true) {}").is_none());
+
+        let working =
+            PacResolver::new("function FindProxyForURL(url, host) { return 'DIRECT'; }").unwrap();
+        assert_eq!(
+            working.decision_for_url(&url("https://example.com")),
+            PacDecision::Direct
         );
     }
 

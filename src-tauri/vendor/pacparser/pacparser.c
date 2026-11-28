@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #ifdef __FreeBSD__
 #include <arpa/inet.h>
@@ -293,6 +294,33 @@ static JSContext *ctx = NULL;
 static JSValue global;
 static const char *proxy_result = NULL;
 
+// OpenQuota modification: bound every script evaluation. QuickJS polls this
+// handler while running JavaScript; once the deadline armed by the public entry
+// point passes, it raises an uncatchable "interrupted" error, so a PAC script
+// that never terminates fails instead of blocking its caller forever.
+#define PACPARSER_EXECUTION_BUDGET_MS 5000
+static long long execution_deadline_ms = 0;
+
+static long long
+monotonic_ms(void)
+{
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+  return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static void
+arm_execution_deadline(void)
+{
+  execution_deadline_ms = monotonic_ms() + PACPARSER_EXECUTION_BUDGET_MS;
+}
+
+static int
+execution_deadline_passed(JSRuntime *UNUSED(runtime), void *UNUSED(opaque))
+{
+  return monotonic_ms() >= execution_deadline_ms;
+}
+
 // Set my (client's) IP address to a custom value.
 int
 pacparser_setmyip(const char *ip)
@@ -331,6 +359,7 @@ pacparser_init()
     print_error("%s %s\n", error_prefix, "Could not create JavaScript runtime.");
     return 0;
   }
+  JS_SetInterruptHandler(rt, execution_deadline_passed, NULL);
   if (!(ctx = JS_NewContext(rt))) {
     print_error("%s %s\n", error_prefix, "Could not create JavaScript context.");
     return 0;
@@ -356,6 +385,7 @@ pacparser_init()
   JS_SetPropertyStr(ctx, global, "console", console);
 
   // Evaluate pacUtils. Utility functions required to parse pac files.
+  arm_execution_deadline();
   JSValue result = JS_Eval(ctx, pacUtils, strlen(pacUtils), "pac_utils",
                            JS_EVAL_TYPE_GLOBAL);
   if (JS_IsException(result)) {
@@ -387,6 +417,7 @@ pacparser_parse_pac_string(const char *script)
     print_error("%s %s\n", error_prefix, "PAC script is NULL.");
     return 0;
   }
+  arm_execution_deadline();
   JSValue result = JS_Eval(ctx, script, strlen(script), "PAC script",
                            JS_EVAL_TYPE_GLOBAL);
   if (JS_IsException(result)) {
@@ -470,6 +501,7 @@ pacparser_find_proxy(const char *url, const char *host)
   // Test if findProxyForURL is defined.
   const char *script = "typeof(findProxyForURL);";
   if (_debug()) print_error("DEBUG: Executing JavaScript: %s\n", script);
+  arm_execution_deadline();
   JSValue check = JS_Eval(ctx, script, strlen(script), NULL, JS_EVAL_TYPE_GLOBAL);
   const char *type_str = JS_ToCString(ctx, check);
   int is_function = type_str && strcmp("function", type_str) == 0;
