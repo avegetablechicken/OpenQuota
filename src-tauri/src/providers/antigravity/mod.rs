@@ -191,38 +191,11 @@ impl AntigravityProvider {
 
     fn refresh_quota(&self) -> Result<ProviderSnapshot, AntigravityError> {
         if let Some(server) = discover() {
-            if let Some(summary) = self
-                .client
-                .call_language_server(&server, "RetrieveUserQuotaSummary")
-            {
-                if let Some(quotas) = parse_quota_summary(&summary, Utc::now()) {
-                    let plan = self
-                        .client
-                        .call_language_server(&server, "GetUserStatus")
-                        .as_ref()
-                        .and_then(parse_plan);
-                    return Ok(snapshot(plan, quotas));
-                }
-            }
-
-            if let Some(status) = self.client.call_language_server(&server, "GetUserStatus") {
-                if let Some((plan, configs)) = parse_user_status(&status) {
-                    let quotas = build_legacy_quotas(configs, Utc::now());
-                    if !quotas.is_empty() {
-                        return Ok(snapshot(plan, quotas));
-                    }
-                }
-                if let Some(configs) = self
-                    .client
-                    .call_language_server(&server, "GetCommandModelConfigs")
-                    .as_ref()
-                    .and_then(parse_command_model_configs)
-                {
-                    let quotas = build_legacy_quotas(configs, Utc::now());
-                    if !quotas.is_empty() {
-                        return Ok(snapshot(None, quotas));
-                    }
-                }
+            if let Some((plan, quotas)) = language_server_quotas(
+                |method| self.client.call_language_server(&server, method),
+                Utc::now(),
+            ) {
+                return Ok(snapshot(plan, quotas));
             }
         }
         self.refresh_from_login()
@@ -501,6 +474,42 @@ fn remote_plan(value: &Value) -> Option<String> {
     Some(raw.strip_prefix("Google AI ").unwrap_or(raw).into())
 }
 
+/// The plan and quota pools reported by the local language server, or `None` when it reports
+/// none and the cloud should be asked instead. As in the cloud path, a summary without a Gemini
+/// pool is completed by the per-model pools the server lists.
+fn language_server_quotas(
+    call: impl Fn(&str) -> Option<Value>,
+    now: chrono::DateTime<Utc>,
+) -> Option<(Option<String>, Vec<crate::models::QuotaWindow>)> {
+    let summary = call("RetrieveUserQuotaSummary")
+        .as_ref()
+        .and_then(|value| parse_quota_summary(value, now));
+    let status = call("GetUserStatus");
+    let plan = status.as_ref().and_then(parse_plan);
+    if let Some(quotas) = summary.as_ref().filter(|quotas| has_gemini_pool(quotas)) {
+        return Some((plan, quotas.clone()));
+    }
+
+    let mut models = status
+        .as_ref()
+        .and_then(parse_user_status)
+        .map(|(_, configs)| build_legacy_quotas(configs, now))
+        .unwrap_or_default();
+    if models.is_empty() && status.is_some() {
+        if let Some(configs) = call("GetCommandModelConfigs")
+            .as_ref()
+            .and_then(parse_command_model_configs)
+        {
+            models = build_legacy_quotas(configs, now);
+        }
+    }
+    let quotas = match summary {
+        Some(summary) => merge_model_pools(summary, models),
+        None => models,
+    };
+    (!quotas.is_empty()).then_some((plan, quotas))
+}
+
 fn snapshot(plan: Option<String>, quotas: Vec<crate::models::QuotaWindow>) -> ProviderSnapshot {
     ProviderSnapshot {
         upstream_provider_id: None,
@@ -574,9 +583,60 @@ mod tests {
         access_token_candidates,
         auth::{AccessTokenCache, AntigravityToken, SharedLogin},
         client::AntigravityClient,
-        credential_failure, has_refresh_source, should_refresh_access_token, AntigravityError,
-        AntigravityProvider,
+        credential_failure, has_refresh_source, language_server_quotas,
+        should_refresh_access_token, AntigravityError, AntigravityProvider,
     };
+
+    fn language_server(responses: Value) -> impl Fn(&str) -> Option<Value> {
+        move |method| responses.get(method).cloned()
+    }
+
+    #[test]
+    fn language_server_summary_without_a_gemini_pool_takes_it_from_the_models() {
+        let (plan, quotas) = language_server_quotas(
+            language_server(json!({
+                "RetrieveUserQuotaSummary": {"groups": [{"buckets": [
+                    {"bucketId": "3p-weekly", "remainingFraction": 0.5}
+                ]}]},
+                "GetUserStatus": {"userStatus": {
+                    "userTier": {"name": "Google AI Pro"},
+                    "cascadeModelConfigData": {"clientModelConfigs": [
+                        {"label": "Gemini 3 Pro", "quotaInfo": {"remainingFraction": 0.75}}
+                    ]}
+                }}
+            })),
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(plan.as_deref(), Some("Pro"));
+        let ids: Vec<_> = quotas.iter().map(|quota| quota.id.as_str()).collect();
+        assert_eq!(ids, ["geminiPro", "claudeWeekly"]);
+        assert_eq!(quotas[0].used_percent, 25.0);
+    }
+
+    #[test]
+    fn an_empty_language_server_summary_falls_back_to_the_model_pools_or_the_cloud() {
+        let empty_summary = json!({"groups": []});
+        let (_, quotas) = language_server_quotas(
+            language_server(json!({
+                "RetrieveUserQuotaSummary": empty_summary,
+                "GetUserStatus": {"userStatus": {}},
+                "GetCommandModelConfigs": {"clientModelConfigs": [
+                    {"label": "Claude Opus", "quotaInfo": {"remainingFraction": 0.25}}
+                ]}
+            })),
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0].id, "claude");
+
+        assert!(language_server_quotas(
+            language_server(json!({"RetrieveUserQuotaSummary": empty_summary})),
+            Utc::now(),
+        )
+        .is_none());
+    }
 
     /// An in-memory shared login: each read takes the next scripted value, the last one staying;
     /// a write replaces them all unless writes fail.
