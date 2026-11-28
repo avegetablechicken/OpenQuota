@@ -58,11 +58,17 @@ pub fn read_generic_password(service: &str, account: &str) -> Result<Option<Vec<
     }
     let value = unsafe {
         let credential_ref = &*credential;
-        let bytes = slice::from_raw_parts(
-            credential_ref.CredentialBlob,
-            credential_ref.CredentialBlobSize as usize,
-        )
-        .to_vec();
+        // An empty credential has a null blob, which `from_raw_parts` forbids.
+        let bytes =
+            if credential_ref.CredentialBlob.is_null() || credential_ref.CredentialBlobSize == 0 {
+                Vec::new()
+            } else {
+                slice::from_raw_parts(
+                    credential_ref.CredentialBlob,
+                    credential_ref.CredentialBlobSize as usize,
+                )
+                .to_vec()
+            };
         CredFree(credential.cast());
         bytes
     };
