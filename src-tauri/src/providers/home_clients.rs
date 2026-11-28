@@ -131,7 +131,8 @@ fn history(
     mut accumulator: DailyUsageAccumulator,
 ) -> Result<UsageHistory, FoldInUnavailable> {
     let folded = fold(clients, context, card, &mut accumulator);
-    if !native_contributed && folded.sources.is_empty() && folded.failed {
+    // Usage in Others names no client but still counts as this refresh's history.
+    if !native_contributed && folded.sources.is_empty() && accumulator.is_empty() && folded.failed {
         return Err(FoldInUnavailable);
     }
     let source_note = source_note(native_source, &folded.sources);
@@ -517,6 +518,8 @@ mod tests {
         name: &'static str,
         native_card: Option<&'static str>,
         sources: Option<Vec<&'static str>>,
+        /// Tokens the client adds to the Card's Others, naming no source.
+        others: u64,
         asked: Mutex<Vec<String>>,
     }
 
@@ -526,6 +529,7 @@ mod tests {
                 name,
                 native_card: None,
                 sources,
+                others: 0,
                 asked: Mutex::new(Vec::new()),
             }
         }
@@ -547,11 +551,32 @@ mod tests {
         }
         fn fold_into(
             &self,
-            _context: &FoldContext<'_>,
+            context: &FoldContext<'_>,
             card_id: &str,
-            _accumulator: &mut DailyUsageAccumulator,
+            accumulator: &mut DailyUsageAccumulator,
         ) -> Result<Vec<&'static str>, FoldError> {
             self.asked.lock().unwrap().push(card_id.to_owned());
+            if self.others > 0 {
+                let tokens = crate::pricing::TokenBreakdown {
+                    input: self.others,
+                    ..Default::default()
+                };
+                let observation = crate::providers::card_usage::UsageObservation::new(
+                    context.now,
+                    Some("totally-unknown-model"),
+                    tokens,
+                    None,
+                );
+                let landed = crate::providers::card_usage::record(
+                    [observation],
+                    card_id,
+                    card_id,
+                    context.now,
+                    context.pricing,
+                    accumulator,
+                );
+                assert!(landed.others && !landed.own_series);
+            }
             self.sources.clone().ok_or_else(|| "unreadable".into())
         }
     }
@@ -673,6 +698,28 @@ mod tests {
                 });
                 assert_eq!(history.is_ok(), expected_ok, "native {native}");
             }
+        });
+    }
+
+    #[test]
+    fn usage_only_in_others_counts_when_another_client_fails() {
+        with_context(|context| {
+            let failing = Fake::new("ZCode", None);
+            let others_only = Fake {
+                others: 120,
+                ..Fake::new("Gemini CLI", Some(vec![]))
+            };
+            let clients: [&dyn HomeClient; 2] = [&others_only, &failing];
+            let history = card_history(
+                &clients,
+                context,
+                card("antigravity"),
+                "Antigravity logs",
+                |_| Ok::<_, FoldInUnavailable>(false),
+            )
+            .unwrap();
+            let others = history.other_usage.unwrap().today.unwrap();
+            assert_eq!(others.tokens, 120);
         });
     }
 

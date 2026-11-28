@@ -131,6 +131,11 @@ impl ModelAccumulator {
 }
 
 impl DailyUsageAccumulator {
+    /// Nothing was recorded: no usage, no Others and no unknown-model marker.
+    pub fn is_empty(&self) -> bool {
+        self.days.is_empty() && self.unknown_models_by_day.is_empty() && self.other_days.is_empty()
+    }
+
     /// Adds usage whose dollar cost was derived from a pricing estimate.
     #[cfg(test)]
     fn add(&mut self, date: NaiveDate, tokens: u64, cost: f64, model: &str) {
